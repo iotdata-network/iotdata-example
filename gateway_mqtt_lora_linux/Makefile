@@ -43,9 +43,8 @@ SOURCES=\
     iotdata_gateway_ddup.h iotdata_gateway_mesh.h iotdata_gateway_stat.h iotdata_gateway_exec.h \
     config_linux.h serial_linux.h mqtt_linux.h \
     $(DIR_E22XXXTXX)/e22xxxtxx.h \
-    $(DIR_IOTDATA_VARIANT)/iotdata_mesh.h \
     $(DIR_IOTDATA_VARIANT)/iotdata_variant_suite.h \
-    $(DIR_IOTDATA)/iotdata.h $(DIR_IOTDATA)/iotdata.c
+    $(DIR_IOTDATA)/iotdata_mesh.h $(DIR_IOTDATA)/iotdata.h $(DIR_IOTDATA)/iotdata.c
 
 ##
 
@@ -55,7 +54,7 @@ TEST_CFLAGS=$(CFLAGS_COMMON) $(CFLAGS_STRICT) $(CFLAGS_OPT) -I$(DIR_IOTDATA_VARI
 TEST_LIBS=-lpthread
 TEST_SOURCES=\
     iotdata_gateway_ddup.h iotdata_gateway_mesh.h \
-    $(DIR_IOTDATA_VARIANT)/iotdata_mesh.h
+    $(DIR_IOTDATA)/iotdata_mesh.h
 
 ##
 
