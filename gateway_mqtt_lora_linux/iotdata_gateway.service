@@ -1,0 +1,18 @@
+[Unit]
+Description=iotdata Lora (EBYTE E22-900T22U) to MQTT Gateway Service
+Wants=network-online.target
+After=network-online.target
+After=dev-e22900t22u.device
+BindsTo=dev-e22900t22u.device
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/iotdata-gateway --config /etc/default/iotdata-gateway
+TimeoutStopSec=15s
+KillMode=mixed
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=dev-e22900t22u.device
