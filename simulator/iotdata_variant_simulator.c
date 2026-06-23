@@ -426,38 +426,32 @@ static bool _encode_sensor(iotsim_t *sim, iotsim_sensor_t *s, iotsim_packet_t *o
  * Public API
  * ========================================================================= */
 
-void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms) {
+void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t station_base) {
     memset(sim, 0, sizeof(*sim));
     sim->rng_state = seed ? seed : 0xDEADBEEF;
     sim->time_base = time_now_ms;
 
-    /* Ensure at least one of each variant type, then fill remaining
-     * slots randomly.  Total = IOTSIM_NUM_SENSORS (16). */
-    uint8_t variants[IOTSIM_NUM_SENSORS];
-    int idx = 0;
-
-    /* One of each (9 variants) */
-    for (int v = 0; v < IOTDATA_VSUITE_COUNT && idx < IOTSIM_NUM_SENSORS; v++)
-        variants[idx++] = (uint8_t)v;
-
-    /* Fill remaining 7 slots randomly */
-    while (idx < IOTSIM_NUM_SENSORS)
-        variants[idx++] = (uint8_t)(_rng(sim) % IOTDATA_VSUITE_COUNT);
-
-    /* Shuffle (Fisher-Yates) for random ordering */
-    for (int i = IOTSIM_NUM_SENSORS - 1; i > 0; i--) {
+    /* Shuffle the whole variant pool up front. Each sensor then takes a distinct
+     * variant while the pool lasts — so when IOTSIM_NUM_SENSORS < the suite count we
+     * still get a representative, seed-varied SUBSET (not always the first few); any
+     * sensors beyond the suite count get a random variant. */
+    uint8_t pool[IOTDATA_VSUITE_COUNT];
+    for (int v = 0; v < IOTDATA_VSUITE_COUNT; v++)
+        pool[v] = (uint8_t)v;
+    for (int i = IOTDATA_VSUITE_COUNT - 1; i > 0; i--) {
         int j = (int)(_rng(sim) % (uint32_t)(i + 1));
-        uint8_t tmp = variants[i];
-        variants[i] = variants[j];
-        variants[j] = tmp;
+        uint8_t tmp = pool[i];
+        pool[i] = pool[j];
+        pool[j] = tmp;
     }
 
     /* Initialise each sensor */
     for (int i = 0; i < IOTSIM_NUM_SENSORS; i++) {
         iotsim_sensor_t *s = &sim->sensors[i];
         memset(s, 0, sizeof(*s));
-        s->variant = variants[i];
-        s->station_id = (uint16_t)(i + 1);
+        s->variant = (i < IOTDATA_VSUITE_COUNT) ? pool[i] : pool[_rng(sim) % IOTDATA_VSUITE_COUNT];
+        /* station_base lets multiple boards occupy disjoint ID ranges (0 → 1-based). */
+        s->station_id = (uint16_t)(station_base + i + 1);
 
         _init_sensor(sim, s);
 
@@ -585,7 +579,7 @@ int main(int argc, char *argv[]) {
         target = atoi(argv[2]);
 
     iotsim_t sim;
-    iotsim_init(&sim, seed, 0);
+    iotsim_init(&sim, seed, 0, 0);
 
     /* Print sensor allocation */
     printf("=== Simulator: %d sensors, seed=%" PRIu32 " ===\n\n", IOTSIM_NUM_SENSORS, seed);

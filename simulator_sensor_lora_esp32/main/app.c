@@ -40,6 +40,7 @@
 #include "esp_cpu.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_mac.h"
 #include "rom/ets_sys.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
@@ -232,8 +233,9 @@ static e22900t22_config_t e22_config = {
  * conversion from internal centi-units to iotdata_float_t correctly
  * under NO_FLOATING (they pass centi-values directly).
  */
-#define IOTSIM_TX_MIN_MS 10000 /* 10s minimum interval  */
-#define IOTSIM_TX_MAX_MS 20000 /* 20s maximum interval  */
+#define IOTSIM_NUM_SENSORS 8   /* 8 sensors/board — keeps the shared channel sane with 4 boards */
+#define IOTSIM_TX_MIN_MS 20000 /* 20s min interval (rate halved for 4-board coexistence) */
+#define IOTSIM_TX_MAX_MS 40000 /* 40s max interval */
 #define IOTDATA_NO_DECODE
 #define IOTDATA_NO_JSON
 #define IOTDATA_NO_DUMP
@@ -309,11 +311,20 @@ bool app_exec(void) {
     }
     ESP_LOGI(__tag_app, "device: e22 configured, transfer mode active");
 
-    /* --- Simulator init (hardware RNG seed for unique run each boot) --- */
-    const uint32_t seed = __RANDOM(), t0 = __MILLIS();
+    /* --- Simulator init --- Identity comes from the factory MAC so each board is
+       unique AND stable across reboots: a per-board station_base (disjoint ID band)
+       and a fixed seed (so each board's station->variant map never changes). Flash
+       the same firmware to every board; they self-separate on air. */
+    uint8_t mac[6] = { 0 };
+    (void)esp_efuse_mac_get_default(mac);
+    const uint32_t mac32 = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];
+    const uint32_t seed = mac32 ? mac32 : 0xDEADBEEFU;
+    const uint16_t station_base = (uint16_t)((mac32 % 8000U) * 8U); /* 8-wide band: stations base+1..base+IOTSIM_NUM_SENSORS */
+    const uint32_t t0 = __MILLIS();
     static iotsim_t sim; // too large for stack
-    iotsim_init(&sim, seed, t0);
-    ESP_LOGI(__tag_app, "simulator: sensors=%d, seed=%08" PRIX32 ", tx_min=%fs, tx_max=%fs", IOTSIM_NUM_SENSORS, seed, IOTSIM_TX_MIN_MS / 1000, IOTSIM_TX_MAX_MS / 1000);
+    iotsim_init(&sim, seed, t0, station_base);
+    ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed, (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTSIM_NUM_SENSORS));
+    ESP_LOGI(__tag_app, "simulator: sensors=%d, tx_interval=%u-%us", IOTSIM_NUM_SENSORS, (unsigned)(IOTSIM_TX_MIN_MS / 1000), (unsigned)(IOTSIM_TX_MAX_MS / 1000));
     for (int i = 0; i < IOTSIM_NUM_SENSORS; i++) {
         const iotsim_sensor_t *s = iotsim_sensor(&sim, i);
         ESP_LOGI(__tag_app, "  [%2d] %-18s stn=%-4" PRIu16 " bat=%" PRIu8 "%%", i, iotdata_vsuite_name(s->variant), s->station_id, s->battery);

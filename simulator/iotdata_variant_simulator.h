@@ -11,7 +11,7 @@
  *
  * Usage:
  *   iotsim_t sim;
- *   iotsim_init(&sim, seed);
+ *   iotsim_init(&sim, seed, now_ms, 0);
  *   while (...) {
  *       iotsim_packet_t pkt;
  *       if (iotsim_poll(&sim, now_ms, &pkt))
@@ -32,7 +32,9 @@
  * Configuration
  * -------------------------------------------------------------------------*/
 
+#ifndef IOTSIM_NUM_SENSORS
 #define IOTSIM_NUM_SENSORS        16
+#endif
 #ifndef IOTSIM_TX_MIN_MS
 #define IOTSIM_TX_MIN_MS          5000  /* 5s  minimum interval  */
 #endif
@@ -110,8 +112,10 @@ typedef struct {
  * -------------------------------------------------------------------------*/
 
 /* Initialise simulator with RNG seed.  Randomises sensor allocation
- * and initial readings.  time_now_ms is the starting wallclock. */
-void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms);
+ * and initial readings.  time_now_ms is the starting wallclock.
+ * station_base offsets the station IDs (station_id = station_base + index + 1),
+ * so multiple boards/instances can occupy disjoint ID ranges; pass 0 for 1-based. */
+void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t station_base);
 
 /* Poll for next ready packet.  Returns true if a packet was generated.
  * Call in a loop at your desired granularity (e.g. every 100ms).
