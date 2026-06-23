@@ -197,7 +197,7 @@ static bool e22_get_pin_aux(void) {
 static e22900t22_config_t e22_config = {
     .address = 0x0008,
     .network = 0x00,
-    .channel = 0x17, /* 850.125 + 23 = 873.125 MHz */
+    .channel = 0x0A,
     .packet_size = E22900T22_CONFIG_PACKET_SIZE_DEFAULT,
     .packet_rate = E22900T22_CONFIG_PACKET_RATE_DEFAULT,
     .crypt = E22900T22_CONFIG_CRYPT_DEFAULT,
