@@ -1,7 +1,9 @@
 
-DIR_IOTDATA=/opt/iotdata-library
-DIR_IOTDATA_VARIANT=../iotdata
-DIR_E22XXXTXX=/opt/iotdata-depend/e22900t22/include
+include ../../iotdata-common/make/config.mk
+
+DIR_IOTDATA=$(IOTDATA_SRC_LIBRARY)
+DIR_IOTDATA_VARIANT=$(IOTDATA_SRC_EXAMPLE_COMMON)
+DIR_E22XXXTXX=$(IOTDATA_SRC_DEPEND)/e22900t22/include
 
 ##
 

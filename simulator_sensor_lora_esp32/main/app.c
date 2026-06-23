@@ -39,6 +39,7 @@
 #include "esp_random.h"
 #include "esp_cpu.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "rom/ets_sys.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
@@ -46,9 +47,24 @@
 #include "freertos/task.h"
 #pragma GCC diagnostic pop
 
+/*
+ * Every cooperative wait in this app funnels through __SLEEP_MS — directly, or
+ * via __sleep_ms() which the e22 driver calls (its AUX wait loop and serial read
+ * timeouts are sleep-based, not busy loops). Patting the Task Watchdog Timer here
+ * therefore feeds it from within any blocking-but-yielding wait, so the TWDT only
+ * fires on a genuine no-yield hang. Long sleeps are chunked so even a single
+ * multi-second delay keeps patting inside the timeout window.
+ */
+#define __WDT_FEED_MS 1000U
 #define __SLEEP_MS(ms) \
     do { \
-        vTaskDelay(pdMS_TO_TICKS(ms)); \
+        uint32_t __wdt_remain = (uint32_t)(ms); \
+        do { \
+            const uint32_t __wdt_chunk = __wdt_remain < __WDT_FEED_MS ? __wdt_remain : __WDT_FEED_MS; \
+            (void)esp_task_wdt_reset(); \
+            vTaskDelay(pdMS_TO_TICKS(__wdt_chunk)); \
+            __wdt_remain -= __wdt_chunk; \
+        } while (__wdt_remain > 0); \
     } while (0)
 
 #define __MILLIS() ((uint32_t)(esp_timer_get_time() / 1000))
@@ -331,6 +347,20 @@ bool app_exec(void) {
 void app_main(void) {
 
     setbuf(stdout, NULL);
+
+    /*
+     * Subscribe this task to the Task Watchdog Timer (the TWDT itself is started
+     * at boot via CONFIG_ESP_TASK_WDT_INIT). From here on __SLEEP_MS pats it; if
+     * the app stops yielding for CONFIG_ESP_TASK_WDT_TIMEOUT_S the TWDT panics and
+     * the chip resets (CONFIG_ESP_TASK_WDT_PANIC), recovering a wedged unattended
+     * sensor. The boot path already logs ESP_RST_TASK_WDT as the reset reason.
+     */
+    const esp_err_t wdt_err = esp_task_wdt_add(NULL);
+    if (wdt_err != ESP_OK)
+        ESP_LOGE(__tag_app, "task watchdog: subscribe failed: %s", esp_err_to_name(wdt_err));
+    else
+        ESP_LOGI(__tag_app, "task watchdog: subscribed (timeout=%ds)", CONFIG_ESP_TASK_WDT_TIMEOUT_S);
+
     __SLEEP_MS(STARTUP_DELAY_MS);
     if (!app_exec()) {
         ESP_LOGE(__tag_app, "failed");

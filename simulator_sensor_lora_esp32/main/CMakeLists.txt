@@ -1,12 +1,26 @@
+# Source paths are normally injected by the Makefile (idf.py -DIOTDATA_SRC_...=...),
+# from iotdata-common/make/config.mk — the single source of truth shared with the
+# native examples. The block below only kicks in for a bare `idf.py build` (no
+# Makefile): it self-locates IOTDATA_SRC from this file's location (main/ sits at
+# <IOTDATA_SRC>/iotdata-example/simulator_sensor_lora_esp32/main).
+if(NOT DEFINED IOTDATA_SRC_LIBRARY)
+    get_filename_component(IOTDATA_SRC "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+    set(IOTDATA_SRC_LIBRARY           "${IOTDATA_SRC}/iotdata-library")
+    set(IOTDATA_SRC_DEPEND            "${IOTDATA_SRC}/iotdata-depend")
+    set(IOTDATA_SRC_EXAMPLE           "${IOTDATA_SRC}/iotdata-example")
+    set(IOTDATA_SRC_EXAMPLE_COMMON    "${IOTDATA_SRC_EXAMPLE}/iotdata")
+    set(IOTDATA_SRC_EXAMPLE_SIMULATOR "${IOTDATA_SRC_EXAMPLE}/simulator")
+endif()
+
 idf_component_register(
     SRCS "app.c"
-    PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_usb_serial_jtag 
+    PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_usb_serial_jtag
     INCLUDE_DIRS
         "."
-        "/opt/iotdata-library"               # iotdata.c/h
-        "../../iotdata"                 # iotdata_variant_suite.h
-        "/opt/iotdata-depend/e22900t22/include"        # e22xxxtxx.h
-        "../../simulator"               # simulator
+        "${IOTDATA_SRC_LIBRARY}"                    # iotdata.c/h
+        "${IOTDATA_SRC_EXAMPLE_COMMON}"             # iotdata_variant_suite.h
+        "${IOTDATA_SRC_DEPEND}/e22900t22/include"   # e22xxxtxx.h
+        "${IOTDATA_SRC_EXAMPLE_SIMULATOR}"          # simulator
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wdouble-promotion

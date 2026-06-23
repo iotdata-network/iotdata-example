@@ -1,6 +1,8 @@
 
-DIR_IOTDATA=/opt/iotdata-library
-DIR_IOTDATA_VARIANT=../iotdata
+include ../../iotdata-common/make/config.mk
+
+DIR_IOTDATA=$(IOTDATA_SRC_LIBRARY)
+DIR_IOTDATA_VARIANT=$(IOTDATA_SRC_EXAMPLE_COMMON)
 DIR_SIMULATOR=.
 
 ##
