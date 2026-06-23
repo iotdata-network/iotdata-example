@@ -319,7 +319,10 @@ bool app_exec(void) {
     (void)esp_efuse_mac_get_default(mac);
     const uint32_t mac32 = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];
     const uint32_t seed = mac32 ? mac32 : 0xDEADBEEFU;
-    const uint16_t station_base = (uint16_t)((mac32 % 8000U) * 8U); /* 8-wide band: stations base+1..base+IOTSIM_NUM_SENSORS */
+    /* Station ids must fit iotdata's 12-bit station field (<= IOTDATA_STATION_MAX = 4095);
+       give each board a disjoint IOTSIM_NUM_SENSORS-wide band within that range. */
+    const uint16_t nbands = (uint16_t)(IOTDATA_STATION_MAX / IOTSIM_NUM_SENSORS); /* 4095/8 = 511 bands */
+    const uint16_t station_base = (uint16_t)((mac32 % nbands) * (uint32_t)IOTSIM_NUM_SENSORS);
     const uint32_t t0 = __MILLIS();
     static iotsim_t sim; // too large for stack
     iotsim_init(&sim, seed, t0, station_base);
