@@ -14,4 +14,10 @@ BUILDER_DEFS = \
     -DIOTDATA_SRC_EXAMPLE_COMMON=$(IOTDATA_SRC_EXAMPLE_COMMON) \
     -DIOTDATA_SRC_EXAMPLE_SIMULATOR=$(IOTDATA_SRC_EXAMPLE_SIMULATOR)
 
+# Build-time option consumed by main/CMakeLists.txt via this (exported) env var.
+# Pin map: AE_SDC_CARRIER=1 (the default) selects the AE SDC carrier PCB pin map;
+# leave it empty for the original bench wiring (see the pin map at the top of main/app.c).
+AE_SDC_CARRIER = 1
+export AE_SDC_CARRIER
+
 include ../../iotdata-common/make/target-esp32.mk

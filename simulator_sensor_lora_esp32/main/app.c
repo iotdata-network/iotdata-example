@@ -95,7 +95,25 @@ static inline uint32_t __JITTER(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // EBYTE E22-xxxTxx DIP module GPIO and UART configuration
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// Two hardware variants, selected at build time. Define AE_SDC_CARRIER (e.g.
+// `idf.py build -D AE_SDC_CARRIER=1`, or `make AE_SDC_CARRIER=1`) to build for the
+// AE SDC carrier PCB pin map; this is the default. Set it empty (`make AE_SDC_CARRIER=`)
+// for the original bench wiring. See main/CMakeLists.txt and the Makefile.
 
+#if defined(AE_SDC_CARRIER)
+
+// AE SDC carrier PCB. Avoids USB-Serial-JTAG (GPIO18/19) and the strapping pins (GPIO2/8/9).
+#define PIN_E22_M0        GPIO_NUM_4  /* E22 pin (1) */
+#define PIN_E22_M1        GPIO_NUM_21 /* E22 pin (2) */
+#define PIN_E22_RXD       GPIO_NUM_20 /* E22 pin (3) ESP TX -> module RXD */
+#define PIN_E22_TXD       GPIO_NUM_10 /* E22 pin (4) module TXD -> ESP RX */
+#define PIN_E22_AUX       GPIO_NUM_7  /* E22 pin (5) */
+#define PIN_E22_VCC                   /* E22 pin (6) */
+#define PIN_E22_GND                   /* E22 pin (7) */
+
+#else
+
+// Original bench wiring.
 #define PIN_E22_M0        GPIO_NUM_5 /* E22 pin (1) */
 #define PIN_E22_M1        GPIO_NUM_6 /* E22 pin (2) */
 #define PIN_E22_RXD       GPIO_NUM_7 /* E22 pin (3) ESP TX -> module RXD */
@@ -103,6 +121,8 @@ static inline uint32_t __JITTER(void) {
 #define PIN_E22_AUX       GPIO_NUM_9 /* E22 pin (5) */
 #define PIN_E22_VCC                  /* E22 pin (6) */
 #define PIN_E22_GND                  /* E22 pin (7) */
+
+#endif
 
 #define E22_UART          UART_NUM_1
 #define E22_UART_BUF_SIZE 512

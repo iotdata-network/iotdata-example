@@ -12,6 +12,25 @@ if(NOT DEFINED IOTDATA_SRC_LIBRARY)
     set(IOTDATA_SRC_EXAMPLE_SIMULATOR "${IOTDATA_SRC_EXAMPLE}/simulator")
 endif()
 
+# Pin map variant: AE_SDC_CARRIER (default 1, i.e. on) selects the AE SDC carrier PCB
+# pin map in app.c; set it empty (or 0) for the original bench wiring. Resolved from
+# `idf.py -D AE_SDC_CARRIER=...` or the AE_SDC_CARRIER environment variable exported by
+# the Makefile; defaults to 1.
+if(NOT DEFINED AE_SDC_CARRIER)
+    if(DEFINED ENV{AE_SDC_CARRIER})
+        set(AE_SDC_CARRIER "$ENV{AE_SDC_CARRIER}")
+    else()
+        set(AE_SDC_CARRIER "1")
+    endif()
+endif()
+if(AE_SDC_CARRIER)
+    set(carrier_defs "AE_SDC_CARRIER")
+    message(STATUS "app: pin map = AE SDC carrier (-D AE_SDC_CARRIER)")
+else()
+    set(carrier_defs "")
+    message(STATUS "app: pin map = original bench wiring")
+endif()
+
 idf_component_register(
     SRCS "app.c"
     PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_usb_serial_jtag
@@ -22,6 +41,7 @@ idf_component_register(
         "${IOTDATA_SRC_DEPEND}/e22900t22/include"   # e22xxxtxx.h
         "${IOTDATA_SRC_EXAMPLE_SIMULATOR}"          # simulator
 )
+target_compile_definitions(${COMPONENT_LIB} PRIVATE ${carrier_defs})
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wdouble-promotion
     -Werror=double-promotion
