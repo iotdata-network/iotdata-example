@@ -10,3 +10,7 @@ CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM=3
 # __SLEEP_MS; see main/app.c.
 CONFIG_ESP_TASK_WDT_PANIC=y
 
+# Reproducible build: strip absolute build paths and timestamps so identical
+# sources produce a byte-identical binary.
+CONFIG_APP_REPRODUCIBLE_BUILD=y
+
