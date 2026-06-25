@@ -431,10 +431,13 @@ void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t st
     sim->rng_state = seed ? seed : 0xDEADBEEF;
     sim->time_base = time_now_ms;
 
-    /* Shuffle the whole variant pool up front. Each sensor then takes a distinct
-     * variant while the pool lasts — so when IOTSIM_NUM_SENSORS < the suite count we
-     * still get a representative, seed-varied SUBSET (not always the first few); any
-     * sensors beyond the suite count get a random variant. */
+    /* Shuffle the whole variant pool up front, then take the first
+     * IOTSIM_VARIANT_TYPES of it as this instance's PALETTE. The live sensors are
+     * spread across the palette round-robin (so e.g. 8 sensors over 4 types = 2
+     * each, each with independent readings). Seeding per board (e.g. from the MAC)
+     * makes a fleet pick different palettes, so the suite spreads across the fleet
+     * instead of every board carrying nearly all types — which reads as correlated
+     * on air. A full-suite palette (the default) reproduces the old behaviour. */
     uint8_t pool[IOTDATA_VSUITE_COUNT];
     for (int v = 0; v < IOTDATA_VSUITE_COUNT; v++)
         pool[v] = (uint8_t)v;
@@ -444,12 +447,19 @@ void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t st
         pool[i] = pool[j];
         pool[j] = tmp;
     }
+    int palette_n = IOTSIM_VARIANT_TYPES;
+    if (palette_n > IOTDATA_VSUITE_COUNT)
+        palette_n = IOTDATA_VSUITE_COUNT;
+    if (palette_n > IOTSIM_NUM_SENSORS)
+        palette_n = IOTSIM_NUM_SENSORS;
+    if (palette_n < 1)
+        palette_n = 1;
 
     /* Initialise each sensor */
     for (int i = 0; i < IOTSIM_NUM_SENSORS; i++) {
         iotsim_sensor_t *s = &sim->sensors[i];
         memset(s, 0, sizeof(*s));
-        s->variant = (i < IOTDATA_VSUITE_COUNT) ? pool[i] : pool[_rng(sim) % IOTDATA_VSUITE_COUNT];
+        s->variant = pool[i % palette_n];
         /* station_base lets multiple boards occupy disjoint ID ranges (0 → 1-based). */
         s->station_id = (uint16_t)(station_base + i + 1);
 

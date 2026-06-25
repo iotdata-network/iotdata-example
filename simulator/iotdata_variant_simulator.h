@@ -35,6 +35,15 @@
 #ifndef IOTSIM_NUM_SENSORS
 #define IOTSIM_NUM_SENSORS        16
 #endif
+#ifndef IOTSIM_VARIANT_TYPES
+/* Distinct variant types this instance carries (its "palette"). The pool is
+ * shuffled per seed and the first IOTSIM_VARIANT_TYPES taken; the live sensors
+ * are spread across them (round-robin). Set this < the suite count so a fleet of
+ * instances (each seeded from its own MAC) spreads the suite out, instead of
+ * every board carrying nearly all types (which looks correlated on air).
+ * Defaults to the whole suite. */
+#define IOTSIM_VARIANT_TYPES      IOTDATA_VSUITE_COUNT
+#endif
 #ifndef IOTSIM_TX_MIN_MS
 #define IOTSIM_TX_MIN_MS          5000  /* 5s  minimum interval  */
 #endif
