@@ -64,12 +64,25 @@ upstand_h = 5;     // block height (how far it enters the cup)
 fit_clear = 0.075;   // per-side clearance, cup cavity over the block
                    // (smaller = tighter; 0.15 was loose, 0 -> press fit)
 
-// === Base foot + stability flanges ===
-// The foot core matches the cup footprint (the rim seats on it); the flanges
-// are arms reaching out beyond the walls to widen the footprint so the tall
-// case will not tip. The depth (Y, 21 mm) is the tippy axis, so the +/-Y arms
-// matter most — keep both pairs on unless space is tight.
-plate_t      = 4;     // foot / flange thickness
+// === Base foot ===
+plate_t      = 5;     // foot thickness
+
+// --- House style: aperiodic monotile foot (the "hat" einstein tile) ---------
+// The foot footprint is the hat monotile rather than a plain plate. It still
+// widens the base well beyond the walls (so the tall case will not tip) but
+// does it with the monotile silhouette. The native polygon (MONO_PTS, below)
+// is 52.75 x 77.22 mm; its long axis runs along Y, which is the tippy DEPTH
+// axis — exactly where the extra reach is wanted, so the default is unrotated.
+// The case is seated in the hat's wide "head" (mono_seat, max-clearance spot);
+// mono_dx/dy/rot/scale nudge it from there. The cup-seat rectangle is unioned
+// in regardless, so the rim is always fully supported even if you tune it off.
+base_monotile = true;   // true = hat-monotile foot; false = legacy rect+flanges
+mono_scale    = 1.0;    // scale on the native polygon (1.0 -> 52.75 x 77.22 mm)
+mono_dx       = 5;      // nudge the foot under the case, X (mm)        -- TUNE
+mono_dy       = 5;      // nudge the foot under the case, Y (mm)        -- TUNE
+mono_rot      = -50;      // rotate the foot under the case (deg; 0 = long axis up Y)
+
+// --- Legacy stability flanges (used only when base_monotile = false) ---------
 flange_out   = 14;    // how far each arm reaches beyond the case wall
 flange_round = 4;     // arm corner radius
 flange_x     = true;  // arms on the +/-X (narrow) faces
@@ -233,18 +246,45 @@ module top_print() {
 // Base (the foot) — modelled foot on the bed, z = 0 underside
 // ---------------------------------------------------------------------------
 
-// 2-D foot footprint: core plate the cup seats on, plus the flange arms.
+// The "hat" aperiodic monotile (einstein tile), as digitised — 13 vertices,
+// twelve edges of one unit and one doubled edge. Native bbox 52.75 x 77.22 mm.
+MONO_PTS = [
+    [40.04, 78.63], [54.16, 70.45], [54.15, 37.83], [40.01, 29.67],
+    [48.15, 15.53], [40.00,  1.41], [25.87,  9.58], [25.88, 25.89],
+    [ 9.56, 25.90], [ 1.41, 40.04], [15.54, 48.19], [15.55, 64.51],
+    [31.86, 64.50]
+];
+// Seat point in native polygon coords: where the case footprint sits in the
+// hat's wide head with the most clearance (31 x 21 fits with ~3.6 mm at 1.0).
+// Translate-then-scale about this point, so the case stays put at any scale.
+mono_seat_x = 34.91;
+mono_seat_y = 50.41;
+
+// Monotile foot outline, centred so mono_seat lands on the case origin.
+module monotile_2d() {
+    scale(mono_scale)
+        translate([-mono_seat_x, -mono_seat_y])
+            polygon(points = MONO_PTS);
+}
+
+// 2-D foot footprint: the cup-seat rectangle (always, so the rim is supported)
+// unioned with either the monotile or the legacy flange arms.
 module foot_2d() {
     union() {
         rrect_c(ext_w, ext_d, shell_round);                       // core (cup seat)
-        if (flange_y) rrect_c(ext_w, ext_d + 2 * flange_out, flange_round);  // +/-Y arms
-        if (flange_x) rrect_c(ext_w + 2 * flange_out, ext_d, flange_round);  // +/-X arms
+        if (base_monotile)
+            translate([mono_dx, mono_dy]) rotate([0, 0, mono_rot]) monotile_2d();
+        else {
+            if (flange_y) rrect_c(ext_w, ext_d + 2 * flange_out, flange_round);  // +/-Y arms
+            if (flange_x) rrect_c(ext_w + 2 * flange_out, ext_d, flange_round);  // +/-X arms
+        }
     }
 }
 
 // Optional mounting holes near each arm tip (axis Z, through the foot).
+// Legacy-flange only — the monotile foot stays a clean silhouette.
 module foot_holes() {
-    if (flange_hole_d > 0) {
+    if (!base_monotile && flange_hole_d > 0) {
         edge = flange_round + flange_hole_d / 2 + 1;   // sit clear of the rounded tip
         if (flange_y) for (s = [-1, 1])
             translate([0, s * (ext_d / 2 + flange_out - edge), -1])
@@ -275,10 +315,12 @@ module base() {
 // ---------------------------------------------------------------------------
 echo(str("cavity = ", cav_w, " x ", cav_d, " x ", cav_h,
          " mm; outer = ", ext_w, " x ", ext_d, " mm; wall ", wall, " / roof ", roof_t));
-echo(str("assembled height ~ ", plate_t + cav_h + roof_t,
-         " mm; footprint with flanges = ",
-         ext_w + (flange_x ? 2 * flange_out : 0), " x ",
-         ext_d + (flange_y ? 2 * flange_out : 0), " mm"));
+echo(str("assembled height ~ ", plate_t + cav_h + roof_t, " mm; foot = ",
+         base_monotile
+           ? str("hat monotile x", mono_scale, " (~", round(52.75 * mono_scale),
+                 " x ", round(77.22 * mono_scale), " mm)")
+           : str("flanged ", ext_w + (flange_x ? 2 * flange_out : 0), " x ",
+                 ext_d + (flange_y ? 2 * flange_out : 0), " mm")));
 echo(str("SMA hole = ", sma_hole_d, " mm, ", sma_inset_w,
          " mm in from the ", sma_side < 0 ? "-X" : "+X",
          " width wall (x=", sma_x, "), y=", sma_y));
@@ -312,7 +354,8 @@ else if (part == "section") {
     }
 }
 else if (part == "all") {
+    foot_span = base_monotile ? 52.75 * mono_scale : ext_w + 2 * flange_out;
     color("Gainsboro") base();
-    translate([ext_w + 2 * flange_out + 20, 0, 0])
+    translate([foot_span + 25, 0, 0])
         color("LightSteelBlue") top_body();
 }

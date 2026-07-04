@@ -365,6 +365,77 @@ device: e22 tx #000059: stn=14   wind_station       seq=000003 bytes=11  hex: 60
 device: e22 tx #000060: stn=11   radiation_monitor  seq=000004 bytes=13  hex: 80 0B 00 04 2C D0 03 60 05 DC D5 EA A0
 ```
 
+### Hardware — carrier PCB and enclosure
+
+The transmitter runs on a small carrier PCB (`GEN-LORA-I2C`, rev 2) that joins an
+**ESP32-C3 SuperMini** to an **EBYTE E22-xxxTxxD** DIP LoRa module (SMA antenna),
+adds the RC/decoupling the E22 wants, and breaks the spare ESP32-C3 GPIO out to a
+header. Design source, fabrication PDF, and a bench photo of an assembled
+prototype are in [`simulator_sensor_lora_esp32/assets/`](simulator_sensor_lora_esp32/assets/)
+(EasyEDA Pro `.epro` project + `.pdf`/`.png`/`.jpg`).
+
+<table>
+  <tr>
+    <td width="50%"><img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c-revision-2.png" alt="GEN-LORA-I2C carrier PCB render" /></td>
+    <td width="50%"><img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c-revision-2.jpg" alt="Assembled board: ESP32-C3 + EBYTE E22-900T22D" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>PCB render (GEN-LORA-I2C R02)</em></td>
+    <td align="center"><em>Assembled prototype: EBYTE E22-900T22D + ESP32-C3</em></td>
+  </tr>
+</table>
+
+The E22 is driven over `UART1` using the **AE SDC carrier** pin map, which is the
+default build (`AE_SDC_CARRIER=1`). It deliberately avoids the USB-Serial-JTAG
+pins (GPIO18/19) and the strapping pins (GPIO2/8/9):
+
+| E22 pin | Signal | ESP32-C3 GPIO |
+| ------- | ------ | ------------- |
+| 1       | M0     | GPIO4         |
+| 2       | M1     | GPIO21        |
+| 3       | RXD    | GPIO20 (ESP TX) |
+| 4       | TXD    | GPIO10 (ESP RX) |
+| 5       | AUX    | GPIO7         |
+| 6 / 7   | VCC / GND | 3V3 / GND  |
+
+Building with `AE_SDC_CARRIER=` (empty) selects the original hand-wired bench pin
+map (M0/M1/RXD/TXD/AUX on GPIO5–9) instead. See `main/app.c` and
+`main/CMakeLists.txt`.
+
+The board sits in a 3D-printed **vertical enclosure**
+(`gen_lora_i2c_case.scad`), designed to stand on its short end with the antenna
+pointing up. It prints in two parts — a `top` cup (closed roof carrying the SMA
+pass-through, with a USB-C slot in one side wall) and a `base` foot. The board
+drops into the cup, the SMA bulkhead nut clamps it to the roof, and the cup then
+press-fits onto the base while the board's bottom edge locates in a slot so the
+USB-C cable can't waggle it. The foot is an aperiodic **"hat" einstein-monotile**
+silhouette that widens the footprint so the tall, narrow case won't topple, and a
+side face carries an embossed "AE" logo.
+
+<table>
+  <tr>
+    <td width="50%"><img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c_case_assembly.png" alt="Enclosure assembly render" /></td>
+    <td width="50%"><img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c_case_section.png" alt="Enclosure section showing the internal board pocket" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Enclosure (base + press-fit cup, antenna up)</em></td>
+    <td align="center"><em>Section: internal board pocket</em></td>
+  </tr>
+</table>
+
+Internal cavity 26 × 16 × 77.5 mm, outer 31 × 21 mm, 2.5 mm walls/roof, ~85 mm
+assembled height; SMA pass-through 6.5 mm, USB-C slot 9.5 × 3.5 mm. Every fit
+dimension (press-fit clearance, SMA and USB-C positions) is a tunable at the top
+of the `.scad` — expect to nudge them after a first test print. Ready-to-slice
+STLs are provided (`gen_lora_i2c_case_top.stl`, `gen_lora_i2c_case_base.stl`); to
+regenerate a single part:
+
+```bash
+cd simulator_sensor_lora_esp32/assets
+openscad -o gen_lora_i2c_case_top.stl  -D 'part="top"'  gen_lora_i2c_case.scad
+openscad -o gen_lora_i2c_case_base.stl -D 'part="base"' gen_lora_i2c_case.scad
+```
+
 ## gateway_mqtt_lora_linux/ — Linux LoRa-to-MQTT Gateway
 
 A Linux gateway that receives iotdata packets from an EBYTE E22-900T22U module
