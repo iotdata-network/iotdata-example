@@ -444,6 +444,11 @@ side face carries an embossed "AE" logo.
   </tr>
 </table>
 
+<p align="center">
+  <img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c_assembled.jpg" alt="Built transmitter: printed enclosure with antenna, USB-C powered from a mains adapter" width="60%" /><br />
+  <em>The finished transmitter — printed enclosure with antenna up and the embossed "ae" logo, USB-C powered from a mains adapter</em>
+</p>
+
 Internal cavity 26 × 16 × 77.5 mm, outer 31 × 21 mm, 2.5 mm walls/roof, ~85 mm
 assembled height; SMA pass-through 6.5 mm, USB-C slot 9.5 × 3.5 mm. Every fit
 dimension (press-fit clearance, SMA and USB-C positions) is a tunable at the top
