@@ -369,21 +369,42 @@ device: e22 tx #000060: stn=11   radiation_monitor  seq=000004 bytes=13  hex: 80
 
 The transmitter runs on a small carrier PCB (`GEN-LORA-I2C`, rev 2) that joins an
 **ESP32-C3 SuperMini** to an **EBYTE E22-xxxTxxD** DIP LoRa module (SMA antenna),
-adds the RC/decoupling the E22 wants, and breaks the spare ESP32-C3 GPIO out to a
-header. Design source, fabrication PDF, and a bench photo of an assembled
-prototype are in [`simulator_sensor_lora_esp32/assets/`](simulator_sensor_lora_esp32/assets/)
-(EasyEDA Pro `.epro` project + `.pdf`/`.png`/`.jpg`).
+adds the decoupling the E22 wants, and breaks out a 4-pin **I2C sensor header**
+(SDA/SCL on GPIO5/GPIO6 with 4.7 kΩ pull-ups) plus a spare-GPIO header. In this
+example the sensors are all simulated, so the I2C header is unused — it is there
+for **expansion**: populate it with a real I2C sensor and the same board becomes
+an actual sensor transmitter rather than a simulated one. The full design lives
+in [`simulator_sensor_lora_esp32/assets/`](simulator_sensor_lora_esp32/assets/):
+
+| File | Contents |
+| ---- | -------- |
+| `gen_lora_i2c-revision-2--design.epro`     | EasyEDA Pro project (schematic + layout source) |
+| `gen_lora_i2c-revision-2--schematic.png`   | Schematic |
+| `gen_lora_i2c-revision-2--pcb-3d.png`      | 3D render of the board |
+| `gen_lora_i2c-revision-2--pcb-2d.pdf`      | 2D fabrication drawing |
+| `gen_lora_i2c-revision-2--pcb-gerber.zip`  | Gerber + drill files for fabrication |
+| `gen_lora_i2c-revision-1--assembled.jpg`   | Photo of an assembled rev 1 board |
 
 <table>
   <tr>
-    <td width="50%"><img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c-revision-2.png" alt="GEN-LORA-I2C carrier PCB render" /></td>
-    <td width="50%"><img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c-revision-2.jpg" alt="Assembled board: ESP32-C3 + EBYTE E22-900T22D" /></td>
+    <td width="50%"><img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c-revision-2--pcb-3d.png" alt="GEN-LORA-I2C carrier PCB render" /></td>
+    <td width="50%"><img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c-revision-1--assembled.jpg" alt="Assembled board: ESP32-C3 + EBYTE E22-900T22D" /></td>
   </tr>
   <tr>
     <td align="center"><em>PCB render (GEN-LORA-I2C R02)</em></td>
-    <td align="center"><em>Assembled prototype: EBYTE E22-900T22D + ESP32-C3</em></td>
+    <td align="center"><em>Assembled board (rev 1): EBYTE E22-900T22D + ESP32-C3</em></td>
   </tr>
 </table>
+
+The photo is a **rev 1** board; the render, schematic, and fabrication files are
+**rev 2**. Rev 2 moves the spare-GPIO breakouts and VCC/GND onto a 3×2 header (H3,
+rev 1 had them as bare board holes) and otherwise just renames the board and tidies
+the layout/routing — electrically the two are the same.
+
+<p align="center">
+  <img src="simulator_sensor_lora_esp32/assets/gen_lora_i2c-revision-2--schematic.png" alt="GEN-LORA-I2C schematic" width="90%" /><br />
+  <em>Schematic: ESP32-C3 SuperMini, E22 module header (H2), I2C sensor header (H1), spare-GPIO header (H3)</em>
+</p>
 
 The E22 is driven over `UART1` using the **AE SDC carrier** pin map, which is the
 default build (`AE_SDC_CARRIER=1`). It deliberately avoids the USB-Serial-JTAG
