@@ -128,8 +128,7 @@ static const char *__tag_bme280 = "bme280";
         } while (__wdt_remain > 0); \
     } while (0)
 
-/* Fixed-point rendering for logs: 2135 -> "21.35". Avoids pulling in float
- * printf. */
+/* Fixed-point rendering for logs: 2135 -> "21.35". Avoids pulling in float printf. */
 #define CENTI_STR_MAX 16
 static const char *centi_str(char *const buf, const size_t size, const int32_t centi) {
     const int32_t abs = centi < 0 ? -centi : centi;
@@ -187,11 +186,11 @@ void serial_flush(void) {
     (void)uart_flush(E22_UART);
 }
 int serial_write(const uint8_t *buffer, const int length) {
-    __SLEEP_MS(50);
+    __SLEEP_MS(50); // XXX
     return uart_write_bytes(E22_UART, buffer, (size_t)length);
 }
 int serial_read(uint8_t *buffer, const int length, const uint32_t timeout_ms) {
-    __SLEEP_MS(50);
+    __SLEEP_MS(50); // XXX
     return uart_read_bytes(E22_UART, buffer, (size_t)length, pdMS_TO_TICKS(timeout_ms));
 }
 
@@ -423,8 +422,7 @@ static bool bme280_read(const uint8_t reg, uint8_t *const data, const size_t len
 }
 
 static bool bme280_write(const uint8_t reg, const uint8_t value) {
-    const uint8_t buffer[2] = { reg, value };
-    const esp_err_t err = i2c_master_transmit(bme280_i2c_dev, buffer, sizeof(buffer), BME280_I2C_TIMEOUT_MS);
+    const esp_err_t err = i2c_master_transmit(bme280_i2c_dev, (uint8_t[2]) { reg, value }, 2, BME280_I2C_TIMEOUT_MS);
     if (err != ESP_OK) {
         ESP_LOGE(__tag_bme280, "i2c write (reg=0x%02" PRIX8 ", val=0x%02" PRIX8 "): %s", reg, value, esp_err_to_name(err));
         return false;
@@ -635,8 +633,7 @@ static bool bme280_measure(bme280_calib_t *const calib, bme280_reading_t *const 
             ESP_LOGW(__tag_bme280, "sample %d failed", i);
             continue;
         }
-        /* temperature first: it computes t_fine, which the other two compensations
-         * use */
+        /* temperature first: it computes t_fine, which the other two compensations use */
         temperature[count] = bme280_compensate_temperature(calib, adc_T);
         pressure[count] = bme280_compensate_pressure(calib, adc_P);
         humidity[count] = bme280_compensate_humidity(calib, adc_H);
@@ -847,8 +844,7 @@ static bool app_cycle(void) {
         state.radio_configured = true;
         transmitted = lora_transmit(packet.buf, packet.len);
     }
-    lora_end(ready); /* on every path: the module must not be left awake for the
-                        sleep ahead */
+    lora_end(ready); /* on every path: the module must not be left awake for the sleep ahead */
 
     if (transmitted)
         state.tx_count++;
@@ -868,9 +864,8 @@ static void app_sleep(const int64_t time_start_us) {
 
     ESP_LOGI(__tag_app, "cycle %" PRIu32 " done: tx=%" PRIu32 " errors=%" PRIu32 " awake=%" PRId64 "ms, sleeping %" PRId64 "ms", state.cycles, state.tx_count, state.tx_errors, awake_ms, sleep_ms);
 
-    /* The USB-Serial-JTAG console goes down with the chip and takes anything
-       still queued with it, so give the host a moment to collect this cycle's
-       output. */
+    /* The USB-Serial-JTAG console goes down with the chip and takes anything still
+       queued with it, so give the host a moment to collect this cycle's output. */
     __SLEEP_MS(CONSOLE_DRAIN_MS);
 
     lora_hold();
@@ -891,9 +886,9 @@ void app_main(void) {
      * unattended sensor — the reset reason is logged on the way back up, and the
      * cycle simply repeats.
      */
-    const esp_err_t wdt_err = esp_task_wdt_add(NULL);
-    if (wdt_err != ESP_OK)
-        ESP_LOGE(__tag_app, "task watchdog: subscribe failed: %s", esp_err_to_name(wdt_err));
+    const esp_err_t err = esp_task_wdt_add(NULL);
+    if (err != ESP_OK)
+        ESP_LOGE(__tag_app, "task watchdog: subscribe failed: %s", esp_err_to_name(err));
 
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     const bool restarted = (reset_reason != ESP_RST_DEEPSLEEP) || state.magic != STATE_MAGIC;

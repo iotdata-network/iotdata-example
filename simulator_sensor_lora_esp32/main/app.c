@@ -229,7 +229,15 @@ static e22900t22_config_t e22_config = {
     .transmit_power = E22900T22_CONFIG_TRANSMIT_POWER_DEFAULT,
     .transmission_method = E22900T22_CONFIG_TRANSMISSION_METHOD_DEFAULT,
     .relay_enabled = E22900T22_CONFIG_RELAY_ENABLED_DEFAULT,
-    .listen_before_transmit = true, // XXX
+    /* Off, for antenna comparison runs. LBT defers a transmission when the board hears
+       the channel busy — but whether it hears the others is a function of its own receive
+       performance, so the board with the best antenna defers most and transmits least.
+       That puts an antenna-dependent term in the transmit path which cannot be separated
+       from the link performance being measured. With it off, every board transmits on
+       schedule and the extra collisions land on all of them equally, so they average out
+       (and per-packet RSSI at the gateway is unaffected by collisions either way). Set
+       back to true for ordinary polite operation on a shared channel. */
+    .listen_before_transmit = false,
     .rssi_packet = true,
     .rssi_channel = true,
     .read_timeout_command = E22900T22_CONFIG_READ_TIMEOUT_COMMAND_DEFAULT,
