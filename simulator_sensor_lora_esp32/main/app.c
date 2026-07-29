@@ -92,6 +92,7 @@ static inline uint32_t __JITTER(void) {
 #define RSSI_INTERVAL_MS  (5 * 1000)
 #define POLL_INTERVAL_MS  100 /* simulator poll granularity */
 #define STATUS_EVERY_N_TX 50  /* print status every N transmissions */
+#define TEST_FIXED_PAYLOAD 0  /* PHY-crack scaffold, DISABLED. Set to 1 to bypass the simulator and transmit a fixed known 16-byte ramp (see app_exec) — useful for sniffing/decoding the raw LoRa PHY. */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // EBYTE E22-xxxTxx DIP module GPIO and UART configuration
@@ -332,6 +333,31 @@ bool app_exec(void) {
         return false;
     }
     ESP_LOGI(__tag_app, "device: e22 configured, transfer mode active");
+
+#if TEST_FIXED_PAYLOAD
+    /* PHY-crack test (DISABLED via TEST_FIXED_PAYLOAD=0): transmit a fixed, known,
+       fixed-length payload fast so the raw LoRa PHY can be sniffed/decoded off-box.
+       For a clean run also set .listen_before_transmit=false and pick an in-band
+       channel (863-870MHz, e.g. 0x0F=865.125). */
+    {
+        static const uint8_t testbuf[16] = {
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        };
+        ESP_LOGI(__tag_app, "TEST MODE: fixed 16B ramp 00..0F, ch=0x%02X, every 2s", (unsigned)e22_config.channel);
+        for (;;) {
+            char h[64];
+            for (size_t i = 0, o = 0; i < sizeof(testbuf); i++)
+                o += (size_t)snprintf(&h[o], sizeof(h) - o, "%02X", testbuf[i]);
+            if (device_packet_write(testbuf, (int)sizeof(testbuf)))
+                tx_count++;
+            else
+                tx_errors++;
+            ESP_LOGI(__tag_app, "device: e22 TESTtx #%06" PRIu32 " len=16 hex=%s", tx_count, h);
+            __SLEEP_MS(2000);
+        }
+    }
+#endif
 
     /* --- Simulator init --- Identity comes from the factory MAC so each board is
        unique AND stable across reboots: a per-board station_base (disjoint ID band)
