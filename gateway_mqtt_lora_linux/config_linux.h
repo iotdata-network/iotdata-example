@@ -91,11 +91,11 @@ serial_bits_t config_get_bits(const char *key, const serial_bits_t default_value
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void __config_load_file(const char *filename) {
+static bool __config_load_file(const char *filename) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
         fprintf(stderr, "config: could not load '%s'\n", filename);
-        return;
+        return false;
     }
     char line[CONFIG_MAX_STRING];
     while (fgets(line, sizeof(line), file)) {
@@ -117,6 +117,7 @@ static void __config_load_file(const char *filename) {
         }
     }
     fclose(file);
+    return true;
 }
 
 typedef struct {
@@ -147,13 +148,19 @@ void config_help(const char *program, const struct option *options_long, const c
 bool config_load(const char *config_file, const int argc, char *argv[], const struct option *options_long) {
     int c;
     int option_index = 0;
+    bool config_file_explicit = false;
     optind = 0;
     while ((c = getopt_long(argc, (char **)argv, "", options_long, &option_index)) != -1)
         if (c == 0 && strcmp(options_long[option_index].name, "config") == 0) {
             config_file = optarg;
+            config_file_explicit = true;
             break;
         }
-    __config_load_file(config_file);
+    /* A config file named explicitly with --config must be readable. Falling back to
+       built-in defaults would silently apply the wrong settings and, for the gateway,
+       reconfigure the attached radio onto the wrong channel. */
+    if (!__config_load_file(config_file) && config_file_explicit)
+        return false;
     optind = 0;
     while ((c = getopt_long(argc, (char **)argv, "", options_long, &option_index)) != -1)
         if (c == 0 && strcmp(options_long[option_index].name, "config") != 0)

@@ -80,10 +80,32 @@ format:
 
 ##
 
+DEV_PACKAGES=libmosquitto-dev libcjson-dev
+DEV_PACKAGES_ARMHF=$(addsuffix :armhf,$(DEV_PACKAGES))
+install-dev:
+	apt install -y $(DEV_PACKAGES)
+remove-dev:
+	apt purge -y $(DEV_PACKAGES)
+install-dev-armhf:
+	dpkg --add-architecture armhf
+	apt update
+	apt install -y gcc-arm-linux-gnueabihf $(DEV_PACKAGES_ARMHF)
+remove-dev-armhf:
+	apt purge -y gcc-arm-linux-gnueabihf $(DEV_PACKAGES_ARMHF)
+	dpkg --remove-architecture armhf
+	apt update
+.PHONY: install-dev remove-dev install-dev-armhf remove-dev-armhf
+
+##
+
 INSTALL=iotdata-gateway
 DIR_INSTALL=/usr/local/bin
 DIR_DEFAULT=/etc/default
 DIR_SYSTEMD=/etc/systemd/system
+# Prefer a per-host config ($(TARGET).<hostname>.cfg) over the shared default,
+# matching the convention used by hostmon and connmon.
+HOSTNAME:=$(shell hostname)
+CFG_SRC:=$(if $(wildcard $(TARGET).$(HOSTNAME).cfg),$(TARGET).$(HOSTNAME).cfg,$(TARGET).cfg)
 define install_service_systemd
 	-systemctl stop $(2) 2>/dev/null || true
 	-systemctl disable $(2) 2>/dev/null || true
@@ -94,8 +116,9 @@ define install_service_systemd
 endef
 install_target: $(TARGET)
 	install -m 755 $(TARGET) $(DIR_INSTALL)/$(INSTALL)
-install_default: $(TARGET).cfg
-	install -m 644 $(TARGET).cfg $(DIR_DEFAULT)/$(INSTALL)
+install_default: $(CFG_SRC)
+	@echo "installing config from $(CFG_SRC)"
+	install -m 644 $(CFG_SRC) $(DIR_DEFAULT)/$(INSTALL)
 install_service: $(TARGET).service
 	$(call install_service_systemd,$(TARGET),$(INSTALL))
 install: install_target install_default install_service

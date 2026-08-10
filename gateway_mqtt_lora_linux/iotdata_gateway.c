@@ -198,7 +198,7 @@ void __sleep_ms(const uint32_t ms) {
 // clang-format off
 const struct option config_options [] = {
     {"help",                            no_argument,       0, 'h'},
-    {"config",                          required_argument, 0, 'c'},
+    {"config",                          required_argument, 0, 0},
     //
     {"lora-port",                       required_argument, 0, 0},
     {"lora-rate",                       required_argument, 0, 0},
