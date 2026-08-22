@@ -40,7 +40,11 @@ bool ddup_check_sensor_packet(process_state_t *state, uint16_t station_id, uint1
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, const char *via) {
+// packet_rssi is the raw byte the radio appends to each received packet; 0 means the radio did
+// not supply one (RSSI capture off, or a mesh-relayed packet that this gateway never heard over
+// the air). It is a property of THIS hop's reception, not of the sensor, hence 'rssi_packet'.
+void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, const char *via,
+                           uint8_t packet_rssi) {
     const iotdata_variant_def_t *vdef;
     if ((vdef = iotdata_get_variant(variant_id)) == NULL) {
         fprintf(stderr, "process: unknown variant %" PRIu8 " (station=0x%04" PRIX16 ", size=%d)\n", variant_id, station_id, packet_length);
@@ -58,18 +62,32 @@ void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer,
     stat_on_packet_decoded(state->stat_state, station_id, sequence, variant_id, (uint16_t)packet_length, &scratch.dec);
     char topic[255];
     snprintf(topic, sizeof(topic), "%s/%s/%04" PRIX16, topic_prefix, vdef->name, station_id);
-    if (!mqtt_send(topic, json, (int)strlen(json))) {
-        fprintf(stderr, "process: mqtt send failed (topic=%s, size=%d)\n", topic, (int)strlen(json));
+    // Splice rssi_packet in as the first member rather than teaching the decoder about it: the
+    // decoder emits the packet's own payload, and reception strength is not part of that payload.
+    // Keeping it out of the codec means every variant gains the field for free and none of them
+    // has to carry a field that only a gateway can know.
+    const char *payload = json;
+    char augmented[1024];
+    if (state->capture_rssi_packet && packet_rssi > 0 && json[0] == '{') {
+        const int n = snprintf(augmented, sizeof(augmented), "{\"rssi_packet\":%d,%s", get_rssi_dbm(packet_rssi), json + 1);
+        if (n > 0 && n < (int)sizeof(augmented))
+            payload = augmented;
+        else
+            fprintf(stderr, "process: rssi splice would truncate (%d bytes), publishing without it\n", n);
+    }
+    if (!mqtt_send(topic, payload, (int)strlen(payload))) {
+        fprintf(stderr, "process: mqtt send failed (topic=%s, size=%d)\n", topic, (int)strlen(payload));
         stat_on_packet_process_error(state->stat_state, station_id, variant_id);
     }
     if (state->debug)
-        printf("  -> %s (%d bytes%s%s)\n", topic, (int)strlen(json), via ? " via " : "", via ? via : "");
+        printf("  -> %s (%d bytes%s%s)\n", topic, (int)strlen(payload), via ? " via " : "", via ? via : "");
     free(json);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix) {
+void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix,
+                         uint8_t packet_rssi) {
     (void)variant_id;
     const uint8_t ctrl_type = iotdata_mesh_peek_ctrl_type(packet_buffer, packet_length);
     state->mesh_state->stat_mesh_ctrl_rx++;
@@ -86,7 +104,12 @@ void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, i
                 fprintf(stderr, "process: mesh FORWARD inner packet peek failed (len=%d)\n", inner_len);
                 stat_on_link_rx_drop(state->stat_state);
             } else if (ddup_check_sensor_packet(state, inner_station, inner_sequence))
-                process_sensor_packet(state, inner, inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh");
+                // For a relayed packet this is the RELAY-to-gateway hop, not sensor-to-gateway.
+                // That is still what the field means — rssi_packet describes how well THIS gateway
+                // heard the packet it received, not how well the originating sensor was heard. Read
+                // it alongside "via":"mesh" (and the differing station id) to know which link it
+                // measures.
+                process_sensor_packet(state, inner, inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi);
         }
         break;
     }
@@ -166,9 +189,9 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
                     stat_on_link_rx_mesh_unexpected(state->stat_state, station_id);
                     printf("process: mesh packet unexpected from station=0x%04" PRIX16 " while not enabled\n", station_id);
                 } else
-                    process_mesh_packet(state, packet_buffer, packet_length, variant_id, station_id, sequence, state->mqtt_topic_prefix);
+                    process_mesh_packet(state, packet_buffer, packet_length, variant_id, station_id, sequence, state->mqtt_topic_prefix, packet_rssi);
             } else {
-                process_sensor_packet(state, packet_buffer, packet_length, variant_id, station_id, sequence, state->mqtt_topic_prefix, "direct");
+                process_sensor_packet(state, packet_buffer, packet_length, variant_id, station_id, sequence, state->mqtt_topic_prefix, "direct", packet_rssi);
             }
         }
 
