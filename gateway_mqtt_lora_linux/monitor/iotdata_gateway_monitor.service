@@ -1,0 +1,20 @@
+[Unit]
+Description=iotdata Gateway Monitor (received traffic web view)
+Documentation=file:/usr/local/bin/iotdata-gateway-monitor
+Wants=network-online.target
+After=network-online.target
+After=mosquitto.service
+After=iotdata-gateway.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/iotdata-gateway-monitor --config /etc/default/iotdata-gateway-monitor
+TimeoutStopSec=15s
+# The subscriber is a child process; mixed so it goes down with the parent rather than
+# being left holding a broker connection.
+KillMode=mixed
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
