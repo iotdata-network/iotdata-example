@@ -166,32 +166,26 @@ void __sleep_ms(const uint32_t ms) {
 #include "iotdata_gateway_mesh.h"
 #include "iotdata_gateway_ddup.h"
 #include "iotdata_gateway_stat.h"
+#include "iotdata_gateway_netw.h"
+#include "iotdata_gateway_mqtt.h"
 #include "iotdata_gateway_exec.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define IOTDATA_GATEWAY_VERSION          "1.0.0"
+#define IOTDATA_GATEWAY_VERSION    "1.0.0"
 
-#define CONFIG_FILE_DEFAULT              "iotdata_gateway.cfg"
+#define CONFIG_FILE_DEFAULT        "iotdata_gateway.cfg"
 
-#define SERIAL_PORT_DEFAULT              "/dev/e22900t22u"
-#define SERIAL_RATE_DEFAULT              9600
-#define SERIAL_BITS_DEFAULT              SERIAL_8N1
+#define SERIAL_PORT_DEFAULT        "/dev/e22900t22u"
+#define SERIAL_RATE_DEFAULT        9600
+#define SERIAL_BITS_DEFAULT        SERIAL_8N1
 
-#define MQTT_CLIENT_DEFAULT              "iotdata_gateway"
-#define MQTT_SERVER_DEFAULT              "mqtt://localhost"
-#define MQTT_TLS_DEFAULT                 false
-#define MQTT_SYNCHRONOUS_DEFAULT         false
-#define MQTT_TOPIC_PREFIX_DEFAULT        "iotdata"
-#define MQTT_RECONNECT_DELAY_DEFAULT     5
-#define MQTT_RECONNECT_DELAY_MAX_DEFAULT 60
+#define STAT_INTERVAL_DEFAULT      (5 * 60)
+#define INTERVAL_RSSI_DEFAULT      (1 * 60)
+#define INTERVAL_BEACON_DEFAULT    60 /* seconds */
 
-#define STAT_INTERVAL_DEFAULT            (5 * 60)
-#define INTERVAL_RSSI_DEFAULT            (1 * 60)
-#define INTERVAL_BEACON_DEFAULT          60 /* seconds */
-
-#define GATEWAY_STATION_ID_DEFAULT       1
+#define GATEWAY_STATION_ID_DEFAULT 1
 
 #include "config_linux.h"
 
@@ -239,6 +233,7 @@ const struct option config_options [] = {
     //
     {"stat-display-interval",           required_argument, 0, 0},
     {"stat-publish-interval",           required_argument, 0, 0},
+    {"stat-network-interval",           required_argument, 0, 0},
     {"stat-publish-mqtt-topic-prefix",  required_argument, 0, 0},
     //
     {"debug",                           required_argument, 0, 0},
@@ -289,6 +284,7 @@ const config_option_help_t config_options_help [] = {
     //
     {"stat-display-interval",           "Stat display stdout interval in seconds (default: 300; 0 disables)"},
     {"stat-publish-interval",           "Stat publish MQTT interval in seconds (default: 300; 0 disables)"},
+    {"stat-network-interval",           "Network/stations table stdout interval in seconds (default: 300; 0 disables)"},
     {"stat-publish-mqtt-topic-prefix",  "Stat publish MQTT topic prefix (default: 'iotdata/stats')"},
     //
     {"debug",                           "Debug output (true/false)"},
@@ -335,6 +331,7 @@ void lora_config_populate(serial_config_t *cfg_serial, e22900t22_config_t *cfg) 
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+
 void mqtt_config_populate(mqtt_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
@@ -349,8 +346,6 @@ void mqtt_config_populate(mqtt_config_t *cfg) {
     printf("config: mqtt: client=%s, server=%s, tls-insecure=%s, synchronous=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, cfg->tls_insecure ? "on" : "off", cfg->use_synchronous ? "on" : "off",
            cfg->reconnect_delay, cfg->reconnect_delay_max);
 }
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
 void iotdata_mesh_config_populate(mesh_state_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -398,6 +393,7 @@ void process_config_populate(process_state_t *cfg) {
     cfg->capture_rssi_packet = config_get_bool("lora-rssi-packet", E22900T22_CONFIG_RSSI_PACKET_DEFAULT); // XXX
     cfg->stat_display_interval = config_get_integer("stat-display-interval", STAT_INTERVAL_DEFAULT);
     cfg->stat_publish_interval = config_get_integer("stat-publish-interval", STAT_INTERVAL_DEFAULT);
+    cfg->stat_network_interval = config_get_integer("stat-network-interval", STAT_INTERVAL_DEFAULT);
     cfg->debug = config_get_bool("debug", false);
     cfg->debug_data = config_get_bool("debug-data", false);
 }
@@ -409,6 +405,7 @@ typedef struct {
     serial_config_t lora_serial_config;
     e22900t22_config_t lora_device_config;
     mqtt_config_t mqtt_config;
+    gwmqtt_manage_state_t manage;
     mesh_state_t mesh_state;
     ddup_state_t ddup_state;
     stat_state_t stat_state;
@@ -484,6 +481,9 @@ int main(int argc, char *argv[]) {
     // MQTT BROKER
     if (!mqtt_begin(&state->mqtt_config))
         goto end_device;
+    (void)gwmqtt_manage_begin(&state->manage, state->process_state.mqtt_topic_prefix, state->mesh_state.station_id, device_packet_write);
+
+    network_init(&state->process_state.network);
 
     state->running = true;
 

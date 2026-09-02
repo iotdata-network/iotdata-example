@@ -43,6 +43,7 @@ TARGET=iotdata_gateway
 MAIN=iotdata_gateway.c
 SOURCES=\
     iotdata_gateway_ddup.h iotdata_gateway_mesh.h iotdata_gateway_stat.h iotdata_gateway_exec.h \
+    iotdata_gateway_mqtt.h iotdata_gateway_netw.h \
     config_linux.h serial_linux.h mqtt_linux.h \
     $(DIR_E22XXXTXX)/e22xxxtxx.h \
     $(DIR_IOTDATA_VARIANT)/iotdata_variant_suite.h \
@@ -52,7 +53,7 @@ SOURCES=\
 
 TEST=iotdata_gateway_test
 TEST_MAIN=iotdata_gateway_test.c
-TEST_CFLAGS=$(CFLAGS_COMMON) $(CFLAGS_STRICT) $(CFLAGS_OPT) -I$(DIR_IOTDATA_VARIANT)
+TEST_CFLAGS=$(CFLAGS_COMMON) $(CFLAGS_STRICT) $(CFLAGS_OPT) -I$(DIR_IOTDATA) -I$(DIR_IOTDATA_VARIANT)
 TEST_LIBS=-lpthread
 TEST_SOURCES=\
     iotdata_gateway_ddup.h iotdata_gateway_mesh.h \
@@ -74,7 +75,7 @@ test: $(TEST)
 clean:
 	rm -f $(TARGET) $(TEST)
 format:
-	clang-format -i $(MAIN) $(SOURCES) $(TEST_MAIN) $(TEST_SOURCES)
+	clang-format-19 -i $(MAIN) $(SOURCES) $(TEST_MAIN) $(TEST_SOURCES)
 
 .PHONY: all clean format test
 

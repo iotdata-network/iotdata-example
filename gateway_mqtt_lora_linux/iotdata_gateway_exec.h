@@ -12,6 +12,9 @@ typedef struct {
     time_t stat_display_interval_last;
     time_t stat_publish_interval;
     time_t stat_publish_interval_last;
+    time_t stat_network_interval;
+    time_t stat_network_interval_last;
+    network_t network; /* stations heard (mesh + sensor), printed every stat-network-interval */
     mesh_state_t *mesh_state;
     ddup_state_t *ddup_state;
     stat_state_t *stat_state;
@@ -43,8 +46,11 @@ bool ddup_check_sensor_packet(process_state_t *state, uint16_t station_id, uint1
 // packet_rssi is the raw byte the radio appends to each received packet; 0 means the radio did
 // not supply one (RSSI capture off, or a mesh-relayed packet that this gateway never heard over
 // the air). It is a property of THIS hop's reception, not of the sensor, hence 'rssi_packet'.
-void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, const char *via,
-                           uint8_t packet_rssi) {
+void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, const char *via, uint8_t packet_rssi) {
+    // Record the sighting in the network table. Only for a DIRECT reception — a mesh-forwarded
+    // packet's rssi is the relay->gateway hop, not the sensor, and the relay tracks that sensor.
+    if (via != NULL && strcmp(via, "mesh") != 0)
+        network_seen(&state->network, station_id, NET_KIND_SENSOR, variant_id, (state->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, time(NULL));
     const iotdata_variant_def_t *vdef;
     if ((vdef = iotdata_get_variant(variant_id)) == NULL) {
         fprintf(stderr, "process: unknown variant %" PRIu8 " (station=0x%04" PRIX16 ", size=%d)\n", variant_id, station_id, packet_length);
@@ -86,8 +92,7 @@ void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer,
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix,
-                         uint8_t packet_rssi) {
+void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, uint8_t packet_rssi) {
     (void)variant_id;
     const uint8_t ctrl_type = iotdata_mesh_peek_ctrl_type(packet_buffer, packet_length);
     state->mesh_state->stat_mesh_ctrl_rx++;
@@ -116,8 +121,11 @@ void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, i
     case IOTDATA_MESH_CTRL_BEACON: {
         mesh_handle_beacon(state->mesh_state, packet_buffer, packet_length);
         iotdata_mesh_beacon_t b;
-        if (iotdata_mesh_unpack_beacon(packet_buffer, packet_length, &b))
+        if (iotdata_mesh_unpack_beacon(packet_buffer, packet_length, &b)) {
             stat_on_mesh_peer(state->stat_state, b.gateway_id, b.generation, b.cost, b.flags);
+            network_seen(&state->network, station_id, b.cost == 0 ? NET_KIND_GATEWAY : NET_KIND_RELAY, variant_id, (state->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, time(NULL));
+            network_note_mesh(&state->network, station_id, b.cost, b.generation, b.gateway_id);
+        }
         break;
     }
     case IOTDATA_MESH_CTRL_ACK:
@@ -207,11 +215,19 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
         if (*running && state->mesh_state->enabled && intervalable(state->mesh_state->beacon_interval, &state->mesh_state->beacon_last))
             mesh_beacon_send(state->mesh_state);
 
+        // management: transmit any MANAGE frame queued by the mqtt-thread callback
+        if (*running)
+            gwmqtt_manage_pump();
+
         // stats publish/display
         if (*running && state->stat_publish_interval > 0 && intervalable(state->stat_publish_interval, &state->stat_publish_interval_last) > 0)
             stat_publish(state->stat_state, state->mesh_state, state->ddup_state);
         if (*running && state->stat_display_interval > 0 && intervalable(state->stat_display_interval, &state->stat_display_interval_last) > 0)
             stat_display(state->stat_state, state->mesh_state, state->ddup_state);
+
+        // network / stations table
+        if (*running && state->stat_network_interval > 0 && intervalable(state->stat_network_interval, &state->stat_network_interval_last) > 0)
+            network_report(&state->network, state->mesh_state->station_id);
     }
 
     return true;
