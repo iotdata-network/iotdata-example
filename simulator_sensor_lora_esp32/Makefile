@@ -5,7 +5,6 @@ PLATFORM = esp32c3
 NAME     = app
 SOURCES  = main/$(NAME).c
 VERSION  = 1.00
-DEVICE   = /dev/ttyACM0
 
 BUILDER_DEFS = \
     -DIOTDATA_SRC_LIBRARY=$(IOTDATA_SRC_LIBRARY) \
