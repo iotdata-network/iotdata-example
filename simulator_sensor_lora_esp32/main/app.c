@@ -24,6 +24,11 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic ignored "-Wnested-externs"
+#pragma GCC diagnostic ignored "-Wredundant-decls"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -31,10 +36,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-#pragma GCC diagnostic ignored "-Wnested-externs"
-#pragma GCC diagnostic ignored "-Wredundant-decls"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
@@ -47,6 +48,7 @@
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
 #pragma GCC diagnostic pop
 
 /*
