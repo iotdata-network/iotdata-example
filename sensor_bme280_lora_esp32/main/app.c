@@ -29,6 +29,11 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic ignored "-Wnested-externs"
+#pragma GCC diagnostic ignored "-Wredundant-decls"
+
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -36,10 +41,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-#pragma GCC diagnostic ignored "-Wnested-externs"
-#pragma GCC diagnostic ignored "-Wredundant-decls"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
@@ -56,6 +57,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
 #pragma GCC diagnostic pop
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

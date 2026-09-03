@@ -482,11 +482,10 @@ int main(int argc, char *argv[]) {
         goto end_device;
     (void)gwmqtt_manage_begin(&state->manage, state->process_state.mqtt_topic_prefix, state->mesh_state.station_id, device_packet_write);
 
-    network_init(&state->process_state.network);
-
     state->running = true;
 
     // IOTDATA MESH/DDUP
+    network_init(&state->process_state.network);
     if (!mesh_begin(&state->mesh_state, device_packet_write, ddup_check_and_add_handler, (void *)&state->process_state))
         goto end_mqtt;
     if (!ddup_begin(&state->ddup_state, state->mesh_state.station_id, &state->mesh_state.dedup_ring, &state->running))

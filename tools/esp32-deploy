@@ -159,6 +159,16 @@ def find_esptool():
     return None
 
 
+def esptool_major(esptool):
+    """Best-effort major version of the esptool argv prefix (None if undetermined)."""
+    try:
+        r = subprocess.run(esptool + ["version"], capture_output=True, text=True, timeout=15)
+        m = re.search(r"\bv?(\d+)\.\d+", r.stdout + "\n" + r.stderr)
+        return int(m.group(1)) if m else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
 def load_flasher_args(build_dir):
     path = os.path.join(build_dir, "flasher_args.json")
     if not os.path.isfile(path):
@@ -210,12 +220,27 @@ def do_flash(port, build_dir, baud):
         if not os.path.isfile(os.path.join(build_dir, rel)):
             die(f"missing binary {rel!r} in {build_dir} (rebuild, or --pull it from the build host)")
 
+    # esptool v5 (ESP-IDF v6+) hyphenates its subcommands, option flags and reset
+    # modes ("write-flash", "--flash-mode", "default-reset"); esptool v4 (the apt/pip
+    # package) uses underscores. flasher_args.json is written in the BUILD's style, so
+    # translate every arg to match whichever esptool we actually found on this box.
+    v5 = (esptool_major(esptool) or 4) >= 5
+    def flag(tok):        # option flag: translate the NAME only, keep the leading "--"
+        if tok.startswith("--"):
+            name = tok[2:]
+            return "--" + (name.replace("_", "-") if v5 else name.replace("-", "_"))
+        return tok        # values (dio, 2MB, 80m, 2MB-c1) pass through untouched
+    def mode(key, dflt):  # a reset-mode VALUE
+        s = extra.get(key, dflt)
+        return s.replace("_", "-") if v5 else s.replace("-", "_")
+
     argv = list(esptool) + ["--chip", chip, "--port", port, "--baud", str(baud),
-                            "--before", extra.get("before", "default_reset"),
-                            "--after", extra.get("after", "hard_reset")]
+                            "--before", mode("before", "default_reset"),
+                            "--after",  mode("after",  "hard_reset")]
     if extra.get("stub", True) is False:
         argv += ["--no-stub"]
-    argv += ["write_flash", *fa.get("write_flash_args", [])]
+    argv += ["write-flash" if v5 else "write_flash",
+             *(flag(a) for a in fa.get("write_flash_args", []))]
     for offset in sorted(files, key=lambda o: int(o, 16)):
         argv += [offset, files[offset]]
 
