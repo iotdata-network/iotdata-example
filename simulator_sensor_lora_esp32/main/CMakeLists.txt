@@ -31,6 +31,14 @@ else()
     message(STATUS "app: pin map = original bench wiring")
 endif()
 
+set(iotsim_defs "")
+foreach(knob IOTSIM_NUM_SENSORS IOTSIM_VARIANT_TYPES IOTSIM_TX_MIN_MS IOTSIM_TX_MAX_MS IOTSIM_CHANNEL IOTSIM_NETWORK IOTSIM_ADDRESS)
+    if(DEFINED ENV{${knob}} AND NOT "$ENV{${knob}}" STREQUAL "")
+        list(APPEND iotsim_defs "${knob}=$ENV{${knob}}")
+        message(STATUS "app: ${knob}=$ENV{${knob}} (host override)")
+    endif()
+endforeach()
+
 idf_component_register(
     SRCS "app.c"
     PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_usb_serial_jtag
@@ -41,7 +49,7 @@ idf_component_register(
         "${IOTDATA_SRC_DEPEND}/e22900t22/include"   # e22xxxtxx.h
         "${IOTDATA_SRC_EXAMPLE_SIMULATOR}"          # simulator
 )
-target_compile_definitions(${COMPONENT_LIB} PRIVATE ${carrier_defs})
+target_compile_definitions(${COMPONENT_LIB} PRIVATE ${carrier_defs} ${iotsim_defs})
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wdouble-promotion
     -Werror=double-promotion

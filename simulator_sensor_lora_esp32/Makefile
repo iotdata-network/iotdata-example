@@ -15,5 +15,9 @@ BUILDER_DEFS = \
 AE_SDC_CARRIER = 1
 export AE_SDC_CARRIER
 
+HOST := $(shell hostname -s)
+-include defines.$(HOST).mk
+export IOTSIM_NUM_SENSORS IOTSIM_VARIANT_TYPES IOTSIM_TX_MIN_MS IOTSIM_TX_MAX_MS IOTSIM_CHANNEL IOTSIM_NETWORK IOTSIM_ADDRESS
+
 include ../../iotdata-common/make/target-esp32.mk
 

@@ -219,10 +219,19 @@ static void e22_set_pin_mx(const bool pin_m0, const bool pin_m1) {
 static bool e22_get_pin_aux(void) {
     return gpio_get_level(PIN_E22_AUX) == 1;
 }
+#ifndef IOTSIM_CHANNEL
+#define IOTSIM_CHANNEL 0x0A
+#endif
+#ifndef IOTSIM_NETWORK
+#define IOTSIM_NETWORK 0x00
+#endif
+#ifndef IOTSIM_ADDRESS
+#define IOTSIM_ADDRESS 0x0008
+#endif
 static e22900t22_config_t e22_config = {
-    .address = 0x0008,
-    .network = 0x00,
-    .channel = 0x0A,
+    .address = IOTSIM_ADDRESS,
+    .network = IOTSIM_NETWORK,
+    .channel = IOTSIM_CHANNEL,
     .packet_size = E22900T22_CONFIG_PACKET_SIZE_DEFAULT,
     .packet_rate = E22900T22_CONFIG_PACKET_RATE_DEFAULT,
     .crypt = E22900T22_CONFIG_CRYPT_DEFAULT,
@@ -231,15 +240,7 @@ static e22900t22_config_t e22_config = {
     .transmit_power = E22900T22_CONFIG_TRANSMIT_POWER_DEFAULT,
     .transmission_method = E22900T22_CONFIG_TRANSMISSION_METHOD_DEFAULT,
     .relay_enabled = E22900T22_CONFIG_RELAY_ENABLED_DEFAULT,
-    /* Off, for antenna comparison runs. LBT defers a transmission when the board hears
-       the channel busy — but whether it hears the others is a function of its own receive
-       performance, so the board with the best antenna defers most and transmits least.
-       That puts an antenna-dependent term in the transmit path which cannot be separated
-       from the link performance being measured. With it off, every board transmits on
-       schedule and the extra collisions land on all of them equally, so they average out
-       (and per-packet RSSI at the gateway is unaffected by collisions either way). Set
-       back to true for ordinary polite operation on a shared channel. */
-    .listen_before_transmit = false,
+    .listen_before_transmit = true,
     .rssi_packet = true,
     .rssi_channel = true,
     .read_timeout_command = E22900T22_CONFIG_READ_TIMEOUT_COMMAND_DEFAULT,
@@ -265,10 +266,18 @@ static e22900t22_config_t e22_config = {
  * conversion from internal centi-units to iotdata_float_t correctly
  * under NO_FLOATING (they pass centi-values directly).
  */
-#define IOTSIM_NUM_SENSORS 8    /* 8 sensors/board — keeps the shared channel sane with 4 boards */
-#define IOTSIM_VARIANT_TYPES 4  /* 4 distinct types/board (2 sensors each) — a fleet then spreads the 9-type suite out instead of every board carrying all of it */
-#define IOTSIM_TX_MIN_MS 20000  /* 20s min interval (rate halved for 4-board coexistence) */
-#define IOTSIM_TX_MAX_MS 40000  /* 40s max interval */
+#ifndef IOTSIM_NUM_SENSORS
+#define IOTSIM_NUM_SENSORS 8 /* 8 sensors/board — keeps the shared channel sane with 4 boards */
+#endif
+#ifndef IOTSIM_VARIANT_TYPES
+#define IOTSIM_VARIANT_TYPES 4 /* 4 distinct types/board (2 sensors each); a fleet spreads the 9-type suite out */
+#endif
+#ifndef IOTSIM_TX_MIN_MS
+#define IOTSIM_TX_MIN_MS 20000 /* 20s min interval */
+#endif
+#ifndef IOTSIM_TX_MAX_MS
+#define IOTSIM_TX_MAX_MS 40000 /* 40s max interval */
+#endif
 #define IOTDATA_NO_DECODE
 #define IOTDATA_NO_JSON
 #define IOTDATA_NO_DUMP

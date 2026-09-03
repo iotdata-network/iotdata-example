@@ -251,10 +251,16 @@ static inline const char *net_via_format(const net_station_t *e, char *out, size
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+// End-to-end loss as a percentage: gaps / (received + gaps). 0 when nothing is expected yet.
+static inline double net_loss_pct(uint32_t gaps, uint32_t rx) {
+    const uint32_t total = gaps + rx;
+    return total ? ((double)gaps * 100.0 / (double)total) : 0.0;
+}
+
 void network_report(const network_t *n, uint16_t gateway_id) {
     const time_t now = time(NULL);
     int n_relay = 0, n_sensor = 0, n_gw = 0;
-    uint32_t loss = 0;
+    uint32_t loss = 0, rx_total = 0;
     for (int i = 0; i < NETWORK_MAX; i++) {
         const net_station_t *e = &n->s[i];
         if (e->valid) {
@@ -265,10 +271,11 @@ void network_report(const network_t *n, uint16_t gateway_id) {
             else {
                 n_sensor++;
                 loss += e->uniq.gaps;
+                rx_total += e->uniq.rx;
             }
         }
     }
-    printf("network: gw=0x%04" PRIX16 " | %d relay(s), %d sensor(s)%s | end-to-end loss=%" PRIu32 " seq:\n", gateway_id, n_relay, n_sensor, n_gw ? " (+peer gw)" : "", loss);
+    printf("network: gw=0x%04" PRIX16 " | %d relay(s), %d sensor(s)%s | end-to-end loss=%" PRIu32 " seq (%.1f%%):\n", gateway_id, n_relay, n_sensor, n_gw ? " (+peer gw)" : "", loss, net_loss_pct(loss, rx_total));
     for (int i = 0; i < NETWORK_MAX; i++) { /* mesh nodes: gateways + relays */
         const net_station_t *e = &n->s[i];
         if (e->valid && (e->kind == NET_KIND_RELAY || e->kind == NET_KIND_GATEWAY)) {
@@ -281,9 +288,9 @@ void network_report(const network_t *n, uint16_t gateway_id) {
         const net_station_t *e = &n->s[i];
         if (e->valid && !(e->kind == NET_KIND_RELAY || e->kind == NET_KIND_GATEWAY)) {
             char via[80];
-            printf("  0x%04" PRIX16 " %-4s rssi=%ddBm age=%lds var=%u uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ")%s\n", e->station,
-                   net_kind_name(e->kind), e->rssi, (long)(now - e->last_seen), (unsigned)e->variant, e->uniq.rx, e->uniq.gaps, net_rate_per_min(e->uniq.rx, e->first_seen, now), e->direct.rx, e->direct.dup, e->direct.gaps, e->mesh.rx,
-                   e->mesh.dup, e->mesh.gaps, net_via_format(e, via, sizeof(via)));
+            printf("  0x%04" PRIX16 " %-4s rssi=%ddBm age=%lds var=%u uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ")%s\n", e->station,
+                   net_kind_name(e->kind), e->rssi, (long)(now - e->last_seen), (unsigned)e->variant, e->uniq.rx, e->uniq.gaps, net_loss_pct(e->uniq.gaps, e->uniq.rx), net_rate_per_min(e->uniq.rx, e->first_seen, now), e->direct.rx, e->direct.dup,
+                   e->direct.gaps, e->mesh.rx, e->mesh.dup, e->mesh.gaps, net_via_format(e, via, sizeof(via)));
         }
     }
 }
