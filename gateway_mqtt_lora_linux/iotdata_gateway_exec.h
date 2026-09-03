@@ -31,7 +31,7 @@ bool ddup_check_and_add_handler(void *ctx, uint16_t station_id, uint16_t sequenc
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool ddup_check_sensor_packet(process_state_t *state, uint16_t station_id, uint16_t sequence) {
-    if (state->mesh_state->enabled)
+    if (state->mesh_state->enabled && state->ddup_state->enabled)
         if (!ddup_check_and_add(state->ddup_state, station_id, sequence)) {
             state->mesh_state->stat_duplicates++;
             if (state->debug || state->mesh_state->debug)
@@ -47,10 +47,8 @@ bool ddup_check_sensor_packet(process_state_t *state, uint16_t station_id, uint1
 // not supply one (RSSI capture off, or a mesh-relayed packet that this gateway never heard over
 // the air). It is a property of THIS hop's reception, not of the sensor, hence 'rssi_packet'.
 void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, const char *via, uint8_t packet_rssi) {
-    // Record the sighting in the network table. Only for a DIRECT reception — a mesh-forwarded
-    // packet's rssi is the relay->gateway hop, not the sensor, and the relay tracks that sensor.
-    if (via != NULL && strcmp(via, "mesh") != 0)
-        network_seen(&state->network, station_id, NET_KIND_SENSOR, variant_id, (state->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, time(NULL));
+    // Network-table tracking (per-path counts, dups, sequence gaps) is done by the caller at the
+    // dedup point (network_note_receive), so it also sees suppressed duplicates — which never reach here.
     const iotdata_variant_def_t *vdef;
     if ((vdef = iotdata_get_variant(variant_id)) == NULL) {
         fprintf(stderr, "process: unknown variant %" PRIu8 " (station=0x%04" PRIX16 ", size=%d)\n", variant_id, station_id, packet_length);
@@ -98,22 +96,36 @@ void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, i
     state->mesh_state->stat_mesh_ctrl_rx++;
     if (state->mesh_state->debug)
         printf("process: mesh rx %s from station=0x%04" PRIX16 ", sequence=%" PRIu16 " (%d bytes)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id, sequence, packet_length);
+    // Track the sender's whole transmission stream (sender_seq is shared across all mesh frame
+    // types), so tx.gaps = frames of any type we missed = relay->gateway link loss.
+    network_note_transmit(&state->network, station_id, sequence, time(NULL));
     switch (ctrl_type) {
     case IOTDATA_MESH_CTRL_FORWARD: {
+        // Peek the inner header ourselves so we can record the mesh reception for BOTH new and
+        // duplicate forwards (mesh_handle_forward returns false on a duplicate and only hands back
+        // `inner` on a new one). This is a cheap header parse, not a second dedup.
+        iotdata_mesh_forward_t fw;
+        if (!iotdata_mesh_unpack_forward(packet_buffer, packet_length, &fw)) {
+            stat_on_link_rx_drop(state->stat_state);
+            break;
+        }
+        uint8_t inner_variant = 0;
+        uint16_t inner_station = 0, inner_sequence = 0;
+        const bool inner_ok = (iotdata_peek(fw.inner_packet, (size_t)fw.inner_len, &inner_variant, &inner_station, &inner_sequence) == IOTDATA_OK);
         const uint8_t *inner;
         int inner_len;
-        if (mesh_handle_forward(state->mesh_state, packet_buffer, packet_length, &inner, &inner_len)) {
-            uint8_t inner_variant;
-            uint16_t inner_station, inner_sequence;
-            if (iotdata_peek(inner, (size_t)inner_len, &inner_variant, &inner_station, &inner_sequence) != IOTDATA_OK) {
-                fprintf(stderr, "process: mesh FORWARD inner packet peek failed (len=%d)\n", inner_len);
+        // mesh_handle_forward is the single dedup + ACK point for forwards; its return is new-vs-dup.
+        const bool is_new = mesh_handle_forward(state->mesh_state, packet_buffer, packet_length, &inner, &inner_len);
+        network_note_forward(&state->network, fw.sender_station, time(NULL)); /* the relay's forwarding load */
+        if (inner_ok)                                                         /* count the reception (new or duplicate) against the ORIGIN sensor; no rssi (that hop is relay->gateway) */
+            network_note_receive(&state->network, fw.origin_station, inner_variant, fw.origin_sequence, NET_PATH_MESH, is_new, 0, fw.sender_station, time(NULL));
+        if (is_new) {
+            if (!inner_ok) {
+                fprintf(stderr, "process: mesh FORWARD inner packet peek failed (len=%d)\n", fw.inner_len);
                 stat_on_link_rx_drop(state->stat_state);
-            } else if (ddup_check_sensor_packet(state, inner_station, inner_sequence))
-                // For a relayed packet this is the RELAY-to-gateway hop, not sensor-to-gateway.
-                // That is still what the field means — rssi_packet describes how well THIS gateway
-                // heard the packet it received, not how well the originating sensor was heard. Read
-                // it alongside "via":"mesh" (and the differing station id) to know which link it
-                // measures.
+            } else
+                // rssi_packet on a relayed packet is the RELAY->gateway hop, not sensor->gateway —
+                // read it alongside "via":"mesh" (and the differing station id) for which link it measures.
                 process_sensor_packet(state, inner, inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi);
         }
         break;
@@ -123,8 +135,7 @@ void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, i
         iotdata_mesh_beacon_t b;
         if (iotdata_mesh_unpack_beacon(packet_buffer, packet_length, &b)) {
             stat_on_mesh_peer(state->stat_state, b.gateway_id, b.generation, b.cost, b.flags);
-            network_seen(&state->network, station_id, b.cost == 0 ? NET_KIND_GATEWAY : NET_KIND_RELAY, variant_id, (state->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, time(NULL));
-            network_note_mesh(&state->network, station_id, b.cost, b.generation, b.gateway_id);
+            network_note_beacon(&state->network, station_id, b.flags, b.cost, b.generation, b.gateway_id, (state->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, time(NULL));
         }
         break;
     }
@@ -173,6 +184,12 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
     if (state->mesh_state->enabled)
         printf("process: variant[15] = mesh control (gateway station=0x%04" PRIX16 ")\n", state->mesh_state->station_id);
 
+    // Send one beacon immediately so relays can attach at startup rather than after a full
+    // beacon_interval: intervalable() deliberately primes (returns 0) on its first call, which
+    // suits the stat timers but would delay tree formation.
+    if (state->mesh_state->enabled)
+        mesh_beacon_send(state->mesh_state);
+
     while (*running) {
 
         // packet processing
@@ -199,7 +216,14 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
                 } else
                     process_mesh_packet(state, packet_buffer, packet_length, variant_id, station_id, sequence, state->mqtt_topic_prefix, packet_rssi);
             } else {
-                process_sensor_packet(state, packet_buffer, packet_length, variant_id, station_id, sequence, state->mqtt_topic_prefix, "direct", packet_rssi);
+                // Dedup direct receptions against the SAME ring the forward path uses, so a sensor
+                // heard both directly and via a relay publishes once — whichever path adds {station,
+                // seq} first wins, the other is suppressed. is_new is true unless it was a duplicate
+                // (always true when mesh is off). Track the reception either way for observability.
+                const bool is_new = ddup_check_sensor_packet(state, station_id, sequence);
+                network_note_receive(&state->network, station_id, variant_id, sequence, NET_PATH_DIRECT, is_new, (state->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, 0, time(NULL));
+                if (is_new)
+                    process_sensor_packet(state, packet_buffer, packet_length, variant_id, station_id, sequence, state->mqtt_topic_prefix, "direct", packet_rssi);
             }
         }
 

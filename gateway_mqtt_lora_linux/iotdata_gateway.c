@@ -331,7 +331,6 @@ void lora_config_populate(serial_config_t *cfg_serial, e22900t22_config_t *cfg) 
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-
 void mqtt_config_populate(mqtt_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
@@ -488,7 +487,7 @@ int main(int argc, char *argv[]) {
     state->running = true;
 
     // IOTDATA MESH/DDUP
-    if (!mesh_begin(&state->mesh_state, device_packet_write, ddup_check_and_add_handler, (void *)state))
+    if (!mesh_begin(&state->mesh_state, device_packet_write, ddup_check_and_add_handler, (void *)&state->process_state))
         goto end_mqtt;
     if (!ddup_begin(&state->ddup_state, state->mesh_state.station_id, &state->mesh_state.dedup_ring, &state->running))
         goto end_mesh;

@@ -289,13 +289,14 @@ bool ddup_check_and_add(ddup_state_t *state, uint16_t station_id, uint16_t seque
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool ddup_begin(ddup_state_t *state, uint16_t gateway_id, iotdata_mesh_dedup_ring_t *dedup_ring, volatile bool *running) {
+    // XXX, mesh code uses the dedup ring as well.
+    state->dedup_ring = dedup_ring;
     if (!state->enabled) {
         printf("dedup: disabled, not starting\n");
         return true;
     }
     state->running = running;
     state->gateway_id = gateway_id;
-    state->dedup_ring = dedup_ring;
     printf("dedup: enabled, port=%" PRIu16 ", peers=%d, gateway_id=%04" PRIX16 ", delay=%" PRIu32 "ms\n", state->port, state->peers_count, state->gateway_id, state->delay_ms);
     ddup_peers_resolve(state);
     pthread_mutex_init(&state->mutex, NULL);
