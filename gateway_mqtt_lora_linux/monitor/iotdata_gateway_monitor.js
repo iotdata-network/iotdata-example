@@ -908,7 +908,7 @@ const PAGE = `<!doctype html>
 <body>
 <header>
   <div class="bar"><b>iotdata gateway</b>${REF_LINK}<button id="gbtn" class="gbtn" hidden aria-expanded="false"></button><span id="stat"><span id="dot"></span><span id="msg">connecting</span></span></div>
-  <div id="gnss" hidden><div class="lbl" id="glbl">tracker positions · newest first</div><table><tbody></tbody></table></div>
+  <div id="gnss" hidden><div class="lbl" id="glbl">tracker</div><table><tbody></tbody></table></div>
   <table id="sum"><tbody></tbody></table>
   <div class="note">counts are cumulative; rate and avg rssi over the last ${WINDOW} packets</div>
 </header>
@@ -1102,8 +1102,7 @@ function renderGnss(view) {
   // Say so when the panel is showing a window onto a longer list, rather than letting the
   // badge and the row count silently disagree.
   document.getElementById('glbl').textContent =
-    view.n > rows.length ? 'tracker positions · newest first · latest ' + rows.length + ' of ' + view.n
-                         : 'tracker positions · newest first';
+    view.n > rows.length ? 'tracker · latest ' + rows.length + ' of ' + view.n : 'tracker';
 
   for (var n = rows.length - 1; n >= 0; n--) {
     var g = rows[n], tr = document.createElement('tr');
