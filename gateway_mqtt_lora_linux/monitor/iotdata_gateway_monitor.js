@@ -1143,11 +1143,11 @@ function add(r) {
   list.insertBefore(row(r), list.firstChild);
   count++;
   while (list.childNodes.length > ${KEEP}) list.removeChild(list.lastChild);
-  msg.textContent = count + ' packets';
+  msg.textContent = count;
 }
 
 var es = new EventSource('/events');
-es.onopen = function () { dot.className = 'live'; msg.textContent = count ? count + ' packets' : 'listening'; };
+es.onopen = function () { dot.className = 'live'; msg.textContent = count ? count : 'listening'; };
 es.onerror = function () { dot.className = ''; msg.textContent = 'reconnecting'; };
 es.addEventListener('packet', function (ev) { add(JSON.parse(ev.data)); });
 es.addEventListener('stats', function (ev) { renderStats(JSON.parse(ev.data)); });
