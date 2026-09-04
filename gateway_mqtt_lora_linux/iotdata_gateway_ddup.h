@@ -180,7 +180,7 @@ void ddup_recv_from_peers(ddup_state_t *state, int recv_fd) {
         state->stat_recv_cycles++;
         state->stat_recv_entries += (uint32_t)entry_count;
         if (state->debug)
-            printf("dedup: rx from gateway=0x%04" PRIX16 ", entries=%d\n", ddup_packet_get_gateway_id(pkt), entry_count);
+            printf("dedup: rx from gateway=%04" PRIX16 ", entries=%d\n", ddup_packet_get_gateway_id(pkt), entry_count);
     }
 }
 

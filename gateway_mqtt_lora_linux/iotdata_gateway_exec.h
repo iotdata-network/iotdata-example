@@ -35,7 +35,7 @@ bool ddup_check_sensor_packet(process_state_t *state, uint16_t station_id, uint1
         if (!ddup_check_and_add(state->ddup_state, station_id, sequence)) {
             state->mesh_state->stat_duplicates++;
             if (state->debug || state->mesh_state->debug)
-                printf("process: mesh direct packet duplicate suppressed (station=0x%04" PRIX16 ", sequence=%" PRIu16 ")\n", station_id, sequence);
+                printf("process: mesh direct packet duplicate suppressed (station=%04" PRIX16 ", sequence=%" PRIu16 ")\n", station_id, sequence);
             return false;
         }
     return true;
@@ -51,7 +51,7 @@ void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer,
     // dedup point (network_note_receive), so it also sees suppressed duplicates — which never reach here.
     const iotdata_variant_def_t *vdef;
     if ((vdef = iotdata_get_variant(variant_id)) == NULL) {
-        fprintf(stderr, "process: unknown variant %" PRIu8 " (station=0x%04" PRIX16 ", size=%d)\n", variant_id, station_id, packet_length);
+        fprintf(stderr, "process: unknown variant %" PRIu8 " (station=%04" PRIX16 ", size=%d)\n", variant_id, station_id, packet_length);
         stat_on_packet_decode_error(state->stat_state, station_id, variant_id);
         return;
     }
@@ -59,7 +59,7 @@ void process_sensor_packet(process_state_t *state, const uint8_t *packet_buffer,
     iotdata_decode_to_json_scratch_t scratch;
     iotdata_status_t rc;
     if ((rc = iotdata_decode_to_json(packet_buffer, (size_t)packet_length, &json, &scratch)) != IOTDATA_OK) {
-        fprintf(stderr, "process: decode failed: %s (variant=%" PRIu8 ", station=0x%04" PRIX16 ", size=%d)\n", iotdata_strerror(rc), variant_id, station_id, packet_length);
+        fprintf(stderr, "process: decode failed: %s (variant=%" PRIu8 ", station=%04" PRIX16 ", size=%d)\n", iotdata_strerror(rc), variant_id, station_id, packet_length);
         stat_on_packet_decode_error(state->stat_state, station_id, variant_id);
         return;
     }
@@ -95,7 +95,7 @@ void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, i
     const uint8_t ctrl_type = iotdata_mesh_peek_ctrl_type(packet_buffer, packet_length);
     state->mesh_state->stat_mesh_ctrl_rx++;
     if (state->mesh_state->debug)
-        printf("process: mesh rx %s from station=0x%04" PRIX16 ", sequence=%" PRIu16 " (%d bytes)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id, sequence, packet_length);
+        printf("process: mesh rx %s from station=%04" PRIX16 ", sequence=%" PRIu16 " (%d bytes)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id, sequence, packet_length);
     // Track the sender's whole transmission stream (sender_seq is shared across all mesh frame
     // types), so tx.gaps = frames of any type we missed = relay->gateway link loss.
     network_note_transmit(&state->network, station_id, sequence, time(NULL));
@@ -105,29 +105,28 @@ void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, i
         // duplicate forwards (mesh_handle_forward returns false on a duplicate and only hands back
         // `inner` on a new one). This is a cheap header parse, not a second dedup.
         iotdata_mesh_forward_t fw;
-        if (!iotdata_mesh_unpack_forward(packet_buffer, packet_length, &fw)) {
+        if (iotdata_mesh_unpack_forward(packet_buffer, packet_length, &fw)) {
+            uint8_t inner_variant = 0;
+            uint16_t inner_station = 0, inner_sequence = 0;
+            const bool inner_ok = (iotdata_peek(fw.inner_packet, (size_t)fw.inner_len, &inner_variant, &inner_station, &inner_sequence) == IOTDATA_OK);
+            const uint8_t *inner;
+            int inner_len;
+            // mesh_handle_forward is the single dedup + ACK point for forwards; its return is new-vs-dup.
+            const bool is_new = mesh_handle_forward(state->mesh_state, packet_buffer, packet_length, &inner, &inner_len);
+            network_note_forward(&state->network, fw.sender_station, time(NULL)); /* the relay's forwarding load */
+            if (inner_ok)                                                         /* count the reception (new or duplicate) against the ORIGIN sensor; no rssi (that hop is relay->gateway) */
+                network_note_receive(&state->network, fw.origin_station, inner_variant, fw.origin_sequence, NET_PATH_MESH, is_new, 0, fw.sender_station, time(NULL));
+            if (is_new) {
+                if (!inner_ok) {
+                    fprintf(stderr, "process: mesh FORWARD inner packet peek failed (len=%d)\n", fw.inner_len);
+                    stat_on_link_rx_drop(state->stat_state);
+                } else
+                    // rssi_packet on a relayed packet is the RELAY->gateway hop, not sensor->gateway —
+                    // read it alongside "via":"mesh" (and the differing station id) for which link it measures.
+                    process_sensor_packet(state, inner, inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi);
+            }
+        } else
             stat_on_link_rx_drop(state->stat_state);
-            break;
-        }
-        uint8_t inner_variant = 0;
-        uint16_t inner_station = 0, inner_sequence = 0;
-        const bool inner_ok = (iotdata_peek(fw.inner_packet, (size_t)fw.inner_len, &inner_variant, &inner_station, &inner_sequence) == IOTDATA_OK);
-        const uint8_t *inner;
-        int inner_len;
-        // mesh_handle_forward is the single dedup + ACK point for forwards; its return is new-vs-dup.
-        const bool is_new = mesh_handle_forward(state->mesh_state, packet_buffer, packet_length, &inner, &inner_len);
-        network_note_forward(&state->network, fw.sender_station, time(NULL)); /* the relay's forwarding load */
-        if (inner_ok)                                                         /* count the reception (new or duplicate) against the ORIGIN sensor; no rssi (that hop is relay->gateway) */
-            network_note_receive(&state->network, fw.origin_station, inner_variant, fw.origin_sequence, NET_PATH_MESH, is_new, 0, fw.sender_station, time(NULL));
-        if (is_new) {
-            if (!inner_ok) {
-                fprintf(stderr, "process: mesh FORWARD inner packet peek failed (len=%d)\n", fw.inner_len);
-                stat_on_link_rx_drop(state->stat_state);
-            } else
-                // rssi_packet on a relayed packet is the RELAY->gateway hop, not sensor->gateway —
-                // read it alongside "via":"mesh" (and the differing station id) for which link it measures.
-                process_sensor_packet(state, inner, inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi);
-        }
         break;
     }
     case IOTDATA_MESH_CTRL_BEACON: {
@@ -142,13 +141,14 @@ void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, i
     case IOTDATA_MESH_CTRL_ACK:
         state->mesh_state->stat_acks_rx++;
         if (state->mesh_state->debug)
-            printf("process: mesh rx unexpected ACK from station=0x%04" PRIX16 "\n", station_id);
+            printf("process: mesh rx unexpected ACK from station=%04" PRIX16 "\n", station_id);
         break;
     case IOTDATA_MESH_CTRL_ROUTE_ERROR:
         mesh_handle_route_error(state->mesh_state, packet_buffer, packet_length);
         break;
     case IOTDATA_MESH_CTRL_NEIGHBOUR_RPT:
-        mesh_handle_neighbour_report(state->mesh_state, packet_buffer, packet_length);
+        mesh_handle_neighbour_report(state->mesh_state, packet_buffer, packet_length);            /* mesh-layer log */
+        network_note_neighbour_report(&state->network, packet_buffer, packet_length, time(NULL)); /* relay hears[] + both-ends RSSI */
         break;
     case IOTDATA_MESH_CTRL_PONG:
         mesh_handle_pong(state->mesh_state, packet_buffer, packet_length);
@@ -156,7 +156,7 @@ void process_mesh_packet(process_state_t *state, const uint8_t *packet_buffer, i
     default:
         state->mesh_state->stat_mesh_unknown++;
         if (state->mesh_state->debug)
-            printf("process: mesh rx unknown ctrl_type=0x%02" PRIX8 " from station=0x%04" PRIX16 "\n", ctrl_type, station_id);
+            printf("process: mesh rx unknown ctrl_type=0x%02" PRIX8 " from station=%04" PRIX16 "\n", ctrl_type, station_id);
         break;
     }
 }
@@ -182,7 +182,7 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
         printf("process: variant[%d] = \"%s\" (pres_bytes=%" PRIu8 ") -> %s/%s/<station>\n", i, vdef->name, vdef->num_pres_bytes, state->mqtt_topic_prefix, vdef->name);
     }
     if (state->mesh_state->enabled)
-        printf("process: variant[15] = mesh control (gateway station=0x%04" PRIX16 ")\n", state->mesh_state->station_id);
+        printf("process: variant[15] = mesh control (gateway station=%04" PRIX16 ")\n", state->mesh_state->station_id);
 
     // Send one beacon immediately so relays can attach at startup rather than after a full
     // beacon_interval: intervalable() deliberately primes (returns 0) on its first call, which
@@ -212,7 +212,7 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
             } else if (variant_id == IOTDATA_MESH_VARIANT) {
                 if (!state->mesh_state->enabled) {
                     stat_on_link_rx_mesh_unexpected(state->stat_state, station_id);
-                    printf("process: mesh packet unexpected from station=0x%04" PRIX16 " while not enabled\n", station_id);
+                    printf("process: mesh packet unexpected from station=%04" PRIX16 " while not enabled\n", station_id);
                 } else
                     process_mesh_packet(state, packet_buffer, packet_length, variant_id, station_id, sequence, state->mqtt_topic_prefix, packet_rssi);
             } else {

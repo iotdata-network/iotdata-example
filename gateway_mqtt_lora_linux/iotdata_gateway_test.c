@@ -209,8 +209,8 @@ static bool test_mesh_ack_send_ok(void) {
     iotdata_mesh_ack_t ack;
     ASSERT(iotdata_mesh_unpack_ack(captured_packets[0], captured_lengths[0], &ack));
     ASSERT_EQ_INT(ack.sender_station, 0x0001u);
-    ASSERT_EQ_INT(ack.fwd_station, 0x0002u);
-    ASSERT_EQ_INT(ack.fwd_seq, 100u);
+    ASSERT_EQ_INT(ack.origin_station, 0x0002u);
+    ASSERT_EQ_INT(ack.origin_sequence, 100u);
     return true;
 }
 

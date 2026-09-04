@@ -125,7 +125,7 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
     else
         fprintf(stderr, "manage: unknown cmd '%s'\n", cmd);
     if (n > 0)
-        printf("manage: request cmd='%s' target=0x%03X station=0x%03X -> MANAGE (%d bytes)\n", cmd, (unsigned)target, (unsigned)station, n);
+        printf("manage: request cmd='%s' target=%04X station=%04X -> MANAGE (%d bytes)\n", cmd, (unsigned)target, (unsigned)station, n);
     cJSON_Delete(root);
 
     if (n <= 0 || n > GWMQTT_MANAGE_BUF_MAX) {
@@ -192,7 +192,7 @@ bool gwmqtt_manage_begin(gwmqtt_manage_state_t *st, const char *topic_prefix, ui
         st->enabled = false;
         return false;
     }
-    printf("manage: enabled, station=0x%04" PRIX16 ", request-topic='%s'\n", station_id, st->topic_req);
+    printf("manage: enabled, station=%04" PRIX16 ", request-topic='%s'\n", station_id, st->topic_req);
     return true;
 }
 

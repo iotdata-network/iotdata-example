@@ -354,7 +354,7 @@ void iotdata_mesh_config_populate(mesh_state_t *cfg) {
     cfg->beacon_interval = (time_t)config_get_integer("mesh-beacon-interval", INTERVAL_BEACON_DEFAULT);
     cfg->debug = config_get_bool("mesh-debug", false);
 
-    printf("config: mesh: enabled=%c, station-id=0x%04" PRIX16 ", beacon-interval=%" PRIu32 "s, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->station_id, (uint32_t)cfg->beacon_interval, cfg->debug ? "on" : "off");
+    printf("config: mesh: enabled=%c, station-id=%04" PRIX16 ", beacon-interval=%" PRIu32 "s, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->station_id, (uint32_t)cfg->beacon_interval, cfg->debug ? "on" : "off");
 }
 
 void iotdata_ddup_config_populate(ddup_state_t *cfg) {

@@ -180,7 +180,7 @@ bool stat_begin(stat_state_t *s, const char *version, uint16_t gateway_id, const
     s->link.packet_rate_idx = lora_config->packet_rate;
     s->link.transmit_power_idx = lora_config->transmit_power;
 
-    printf("stats: started (gateway=0x%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", s->gateway_id, s->link.name, s->link.channel, s->link.frequency_khz);
+    printf("stats: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", s->gateway_id, s->link.name, s->link.channel, s->link.frequency_khz);
 
     return true;
 }
@@ -622,25 +622,25 @@ void stat_publish(const stat_state_t *s, const mesh_state_t *mesh, const ddup_st
     if (!mqtt_is_connected())
         return;
     cJSON *root = stat_build_stat_json(s, mesh, dedup);
-    if (!root)
-        return;
-    char *json = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (!json)
-        return;
-    char topic[STAT_TOPIC_STR_MAX + 8];
-    (void)mqtt_send(snprintf_inline(topic, sizeof(topic), "%s/%04" PRIX16, s->mqtt_topic, s->gateway_id), json, (int)strlen(json));
-    free(json);
+    if (root) {
+        char *json = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (json) {
+            char topic[STAT_TOPIC_STR_MAX + 8];
+            (void)mqtt_send(snprintf_inline(topic, sizeof(topic), "%s/%04" PRIX16, s->mqtt_topic, s->gateway_id), json, (int)strlen(json));
+            free(json);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void stat_display(const stat_state_t *s, const mesh_state_t *mesh, const ddup_state_t *dedup) {
     char *str = stat_build_stat_string(s, mesh, dedup);
-    if (!str)
-        return;
-    printf("%s\n", str);
-    free(str);
+    if (str) {
+        printf("%s\n", str);
+        free(str);
+    }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
