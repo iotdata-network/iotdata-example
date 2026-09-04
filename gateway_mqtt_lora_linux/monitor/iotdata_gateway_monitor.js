@@ -73,13 +73,7 @@ function loadConfig(file) {
     return cfg;
 }
 
-const CONFIG_CANDIDATES = flag('config')
-    ? [flag('config')]
-    : [
-          path.join(__dirname, `iotdata_gateway_monitor.${os.hostname()}.cfg`),
-          path.join(__dirname, 'iotdata_gateway_monitor.cfg'),
-          '/etc/default/iotdata-gateway-monitor',
-      ];
+const CONFIG_CANDIDATES = flag('config') ? [flag('config')] : [path.join(__dirname, `iotdata_gateway_monitor.${os.hostname()}.cfg`), path.join(__dirname, 'iotdata_gateway_monitor.cfg'), '/etc/default/iotdata-gateway-monitor'];
 
 let cfg = {};
 let cfgFrom = '(defaults only)';
@@ -129,7 +123,11 @@ const SEQ_MAX_GAP = parseInt(cfg['stats-max-gap'] ?? '1000', 10);
 // The gateway's own surveyed position. Distances are measured from here.
 const REF =
     cfg['ref-latitude'] !== undefined && cfg['ref-longitude'] !== undefined
-        ? { lat: num(cfg['ref-latitude']), lon: num(cfg['ref-longitude']), alt: num(cfg['ref-altitude'], null) }
+        ? {
+              lat: num(cfg['ref-latitude']),
+              lon: num(cfg['ref-longitude']),
+              alt: num(cfg['ref-altitude'], null),
+          }
         : null;
 
 // station-<ID>-name / -latitude / -longitude / -altitude
@@ -225,9 +223,7 @@ const TRACKER = cfg['tracker-host']
           // usual case needs no setting and a broker on this machine needs no exception. The
           // credential below is a network server API key and this connection leaves the LAN,
           // so defaulting it off would be the wrong way round.
-          tls: /^(true|false)$/i.test(cfg['tracker-tls'] || '')
-              ? /^true$/i.test(cfg['tracker-tls'])
-              : String(cfg['tracker-port'] || '8883') === '8883',
+          tls: /^(true|false)$/i.test(cfg['tracker-tls'] || '') ? /^true$/i.test(cfg['tracker-tls']) : String(cfg['tracker-port'] || '8883') === '8883',
           // Only needed when the server's chain is not in node's built-in store, which for a
           // public network server it will be.
           cafile: cfg['tracker-cafile'] && cfg['tracker-cafile'] !== 'none' ? cfg['tracker-cafile'] : null,
@@ -254,7 +250,14 @@ function decodeSensecapT1000b(body) {
     const groups = up.decoded_payload.messages;
     if (!Array.isArray(groups)) return null;
 
-    const pos = { device: dev.device_id || '?', lat: null, lon: null, battery: null, event: null, t: null };
+    const pos = {
+        device: dev.device_id || '?',
+        lat: null,
+        lon: null,
+        battery: null,
+        event: null,
+        t: null,
+    };
     for (const group of groups)
         for (const m of Array.isArray(group) ? group : [group]) {
             if (!m || typeof m !== 'object') continue;
@@ -331,7 +334,15 @@ function send(event, payload, to) {
 }
 
 function statFor(id) {
-    if (!stats.has(id)) stats.set(id, { id, count: 0, lost: 0, prevSeq: undefined, times: [], rssis: [] });
+    if (!stats.has(id))
+        stats.set(id, {
+            id,
+            count: 0,
+            lost: 0,
+            prevSeq: undefined,
+            times: [],
+            rssis: [],
+        });
     return stats.get(id);
 }
 
@@ -487,7 +498,14 @@ function handleMessage(topic, text) {
         station,
         sequence: body.sequence,
         rssi: body.rssi_packet,
-        site: meta ? { name: meta.name || null, lat: meta.latitude ?? null, lon: meta.longitude ?? null, distance: meta.distance ?? null } : null,
+        site: meta
+            ? {
+                  name: meta.name || null,
+                  lat: meta.latitude ?? null,
+                  lon: meta.longitude ?? null,
+                  distance: meta.distance ?? null,
+              }
+            : null,
         decoded: runDecoders(station, body),
         body,
     });
@@ -544,7 +562,12 @@ function makeLog(file, flushSecs, label) {
         for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => flush(true));
     }
 
-    return { file, append, flush, stat: () => ({ written, dropped, pending: buffer.length }) };
+    return {
+        file,
+        append,
+        flush,
+        stat: () => ({ written, dropped, pending: buffer.length }),
+    };
 }
 
 const packetLog = makeLog(LOG_FILE, LOG_FLUSH, 'log');
@@ -576,7 +599,14 @@ function gnssLogAppend(pos) {
 
 function snapshotSave() {
     if (!SNAPSHOT_FILE) return;
-    const data = { version: SNAPSHOT_VERSION, savedAt: Date.now(), counter, stats: [...stats.values()], history, gnss };
+    const data = {
+        version: SNAPSHOT_VERSION,
+        savedAt: Date.now(),
+        counter,
+        stats: [...stats.values()],
+        history,
+        gnss,
+    };
     // Written to a sibling and renamed rather than in place: rename is atomic, so a restart
     // landing mid-write finds either the previous snapshot or the new one, never a half-written
     // file that has to be thrown away — which would defeat the point on the one occasion it matters.
@@ -611,7 +641,12 @@ function snapshotLoad() {
     gnss.length = 0;
     for (const g of Array.isArray(data.gnss) ? data.gnss.slice(-TRACKER_KEEP) : []) gnss.push(g);
     counter = data.counter || history.length;
-    return { savedAt: data.savedAt, stations: stats.size, packets: history.length, positions: gnss.length };
+    return {
+        savedAt: data.savedAt,
+        stations: stats.size,
+        packets: history.length,
+        positions: gnss.length,
+    };
 }
 
 // Read a JSON Lines file record by record. Streamed rather than read whole: the packet log is
@@ -673,7 +708,13 @@ function snapshotMake(done) {
                 },
                 (err2, lines, bad2) => {
                     if (err2) console.error(`snapshot: rebuild from ${TRACKER_LOG} failed: ${err2.message}`);
-                    done({ packets, bad: (bad || 0) + (bad2 || 0), lines, positions: gnss.length, ms: Date.now() - t0 });
+                    done({
+                        packets,
+                        bad: (bad || 0) + (bad2 || 0),
+                        lines,
+                        positions: gnss.length,
+                        ms: Date.now() - t0,
+                    });
                 }
             );
         }
@@ -692,12 +733,7 @@ function restore(done) {
     }
     if (!LOG_FILE && !TRACKER_LOG) return done('nothing to restore from (no snapshot, no log configured)');
     console.log(`  restore no snapshot at ${SNAPSHOT_FILE}; rebuilding from the log, this takes a moment`);
-    snapshotMake((r) =>
-        done(
-            `rebuilt from log in ${(r.ms / 1000).toFixed(1)}s: ${r.packets} packet(s), ${gnss.length} position(s)` +
-                (r.bad ? `, ${r.bad} unparseable line(s) skipped` : '')
-        )
-    );
+    snapshotMake((r) => done(`rebuilt from log in ${(r.ms / 1000).toFixed(1)}s: ${r.packets} packet(s), ${gnss.length} position(s)` + (r.bad ? `, ${r.bad} unparseable line(s) skipped` : '')));
 }
 
 if (SNAPSHOT_FILE) {
@@ -777,9 +813,7 @@ setInterval(() => send('stats', snapshot()), 5000);
 
 // The gateway's own position in the title bar, linked the same way the station distances
 // are. Empty when no reference is configured, which also disables distances.
-const REF_LINK = REF
-    ? `<a class="ref" href="https://www.google.com/maps/search/?api=1&amp;query=${REF.lat},${REF.lon}" target="_blank" rel="noopener noreferrer">${REF.lat.toFixed(6)}, ${REF.lon.toFixed(6)}</a>`
-    : '';
+const REF_LINK = REF ? `<a class="ref" href="https://www.google.com/maps/search/?api=1&amp;query=${REF.lat},${REF.lon}" target="_blank" rel="noopener noreferrer">${REF.lat.toFixed(6)}, ${REF.lon.toFixed(6)}</a>` : '';
 
 // ---------------------------------------------------------------------------- page
 
@@ -1128,7 +1162,10 @@ const server = http.createServer((req, res) => {
     const url = req.url.split('?')[0];
 
     if (url === '/' || url === '/index.html') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+        });
         res.end(PAGE);
         return;
     }
@@ -1137,7 +1174,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-store',
-            Connection: 'keep-alive',
+            'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no',
         });
         // Replay what we have so a phone arriving late, or reconnecting after the screen slept,
@@ -1190,8 +1227,7 @@ server.listen(PORT, BIND, () => {
 
     if (TRACKER) {
         console.log(`  tracker ${TRACKER.type}  ${TRACKER.host}:${TRACKER.port}  topic ${TRACKER.topic}  ${TRACKER.tls ? `tls${TRACKER.cafile ? ` (${TRACKER.cafile})` : ''}` : 'NO TLS'}`);
-        if (!TRACKER_TYPES[TRACKER.type])
-            console.error(`  tracker UNKNOWN TYPE '${TRACKER.type}': positions will be ignored (known: ${Object.keys(TRACKER_TYPES).join(', ')})`);
+        if (!TRACKER_TYPES[TRACKER.type]) console.error(`  tracker UNKNOWN TYPE '${TRACKER.type}': positions will be ignored (known: ${Object.keys(TRACKER_TYPES).join(', ')})`);
         if (TRACKER_LOG) {
             // Same reasoning as the packet log: fail at startup, not once a minute for a month.
             try {
