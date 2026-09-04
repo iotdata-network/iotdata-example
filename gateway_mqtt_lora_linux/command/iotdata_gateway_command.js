@@ -73,28 +73,28 @@ function parseStation(s) {
 // ------------------------------------------------------------------------------------------------------------------------
 
 const COMMANDS = {
-    status: {
+    'status': {
         summary: 'dump status + peers + filter to the node console',
         usage: 'status',
         build() {
             return { cmd: 'status' };
         },
     },
-    peers: {
+    'peers': {
         summary: 'dump the node peer (neighbour) table',
         usage: 'peers',
         build() {
             return { cmd: 'peers' };
         },
     },
-    stations: {
+    'stations': {
         summary: 'dump the "stations heard" table (mesh peers + sensors)',
         usage: 'stations',
         build() {
             return { cmd: 'stations' };
         },
     },
-    flush: {
+    'flush': {
         summary: 'clear the peer table (force re-discovery)',
         usage: 'flush',
         build() {
@@ -108,28 +108,28 @@ const COMMANDS = {
             return { cmd: 'peers-remove', station: parseStation(a[0]) };
         },
     },
-    block: {
+    'block': {
         summary: 'block RX from a station (blacklist) — e.g. block the gateway to force a hop',
         usage: 'block <station>',
         build(a) {
             return { cmd: 'block', station: parseStation(a[0]) };
         },
     },
-    allow: {
+    'allow': {
         summary: 'whitelist a station (when any exist, only allowed stations pass)',
         usage: 'allow <station>',
         build(a) {
             return { cmd: 'allow', station: parseStation(a[0]) };
         },
     },
-    unfilter: {
+    'unfilter': {
         summary: 'remove a station from the filter',
         usage: 'unfilter <station>',
         build(a) {
             return { cmd: 'unfilter', station: parseStation(a[0]) };
         },
     },
-    filters: {
+    'filters': {
         summary: 'dump the station filter table',
         usage: 'filters',
         build() {
@@ -143,7 +143,7 @@ const COMMANDS = {
             return a[0] ? { cmd: 'filter-clear', scope: a[0] } : { cmd: 'filter-clear' };
         },
     },
-    raw: {
+    'raw': {
         summary: 'send a raw JSON request (power user), e.g. raw \'{"cmd":"status"}\'',
         usage: 'raw <json>',
         build(args) {

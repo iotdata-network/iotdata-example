@@ -1,6 +1,6 @@
 
 ##
-## iotdata gateway monitor — install only; the target is a script, so there is nothing to build.
+## iotdata gateway monitor — install only
 ##
 
 TARGET=iotdata_gateway_monitor
@@ -9,7 +9,6 @@ SCRIPT=$(TARGET).js
 all: node_modules
 	@echo "nothing to build ($(SCRIPT) is a script); use 'make install'"
 
-# The single dependency, pinned to the version the apex tier (lib/package.json) already uses.
 node_modules: package.json
 	npm install --omit=dev
 	@touch node_modules
@@ -27,9 +26,6 @@ format:
 
 ##
 
-# Runtime dependencies rather than build ones: node runs the script and npm fetches the one
-# module it needs. mosquitto-clients is no longer among them — the monitor speaks MQTT itself
-# now — though mosquitto_pub remains handy for poking at the broker by hand.
 DEV_PACKAGES=nodejs npm
 install-dev:
 	apt install -y $(DEV_PACKAGES)
@@ -44,8 +40,6 @@ DIR_INSTALL=/usr/local/bin
 DIR_LIB=/usr/local/lib/iotdata-gateway-monitor
 DIR_DEFAULT=/etc/default
 DIR_SYSTEMD=/etc/systemd/system
-# Prefer a per-host config ($(TARGET).<hostname>.cfg) over the shared default,
-# matching the convention used by the gateway, hostmon and connmon.
 HOSTNAME:=$(shell hostname)
 CFG_SRC:=$(if $(wildcard $(TARGET).$(HOSTNAME).cfg),$(TARGET).$(HOSTNAME).cfg,$(TARGET).cfg)
 define install_service_systemd
@@ -56,18 +50,12 @@ define install_service_systemd
 	systemctl enable $(2)
 	systemctl start $(2) || echo "Warning: Failed to start $(2)"
 endef
-# The script needs its node_modules beside it, so it is installed into a directory of its own
-# and symlinked onto the path rather than dropped straight into $(DIR_INSTALL). Node resolves
-# the entry script's real path before it looks for modules, so running the symlink still finds
-# $(DIR_LIB)/node_modules.
 install_target: $(SCRIPT) node_modules
 	install -d $(DIR_LIB)
 	install -m 755 $(SCRIPT) $(DIR_LIB)/$(INSTALL)
 	rm -rf $(DIR_LIB)/node_modules
 	cp -a node_modules $(DIR_LIB)/node_modules
 	ln -sfn $(DIR_LIB)/$(INSTALL) $(DIR_INSTALL)/$(INSTALL)
-# 600, not 644: the config carries the LoRaWAN network server API key the tracker
-# subscription authenticates with, and this file is otherwise world-readable.
 install_default: $(CFG_SRC)
 	@echo "installing config from $(CFG_SRC)"
 	install -m 600 $(CFG_SRC) $(DIR_DEFAULT)/$(INSTALL)
