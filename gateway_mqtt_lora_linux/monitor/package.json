@@ -1,0 +1,16 @@
+{
+  "name": "iotdata-gateway-monitor",
+  "version": "1.0.0",
+  "description": "iotdata gateway monitor — live view of received sensor traffic",
+  "type": "commonjs",
+  "bin": {
+    "iotdata-gateway-monitor": "iotdata_gateway_monitor.js"
+  },
+  "scripts": {
+    "test": "node --check iotdata_gateway_monitor.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "mqtt": "^5.15.1"
+  }
+}
