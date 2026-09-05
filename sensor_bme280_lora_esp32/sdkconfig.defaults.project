@@ -1,0 +1,3 @@
+# Brownout detector: this board runs off a (crappy ~1200mAh) 18650, so trip near end-of-charge
+# to force a clean reset instead of corrupting a flash write as the cell sags under load.
+CONFIG_ESP_BROWNOUT_DET_LVL_SEL_5=y
