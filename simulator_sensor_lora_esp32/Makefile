@@ -13,8 +13,9 @@ IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_
 
 PLATFORM = esp32c3
 NAME     = app
-SOURCES  = main/$(NAME).c
 VERSION  = 1.00
+
+SOURCES  = main/$(NAME).c
 
 ##
 
