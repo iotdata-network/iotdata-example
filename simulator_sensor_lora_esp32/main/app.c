@@ -87,16 +87,16 @@ static inline uint32_t __JITTER(void) {
     return acc;
 }
 
-#define __RANDOM()        (__JITTER() ^ (uint32_t)esp_timer_get_time() ^ (uint32_t)esp_random())
+#define __RANDOM()         (__JITTER() ^ (uint32_t)esp_timer_get_time() ^ (uint32_t)esp_random())
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define STARTUP_DELAY_MS  (5 * 1000)
-#define RSSI_INTERVAL_MS  (5 * 1000)
-#define POLL_INTERVAL_MS  100 /* simulator poll granularity */
-#define STATUS_EVERY_N_TX 50  /* print status every N transmissions */
-#define TEST_FIXED_PAYLOAD 0  /* PHY-crack scaffold, DISABLED. Set to 1 to bypass the simulator and transmit a fixed known 16-byte ramp (see app_exec) — useful for sniffing/decoding the raw LoRa PHY. */
+#define STARTUP_DELAY_MS   (5 * 1000)
+#define RSSI_INTERVAL_MS   (5 * 1000)
+#define POLL_INTERVAL_MS   100 /* simulator poll granularity */
+#define STATUS_EVERY_N_TX  50  /* print status every N transmissions */
+#define TEST_FIXED_PAYLOAD 0   /* PHY-crack scaffold, DISABLED. Set to 1 to bypass the simulator and transmit a fixed known 16-byte ramp (see app_exec) — useful for sniffing/decoding the raw LoRa PHY. */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // EBYTE E22-xxxTxx DIP module GPIO and UART configuration
@@ -108,24 +108,24 @@ static inline uint32_t __JITTER(void) {
 #if IOTDATA_CONFIG_CARRIER
 
 // AE SDC carrier PCB. Avoids USB-Serial-JTAG (GPIO18/19) and the strapping pins (GPIO2/8/9).
-#define PIN_E22_M0        GPIO_NUM_4  /* E22 pin (1) */
-#define PIN_E22_M1        GPIO_NUM_21 /* E22 pin (2) */
-#define PIN_E22_RXD       GPIO_NUM_20 /* E22 pin (3) ESP TX -> module RXD */
-#define PIN_E22_TXD       GPIO_NUM_10 /* E22 pin (4) module TXD -> ESP RX */
-#define PIN_E22_AUX       GPIO_NUM_7  /* E22 pin (5) */
-#define PIN_E22_VCC                   /* E22 pin (6) */
-#define PIN_E22_GND                   /* E22 pin (7) */
+#define PIN_E22_M0  GPIO_NUM_4  /* E22 pin (1) */
+#define PIN_E22_M1  GPIO_NUM_21 /* E22 pin (2) */
+#define PIN_E22_RXD GPIO_NUM_20 /* E22 pin (3) ESP TX -> module RXD */
+#define PIN_E22_TXD GPIO_NUM_10 /* E22 pin (4) module TXD -> ESP RX */
+#define PIN_E22_AUX GPIO_NUM_7  /* E22 pin (5) */
+#define PIN_E22_VCC             /* E22 pin (6) */
+#define PIN_E22_GND             /* E22 pin (7) */
 
 #else
 
 // Original bench wiring.
-#define PIN_E22_M0        GPIO_NUM_5 /* E22 pin (1) */
-#define PIN_E22_M1        GPIO_NUM_6 /* E22 pin (2) */
-#define PIN_E22_RXD       GPIO_NUM_7 /* E22 pin (3) ESP TX -> module RXD */
-#define PIN_E22_TXD       GPIO_NUM_8 /* E22 pin (4) module TXD -> ESP RX */
-#define PIN_E22_AUX       GPIO_NUM_9 /* E22 pin (5) */
-#define PIN_E22_VCC                  /* E22 pin (6) */
-#define PIN_E22_GND                  /* E22 pin (7) */
+#define PIN_E22_M0  GPIO_NUM_5 /* E22 pin (1) */
+#define PIN_E22_M1  GPIO_NUM_6 /* E22 pin (2) */
+#define PIN_E22_RXD GPIO_NUM_7 /* E22 pin (3) ESP TX -> module RXD */
+#define PIN_E22_TXD GPIO_NUM_8 /* E22 pin (4) module TXD -> ESP RX */
+#define PIN_E22_AUX GPIO_NUM_9 /* E22 pin (5) */
+#define PIN_E22_VCC            /* E22 pin (6) */
+#define PIN_E22_GND            /* E22 pin (7) */
 
 #endif
 
@@ -293,19 +293,32 @@ static void transmit_packet(const iotsim_packet_t *pkt) {
 
 static const char *reset_reason_str(esp_reset_reason_t r) {
     switch (r) {
-    case ESP_RST_POWERON:   return "POWERON (cold boot / power cycle)";
-    case ESP_RST_EXT:       return "EXT (external reset pin)";
-    case ESP_RST_SW:        return "SW (esp_restart / software)";
-    case ESP_RST_PANIC:     return "PANIC (exception/abort crash)";
-    case ESP_RST_INT_WDT:   return "INT_WDT (interrupt watchdog)";
-    case ESP_RST_TASK_WDT:  return "TASK_WDT (task watchdog)";
-    case ESP_RST_WDT:       return "WDT (other watchdog)";
-    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP (wake from deep sleep)";
-    case ESP_RST_BROWNOUT:  return "BROWNOUT (power dip — check USB/cable/supply)";
-    case ESP_RST_SDIO:      return "SDIO";
-    case ESP_RST_USB:       return "USB (reset over USB peripheral)";
-    case ESP_RST_JTAG:      return "JTAG";
-    default:                return "UNKNOWN";
+    case ESP_RST_POWERON:
+        return "POWERON (cold boot / power cycle)";
+    case ESP_RST_EXT:
+        return "EXT (external reset pin)";
+    case ESP_RST_SW:
+        return "SW (esp_restart / software)";
+    case ESP_RST_PANIC:
+        return "PANIC (exception/abort crash)";
+    case ESP_RST_INT_WDT:
+        return "INT_WDT (interrupt watchdog)";
+    case ESP_RST_TASK_WDT:
+        return "TASK_WDT (task watchdog)";
+    case ESP_RST_WDT:
+        return "WDT (other watchdog)";
+    case ESP_RST_DEEPSLEEP:
+        return "DEEPSLEEP (wake from deep sleep)";
+    case ESP_RST_BROWNOUT:
+        return "BROWNOUT (power dip — check USB/cable/supply)";
+    case ESP_RST_SDIO:
+        return "SDIO";
+    case ESP_RST_USB:
+        return "USB (reset over USB peripheral)";
+    case ESP_RST_JTAG:
+        return "JTAG";
+    default:
+        return "UNKNOWN";
     }
 }
 
@@ -340,8 +353,7 @@ bool app_exec(void) {
        channel (863-870MHz, e.g. 0x0F=865.125). */
     {
         static const uint8_t testbuf[16] = {
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
         };
         ESP_LOGI(__tag_app, "TEST MODE: fixed 16B ramp 00..0F, ch=0x%02X, every 2s", (unsigned)e22_config.channel);
         for (;;) {
@@ -373,8 +385,10 @@ bool app_exec(void) {
     const uint32_t t0 = __MILLIS();
     static iotsim_t sim; // too large for stack
     iotsim_init(&sim, seed, t0, station_base);
-    ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed, (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS));
-    ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS, IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES, (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS / 1000), (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS / 1000));
+    ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed,
+             (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS));
+    ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS, IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES, (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS / 1000),
+             (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS / 1000));
     for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++) {
         const iotsim_sensor_t *s = iotsim_sensor(&sim, i);
         ESP_LOGI(__tag_app, "  [%2d] %-18s stn=%-4" PRIu16 " bat=%" PRIu8 "%%", i, iotdata_vsuite_name(s->variant), s->station_id, s->battery);

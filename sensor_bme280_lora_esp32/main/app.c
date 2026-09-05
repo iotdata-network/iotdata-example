@@ -67,10 +67,10 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #define TX_PERIOD_MS     IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
-#define TX_PERIOD_MIN_MS 1000        /* floor, if a cycle overruns the period  */
-#define STARTUP_DELAY_MS (5 * 1000)  /* cold boot only: let the USB console attach */
-#define CONSOLE_DRAIN_MS 100         /* let the console flush before deep sleep    */
-#define PACKET_MAX       64          /* the packets built here are a dozen bytes   */
+#define TX_PERIOD_MIN_MS 1000                               /* floor, if a cycle overruns the period  */
+#define STARTUP_DELAY_MS (5 * 1000)                         /* cold boot only: let the USB console attach */
+#define CONSOLE_DRAIN_MS 100                                /* let the console flush before deep sleep    */
+#define PACKET_MAX       64                                 /* the packets built here are a dozen bytes   */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // GPIO and UART configuration
@@ -80,30 +80,30 @@
 
 // GEN-LORA-I2C carrier PCB. Avoids USB-Serial-JTAG (GPIO18/19) and the strapping pins (GPIO2/8/9).
 // The BME280 goes on the carrier's 4-pin I2C sensor header, which carries 4.7k pull-ups to 3V3.
-#define PIN_E22_M0     GPIO_NUM_4  /* E22 pin (1) */
-#define PIN_E22_M1     GPIO_NUM_21 /* E22 pin (2) */
-#define PIN_E22_RXD    GPIO_NUM_20 /* E22 pin (3) ESP TX -> module RXD */
-#define PIN_E22_TXD    GPIO_NUM_10 /* E22 pin (4) module TXD -> ESP RX */
-#define PIN_E22_AUX    GPIO_NUM_7  /* E22 pin (5) */
-#define PIN_E22_VCC                /* E22 pin (6) */
-#define PIN_E22_GND                /* E22 pin (7) */
-#define PIN_BME280_SDA GPIO_NUM_5  /* I2C header pin (3) */
-#define PIN_BME280_SCL GPIO_NUM_6  /* I2C header pin (4) */
-#define PIN_BATTERY_ADC GPIO_NUM_3 /* patch header — divider midpoint (ADC1_CH3) */
-#define PIN_BATTERY_EN  GPIO_NUM_1 /* patch header — divider enable, high = on    */
+#define PIN_E22_M0      GPIO_NUM_4  /* E22 pin (1) */
+#define PIN_E22_M1      GPIO_NUM_21 /* E22 pin (2) */
+#define PIN_E22_RXD     GPIO_NUM_20 /* E22 pin (3) ESP TX -> module RXD */
+#define PIN_E22_TXD     GPIO_NUM_10 /* E22 pin (4) module TXD -> ESP RX */
+#define PIN_E22_AUX     GPIO_NUM_7  /* E22 pin (5) */
+#define PIN_E22_VCC                 /* E22 pin (6) */
+#define PIN_E22_GND                 /* E22 pin (7) */
+#define PIN_BME280_SDA  GPIO_NUM_5  /* I2C header pin (3) */
+#define PIN_BME280_SCL  GPIO_NUM_6  /* I2C header pin (4) */
+#define PIN_BATTERY_ADC GPIO_NUM_3  /* patch header — divider midpoint (ADC1_CH3) */
+#define PIN_BATTERY_EN  GPIO_NUM_1  /* patch header — divider enable, high = on    */
 
 #else
 
 // Original bench wiring.
-#define PIN_E22_M0     GPIO_NUM_5 /* E22 pin (1) */
-#define PIN_E22_M1     GPIO_NUM_6 /* E22 pin (2) */
-#define PIN_E22_RXD    GPIO_NUM_7 /* E22 pin (3) ESP TX -> module RXD */
-#define PIN_E22_TXD    GPIO_NUM_8 /* E22 pin (4) module TXD -> ESP RX */
-#define PIN_E22_AUX    GPIO_NUM_9 /* E22 pin (5) */
-#define PIN_E22_VCC               /* E22 pin (6) */
-#define PIN_E22_GND               /* E22 pin (7) */
-#define PIN_BME280_SDA GPIO_NUM_3
-#define PIN_BME280_SCL GPIO_NUM_4
+#define PIN_E22_M0      GPIO_NUM_5 /* E22 pin (1) */
+#define PIN_E22_M1      GPIO_NUM_6 /* E22 pin (2) */
+#define PIN_E22_RXD     GPIO_NUM_7 /* E22 pin (3) ESP TX -> module RXD */
+#define PIN_E22_TXD     GPIO_NUM_8 /* E22 pin (4) module TXD -> ESP RX */
+#define PIN_E22_AUX     GPIO_NUM_9 /* E22 pin (5) */
+#define PIN_E22_VCC                /* E22 pin (6) */
+#define PIN_E22_GND                /* E22 pin (7) */
+#define PIN_BME280_SDA  GPIO_NUM_3
+#define PIN_BME280_SCL  GPIO_NUM_4
 #define PIN_BATTERY_ADC GPIO_NUM_0 /* divider midpoint (ADC1_CH0) */
 #define PIN_BATTERY_EN  GPIO_NUM_1 /* divider enable, high = on   */
 
@@ -434,7 +434,7 @@ static bool bme280_read(const uint8_t reg, uint8_t *const data, const size_t len
 }
 
 static bool bme280_write(const uint8_t reg, const uint8_t value) {
-    const esp_err_t err = i2c_master_transmit(bme280_i2c_dev, (uint8_t[2]) { reg, value }, 2, BME280_I2C_TIMEOUT_MS);
+    const esp_err_t err = i2c_master_transmit(bme280_i2c_dev, (uint8_t[2]){ reg, value }, 2, BME280_I2C_TIMEOUT_MS);
     if (err != ESP_OK) {
         ESP_LOGE(__tag_bme280, "i2c write (reg=0x%02" PRIX8 ", val=0x%02" PRIX8 "): %s", reg, value, esp_err_to_name(err));
         return false;
@@ -694,23 +694,23 @@ static bool bme280_measure(bme280_calib_t *const calib, bme280_reading_t *const 
  * drain the pack for exactly as long as nobody was looking.
  */
 
-#define BATTERY_DIVIDER_RATIO_X100 200 /* (R1 + R2) / R2, x100 — 330k / 330k = 2.00       */
-#define BATTERY_SETTLE_MS          50  /* 3 tau of (R1||R2) * C1, i.e. 95% settled        */
-#define BATTERY_SAMPLE_COUNT       8
-#define BATTERY_SAMPLE_INTERVAL_US 2000
-#define BATTERY_ADC_ATTEN          ADC_ATTEN_DB_12 /* ~0-2500mV, so a 4.2V cell reads 2.1V */
-#define BATTERY_ADC_BITWIDTH       ADC_BITWIDTH_12
-#define BATTERY_ADC_MAX_MV         2500
-#define BATTERY_ADC_MAX_RAW        4095
+#define BATTERY_DIVIDER_RATIO_X100     200 /* (R1 + R2) / R2, x100 — 330k / 330k = 2.00       */
+#define BATTERY_SETTLE_MS              50  /* 3 tau of (R1||R2) * C1, i.e. 95% settled        */
+#define BATTERY_SAMPLE_COUNT           8
+#define BATTERY_SAMPLE_INTERVAL_US     2000
+#define BATTERY_ADC_ATTEN              ADC_ATTEN_DB_12 /* ~0-2500mV, so a 4.2V cell reads 2.1V */
+#define BATTERY_ADC_BITWIDTH           ADC_BITWIDTH_12
+#define BATTERY_ADC_MAX_MV             2500
+#define BATTERY_ADC_MAX_RAW            4095
 
 /* Li-ion / LiPo. LiFePO4 would be 2500..3650 with a much flatter curve between them. */
-#define BATTERY_MV_MIN  3000
-#define BATTERY_MV_KNEE 3500 /* the two points where a Li-ion discharge curve bends */
-#define BATTERY_MV_MID  3700
-#define BATTERY_MV_MAX  4200
+#define BATTERY_MV_MIN                 3000
+#define BATTERY_MV_KNEE                3500 /* the two points where a Li-ion discharge curve bends */
+#define BATTERY_MV_MID                 3700
+#define BATTERY_MV_MAX                 4200
 
 /* Below this the node is close enough to the end that the gateway should hear about it. */
-#define BATTERY_PCT_LOW 20
+#define BATTERY_PCT_LOW                20
 
 /* A reading this much above the last one is taken as charging; see battery_read(). */
 #define BATTERY_CHARGING_HYSTERESIS_MV 20
@@ -718,10 +718,10 @@ static bool bme280_measure(bme280_calib_t *const calib, bme280_reading_t *const 
 /* Probe limits. With the divider fitted and off, R2 holds the pin at ground; with it on,
    the pin sits at half a plausible battery. Absent, the pin floats and reads arbitrarily,
    but it cannot follow the enable line — which is what the delta test looks for. */
-#define BATTERY_PROBE_OFF_MAX_RAW   200
-#define BATTERY_PROBE_DELTA_MIN_RAW 500
-#define BATTERY_PROBE_MV_MIN        2000
-#define BATTERY_PROBE_MV_MAX        4500
+#define BATTERY_PROBE_OFF_MAX_RAW      200
+#define BATTERY_PROBE_DELTA_MIN_RAW    500
+#define BATTERY_PROBE_MV_MIN           2000
+#define BATTERY_PROBE_MV_MAX           4500
 
 typedef struct {
     int voltage_mv;
