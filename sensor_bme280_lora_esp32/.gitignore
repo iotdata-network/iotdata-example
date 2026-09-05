@@ -1,4 +1,6 @@
 sdkconfig
 sdkconfig.old
+sdkconfig.defaults
+sdkconfig.*.defaults
 build*/
 iotdata_config.*.h

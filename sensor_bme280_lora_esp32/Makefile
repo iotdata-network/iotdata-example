@@ -29,7 +29,7 @@ endif
 
 ##
 
-include $(IOTDATA_SRC)/iotdata-common/make/target-esp32.mk
+include $(IOTDATA_SRC_COMMON)/make/target-esp32.mk
 
 ##
 

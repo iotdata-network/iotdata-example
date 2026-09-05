@@ -33,6 +33,7 @@ SOURCES=$(SOURCES_TARGET) \
 
 ##
 
-include $(IOTDATA_SRC)/iotdata-common/make/target-linux.mk
+include $(IOTDATA_SRC_COMMON)/make/target-linux.mk
 
 ##
+
