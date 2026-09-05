@@ -51,6 +51,8 @@
 
 #pragma GCC diagnostic pop
 
+#include "iotdata_config.h"
+
 /*
  * Every cooperative wait in this app funnels through __SLEEP_MS — directly, or
  * via __sleep_ms() which the e22 driver calls (its AUX wait loop and serial read
@@ -99,12 +101,11 @@ static inline uint32_t __JITTER(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // EBYTE E22-xxxTxx DIP module GPIO and UART configuration
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// Two hardware variants, selected at build time. Define AE_SDC_CARRIER (e.g.
-// `idf.py build -D AE_SDC_CARRIER=1`, or `make AE_SDC_CARRIER=1`) to build for the
-// AE SDC carrier PCB pin map; this is the default. Set it empty (`make AE_SDC_CARRIER=`)
-// for the original bench wiring. See main/CMakeLists.txt and the Makefile.
+// Two hardware variants, selected at build time via IOTDATA_CONFIG_CARRIER (shared header
+// iotdata_config.h; default 1 = AE SDC carrier PCB pin map). Set it 0 (or in a host-local
+// iotdata_config.<host>.h) for the original bench wiring.
 
-#if defined(AE_SDC_CARRIER)
+#if IOTDATA_CONFIG_CARRIER
 
 // AE SDC carrier PCB. Avoids USB-Serial-JTAG (GPIO18/19) and the strapping pins (GPIO2/8/9).
 #define PIN_E22_M0        GPIO_NUM_4  /* E22 pin (1) */
@@ -219,19 +220,10 @@ static void e22_set_pin_mx(const bool pin_m0, const bool pin_m1) {
 static bool e22_get_pin_aux(void) {
     return gpio_get_level(PIN_E22_AUX) == 1;
 }
-#ifndef IOTSIM_CHANNEL
-#define IOTSIM_CHANNEL 0x0A
-#endif
-#ifndef IOTSIM_NETWORK
-#define IOTSIM_NETWORK 0x00
-#endif
-#ifndef IOTSIM_ADDRESS
-#define IOTSIM_ADDRESS 0x0008
-#endif
 static e22900t22_config_t e22_config = {
-    .address = IOTSIM_ADDRESS,
-    .network = IOTSIM_NETWORK,
-    .channel = IOTSIM_CHANNEL,
+    .address = IOTDATA_CONFIG_LORA_ADDRESS,
+    .network = IOTDATA_CONFIG_LORA_NETWORK,
+    .channel = IOTDATA_CONFIG_LORA_CHANNEL,
     .packet_size = E22900T22_CONFIG_PACKET_SIZE_DEFAULT,
     .packet_rate = E22900T22_CONFIG_PACKET_RATE_DEFAULT,
     .crypt = E22900T22_CONFIG_CRYPT_DEFAULT,
@@ -266,18 +258,6 @@ static e22900t22_config_t e22_config = {
  * conversion from internal centi-units to iotdata_float_t correctly
  * under NO_FLOATING (they pass centi-values directly).
  */
-#ifndef IOTSIM_NUM_SENSORS
-#define IOTSIM_NUM_SENSORS 8 /* 8 sensors/board — keeps the shared channel sane with 4 boards */
-#endif
-#ifndef IOTSIM_VARIANT_TYPES
-#define IOTSIM_VARIANT_TYPES 4 /* 4 distinct types/board (2 sensors each); a fleet spreads the 9-type suite out */
-#endif
-#ifndef IOTSIM_TX_MIN_MS
-#define IOTSIM_TX_MIN_MS 20000 /* 20s min interval */
-#endif
-#ifndef IOTSIM_TX_MAX_MS
-#define IOTSIM_TX_MAX_MS 40000 /* 40s max interval */
-#endif
 #define IOTDATA_NO_DECODE
 #define IOTDATA_NO_JSON
 #define IOTDATA_NO_DUMP
@@ -387,15 +367,15 @@ bool app_exec(void) {
     const uint32_t mac32 = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];
     const uint32_t seed = mac32 ? mac32 : 0xDEADBEEFU;
     /* Station ids must fit iotdata's 12-bit station field (<= IOTDATA_STATION_MAX = 4095);
-       give each board a disjoint IOTSIM_NUM_SENSORS-wide band within that range. */
-    const uint16_t nbands = (uint16_t)(IOTDATA_STATION_MAX / IOTSIM_NUM_SENSORS); /* 4095/8 = 511 bands */
-    const uint16_t station_base = (uint16_t)((mac32 % nbands) * (uint32_t)IOTSIM_NUM_SENSORS);
+       give each board a disjoint IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS-wide band within that range. */
+    const uint16_t nbands = (uint16_t)(IOTDATA_STATION_MAX / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS); /* 4095/8 = 511 bands */
+    const uint16_t station_base = (uint16_t)((mac32 % nbands) * (uint32_t)IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
     const uint32_t t0 = __MILLIS();
     static iotsim_t sim; // too large for stack
     iotsim_init(&sim, seed, t0, station_base);
-    ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed, (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTSIM_NUM_SENSORS));
-    ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", IOTSIM_NUM_SENSORS, IOTSIM_VARIANT_TYPES, (unsigned)(IOTSIM_TX_MIN_MS / 1000), (unsigned)(IOTSIM_TX_MAX_MS / 1000));
-    for (int i = 0; i < IOTSIM_NUM_SENSORS; i++) {
+    ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed, (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS));
+    ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS, IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES, (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS / 1000), (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS / 1000));
+    for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++) {
         const iotsim_sensor_t *s = iotsim_sensor(&sim, i);
         ESP_LOGI(__tag_app, "  [%2d] %-18s stn=%-4" PRIu16 " bat=%" PRIu8 "%%", i, iotdata_vsuite_name(s->variant), s->station_id, s->battery);
     }

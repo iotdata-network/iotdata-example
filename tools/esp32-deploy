@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
+
+# --------------------------------------------------------------------------------------
+
 """esp32-deploy: flash a pre-built ESP-IDF image and/or monitor an ESP32 over USB
 serial, on a host with NO IDF toolchain.
 
 Built for the split workflow: build on a fast toolchain host (e.g. workshop), then
 flash and watch on the target host (e.g. iotdata-tst-3) where the boards are plugged
-in. The target needs only python3 + pyserial (already there for esp32-boot) and, for
-flashing, esptool — NOT the compiler/cmake/ninja toolchain.
+in. The target needs only python3 + pyserial and, for flashing, esptool — NOT the
+compiler/cmake/ninja toolchain.
 
 Subcommands:
     flash     write a build dir's bootloader + partition-table + app to the chip
@@ -40,6 +43,8 @@ Dependencies on the target host (none are the compiler toolchain):
     rsync + ssh                --pull only
 """
 
+# --------------------------------------------------------------------------------------
+
 import argparse
 import json
 import os
@@ -50,8 +55,11 @@ import sys
 import time
 
 # --------------------------------------------------------------------------------------
-# Serial monitor (colored logs, disconnect/reconnect, optional command injection).
-# Carried over from iotdata-device/sds/tools/esp32-boot so this tool is a superset.
+
+def die(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
 # --------------------------------------------------------------------------------------
 
 COLORS = {
@@ -65,14 +73,12 @@ CYAN = "\033[36m"
 LOG_RE = re.compile(r"^[IDEW] \(\d+\) ")
 COMMAND_REQUEST = "COMMAND:REQUEST"
 
-
 def print_line(line):
     match = LOG_RE.match(line)
     if match and line[0] in COLORS:
         print(f"{COLORS[line[0]]}{line}{RESET}")
     else:
         print(line)
-
 
 def wait_for_port(port):
     polls = 0
@@ -82,10 +88,8 @@ def wait_for_port(port):
         polls += 1
         time.sleep(0.01)
 
-
 def monitor(port, command=None, reset=True):
     import serial  # imported lazily so `flash` works without pyserial
-
     buf = b""
     first_connect = True
     while True:
@@ -94,7 +98,6 @@ def monitor(port, command=None, reset=True):
             wait_for_port(port)
             print(f"\n{RED}--- DEVICE RECONNECTED{RESET}", flush=True)
             buf = b""
-
         try:
             with serial.Serial(port, 115200) as s:
                 if first_connect:
@@ -113,7 +116,6 @@ def monitor(port, command=None, reset=True):
                     s.write(f"{command}\n".encode())
                     s.flush()
                     print(f"{CYAN}COMMAND:INJECT (preload): {command}{RESET}")
-
                 while True:
                     data = s.read(s.in_waiting or 1)
                     if not data:
@@ -130,16 +132,7 @@ def monitor(port, command=None, reset=True):
         except serial.SerialException:
             continue
 
-
 # --------------------------------------------------------------------------------------
-# Flashing — drive esptool from a build dir's flasher_args.json (no IDF needed).
-# --------------------------------------------------------------------------------------
-
-
-def die(msg):
-    print(f"error: {msg}", file=sys.stderr)
-    sys.exit(1)
-
 
 def find_esptool():
     """Return an argv prefix that runs esptool, or None. Prefer the module form so a
@@ -158,7 +151,6 @@ def find_esptool():
             continue
     return None
 
-
 def esptool_major(esptool):
     """Best-effort major version of the esptool argv prefix (None if undetermined)."""
     try:
@@ -168,7 +160,6 @@ def esptool_major(esptool):
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
 
-
 def load_flasher_args(build_dir):
     path = os.path.join(build_dir, "flasher_args.json")
     if not os.path.isfile(path):
@@ -176,50 +167,18 @@ def load_flasher_args(build_dir):
     with open(path) as f:
         return json.load(f)
 
-
-def run_pull(remote, dest):
-    """rsync the three flash binaries + flasher_args.json from a remote build dir into
-    `dest`, preserving their relative subdirs. `remote` is host:/path/to/build."""
-    if not shutil.which("rsync"):
-        die("--pull needs rsync (and ssh) on this host")
-    if ":" not in remote:
-        die(f"--pull expects HOST:PATH, got {remote!r}")
-    host, rpath = remote.split(":", 1)
-    rpath = rpath.rstrip("/")
-    os.makedirs(dest, exist_ok=True)
-
-    def fetch(rel):
-        local = os.path.join(dest, rel)
-        os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
-        src = f"{host}:{rpath}/{rel}"
-        print(f"{CYAN}pull{RESET} {src}")
-        r = subprocess.run(["rsync", "-az", src, local])
-        if r.returncode != 0:
-            die(f"rsync failed for {src}")
-
-    fetch("flasher_args.json")
-    with open(os.path.join(dest, "flasher_args.json")) as f:
-        fa = json.load(f)
-    for rel in sorted(set(fa["flash_files"].values())):
-        fetch(rel)
-    return dest
-
-
 def do_flash(port, build_dir, baud):
     esptool = find_esptool()
     if not esptool:
         die("esptool not found — install it with:  pip install esptool  (this is not the IDF toolchain)")
-
     fa = load_flasher_args(build_dir)
     extra = fa.get("extra_esptool_args", {})
     chip = extra.get("chip", "esp32c3")
-
     # verify the referenced binaries are actually present before touching the chip
     files = fa["flash_files"]  # { "0xNNN": "relative/path.bin", ... }
     for rel in files.values():
         if not os.path.isfile(os.path.join(build_dir, rel)):
             die(f"missing binary {rel!r} in {build_dir} (rebuild, or --pull it from the build host)")
-
     # esptool v5 (ESP-IDF v6+) hyphenates its subcommands, option flags and reset
     # modes ("write-flash", "--flash-mode", "default-reset"); esptool v4 (the apt/pip
     # package) uses underscores. flasher_args.json is written in the BUILD's style, so
@@ -233,17 +192,12 @@ def do_flash(port, build_dir, baud):
     def mode(key, dflt):  # a reset-mode VALUE
         s = extra.get(key, dflt)
         return s.replace("_", "-") if v5 else s.replace("-", "_")
-
-    argv = list(esptool) + ["--chip", chip, "--port", port, "--baud", str(baud),
-                            "--before", mode("before", "default_reset"),
-                            "--after",  mode("after",  "hard_reset")]
+    argv = list(esptool) + ["--chip", chip, "--port", port, "--baud", str(baud), "--before", mode("before", "default_reset"), "--after",  mode("after",  "hard_reset")]
     if extra.get("stub", True) is False:
         argv += ["--no-stub"]
-    argv += ["write-flash" if v5 else "write_flash",
-             *(flag(a) for a in fa.get("write_flash_args", []))]
+    argv += ["write-flash" if v5 else "write_flash", *(flag(a) for a in fa.get("write_flash_args", []))]
     for offset in sorted(files, key=lambda o: int(o, 16)):
         argv += [offset, files[offset]]
-
     print(f"{CYAN}flash{RESET} chip={chip} port={port} dir={build_dir}")
     for offset in sorted(files, key=lambda o: int(o, 16)):
         print(f"       {offset:>8}  {files[offset]}")
@@ -253,9 +207,32 @@ def do_flash(port, build_dir, baud):
         die(f"esptool exited {r.returncode}")
     print(f"{COLORS['I']}flash complete{RESET}")
 
-
 # --------------------------------------------------------------------------------------
 
+def run_pull(remote, dest):
+    """rsync the three flash binaries + flasher_args.json from a remote build dir into
+    `dest`, preserving their relative subdirs. `remote` is host:/path/to/build."""
+    if not shutil.which("rsync"):
+        die("--pull needs rsync (and ssh) on this host")
+    if ":" not in remote:
+        die(f"--pull expects HOST:PATH, got {remote!r}")
+    host, rpath = remote.split(":", 1)
+    rpath = rpath.rstrip("/")
+    os.makedirs(dest, exist_ok=True)
+    def fetch(rel):
+        local = os.path.join(dest, rel)
+        os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
+        src = f"{host}:{rpath}/{rel}"
+        print(f"{CYAN}pull{RESET} {src}")
+        r = subprocess.run(["rsync", "-az", src, local])
+        if r.returncode != 0:
+            die(f"rsync failed for {src}")
+    fetch("flasher_args.json")
+    with open(os.path.join(dest, "flasher_args.json")) as f:
+        fa = json.load(f)
+    for rel in sorted(set(fa["flash_files"].values())):
+        fetch(rel)
+    return dest
 
 def resolve_build_dir(args):
     if args.pull:
@@ -264,6 +241,7 @@ def resolve_build_dir(args):
         return run_pull(args.pull, dest)
     return args.build_dir or "build"
 
+# --------------------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
@@ -273,34 +251,25 @@ def main():
         epilog=__doc__,
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-
     def add_common(p, build=False):
-        p.add_argument("-p", "--port", default=os.environ.get("ESP32_PORT", "/dev/ttyACM0"),
-                       help="serial port (default: $ESP32_PORT or /dev/ttyACM0)")
+        p.add_argument("-p", "--port", default=os.environ.get("ESP32_PORT", "/dev/ttyACM0"), help="serial port (default: $ESP32_PORT or /dev/ttyACM0)")
         if build:
-            p.add_argument("-b", "--build-dir", default=None,
-                           help="ESP-IDF build directory (default: ./build, or the --pull staging dir)")
-            p.add_argument("--pull", metavar="HOST:PATH", default=None,
-                           help="rsync the build's binaries from a remote build dir first")
+            p.add_argument("-b", "--build-dir", default=None, help="ESP-IDF build directory (default: ./build, or the --pull staging dir)")
+            p.add_argument("--pull", metavar="HOST:PATH", default=None, help="rsync the build's binaries from a remote build dir first")
             p.add_argument("--baud", type=int, default=460800, help="flash baud (ignored on USB-JTAG)")
-
     p_flash = sub.add_parser("flash", help="write a build dir to the chip")
     add_common(p_flash, build=True)
-
     p_mon = sub.add_parser("monitor", help="reset and print the serial console")
     add_common(p_mon)
     p_mon.add_argument("command", nargs="?", default=None, help="command string to inject after boot")
-
     p_dep = sub.add_parser("deploy", help="flash, then monitor")
     add_common(p_dep, build=True)
     p_dep.add_argument("command", nargs="?", default=None, help="command string to inject after boot")
 
     args = parser.parse_args()
-
     if args.cmd == "flash":
         do_flash(args.port, resolve_build_dir(args), args.baud)
         return
-
     if args.cmd == "monitor":
         if not os.path.exists(args.port):
             die(f"{args.port} not found")
@@ -309,7 +278,6 @@ def main():
         except KeyboardInterrupt:
             print()
         return
-
     if args.cmd == "deploy":
         do_flash(args.port, resolve_build_dir(args), args.baud)
         # esptool's --after hard_reset already restarted the app; monitor picks it up
@@ -320,6 +288,8 @@ def main():
             print()
         return
 
-
 if __name__ == "__main__":
     main()
+
+# --------------------------------------------------------------------------------------
+

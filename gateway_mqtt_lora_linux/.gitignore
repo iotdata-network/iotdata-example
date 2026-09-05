@@ -2,3 +2,4 @@ iotdata_gateway
 iotdata_gateway_test
 node_modules
 package-lock.json
+iotdata_config.*.h

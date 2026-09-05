@@ -156,7 +156,8 @@ void __sleep_ms(const uint32_t ms) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#include "iotdata_variant_suite.h"
+#include "iotdata_config.h"
+#include "iotdata_variant.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
 
@@ -303,9 +304,9 @@ void lora_config_populate(serial_config_t *cfg_serial, e22900t22_config_t *cfg) 
     cfg_serial->rate = config_get_integer("lora-rate", SERIAL_RATE_DEFAULT);
     cfg_serial->bits = config_get_bits("lora-bits", SERIAL_BITS_DEFAULT);
 
-    cfg->address = (uint16_t)config_get_integer("lora-address", E22900T22_CONFIG_ADDRESS_DEFAULT);
-    cfg->network = (uint8_t)config_get_integer("lora-network", E22900T22_CONFIG_NETWORK_DEFAULT);
-    cfg->channel = (uint8_t)config_get_integer("lora-channel", E22900T22_CONFIG_CHANNEL_DEFAULT);
+    cfg->address = (uint16_t)config_get_integer("lora-address", IOTDATA_CONFIG_LORA_ADDRESS);
+    cfg->network = (uint8_t)config_get_integer("lora-network", IOTDATA_CONFIG_LORA_NETWORK);
+    cfg->channel = (uint8_t)config_get_integer("lora-channel", IOTDATA_CONFIG_LORA_CHANNEL);
     cfg->crypt = (uint16_t)config_get_integer("lora-crypt", E22900T22_CONFIG_CRYPT_DEFAULT);
     cfg->packet_size = (uint8_t)config_get_integer("lora-packet-size", E22900T22_CONFIG_PACKET_SIZE_DEFAULT);          // index
     cfg->packet_rate = (uint8_t)config_get_integer("lora-packet-rate", E22900T22_CONFIG_PACKET_RATE_DEFAULT);          // index

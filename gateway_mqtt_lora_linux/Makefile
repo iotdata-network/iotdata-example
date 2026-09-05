@@ -1,132 +1,48 @@
 
-include ../../iotdata-common/make/config.mk
+##
 
-DIR_IOTDATA=$(IOTDATA_SRC_LIBRARY)
-DIR_IOTDATA_VARIANT=$(IOTDATA_SRC_EXAMPLE_COMMON)
-DIR_E22XXXTXX=$(IOTDATA_SRC_DEPEND)/e22900t22/include
+IOTDATA_SRC=../..
+include $(IOTDATA_SRC)/iotdata-common/make/config.mk
+include $(IOTDATA_SRC)/iotdata-depend/make/config.mk
+
+# IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
+IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_config.$(IOTDATA_HOST).h iotdata_config.$(IOTDATA_HOST).h))
 
 ##
 
 CC=gcc
-CFLAGS_DEFINES=
-CFLAGS_COMMON=\
-    -Wfloat-conversion -Werror=float-conversion \
-    -Wall -Wextra -Werror -Wpedantic \
-    -Wstrict-prototypes -Wold-style-definition \
-    -Wcast-align -Wcast-qual -Wconversion \
-    -Wfloat-equal -Wformat=2 -Wformat-security \
-    -Winit-self -Wjump-misses-init \
-    -Wlogical-op -Wmissing-include-dirs \
-    -Wnested-externs -Wpointer-arith \
-    -Wredundant-decls -Wshadow \
-    -Wstrict-overflow=2 -Wswitch-default \
-    -Wunreachable-code -Wunused \
-    -Wwrite-strings \
-    -Wdouble-promotion \
-    -Wnull-dereference \
-    -Wduplicated-cond \
-    -Wduplicated-branches \
-    -Wrestrict \
-    -Wstringop-overflow \
-    -Wundef \
-    -Wvla \
-    -Wno-duplicated-branches
-CFLAGS_OPT=-O3
-CFLAGS_INCLUDES=-I$(DIR_IOTDATA) -I$(DIR_E22XXXTXX) -I$(DIR_IOTDATA_VARIANT)
-CFLAGS=$(CFLAGS_COMMON) $(CFLAGS_DEFINES) $(CFLAGS_OPT) $(CFLAGS_INCLUDES)
-LDFLAGS=
-LIBS=-lcjson -lmosquitto -lm -lpthread
+CFLAGS_DEFINES=-DIOTDATA_VARIANT='"$(abspath $(IOTDATA_VARIANT))"'
+ifneq ($(strip $(IOTDATA_CONFIG)),)
+CFLAGS_DEFINES += -DIOTDATA_CONFIG='"$(abspath $(IOTDATA_CONFIG))"'
+endif
+CFLAGS_COMMON=$(IOTDATA_CFLAGS_COMMON)
+CFLAGS_OPT=$(IOTDATA_CFLAGS_OPT)
+CFLAGS_INCLUDES=-I$(IOTDATA_SRC_EXAMPLE)/include -I$(IOTDATA_SRC_LIBRARY) -I$(IOTDATA_SRC_DEPEND_E22XXXTXX) -I$(IOTDATA_SRC_COMMON)/include
+CFLAGS=$(CFLAGS_COMMON) $(CFLAGS_OPT) $(CFLAGS_DEFINES) $(CFLAGS_INCLUDES)
+LDFLAGS=$(IOTDATA_LDFLAGS_COMMON)
+LIBS=$(IOTDATA_LIBS_COMMON) -lmosquitto -lpthread
 
 ##
 
 TARGET=iotdata_gateway
 MAIN=iotdata_gateway.c
-SOURCES=\
-    iotdata_gateway_ddup.h iotdata_gateway_mesh.h iotdata_gateway_stat.h iotdata_gateway_exec.h \
-    iotdata_gateway_mqtt.h iotdata_gateway_netw.h \
-    config_linux.h serial_linux.h mqtt_linux.h \
-    $(DIR_E22XXXTXX)/e22xxxtxx.h \
-    $(DIR_IOTDATA_VARIANT)/iotdata_variant_suite.h \
-    $(DIR_IOTDATA)/iotdata_mesh.h $(DIR_IOTDATA)/iotdata.h $(DIR_IOTDATA)/iotdata.c
+SOURCES_TARGET=\
+    iotdata_gateway_ddup.h iotdata_gateway_mesh.h iotdata_gateway_netw.h iotdata_gateway_stat.h iotdata_gateway_mqtt.h iotdata_gateway_exec.h \
+    config_linux.h serial_linux.h mqtt_linux.h
+SOURCES_DEPEND=\
+    $(IOTDATA_SRC_DEPEND_E22XXXTXX)/e22xxxtxx.h \
+    $(IOTDATA_SRC_COMMON)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
+    $(IOTDATA_SRC_LIBRARY_SOURCES)
+SOURCES=$(SOURCES_TARGET) $(SOURCES_DEPEND)
 
-##
-
-TEST=iotdata_gateway_test
 TEST_MAIN=iotdata_gateway_test.c
-TEST_CFLAGS=$(CFLAGS_COMMON) $(CFLAGS_STRICT) $(CFLAGS_OPT) -I$(DIR_IOTDATA) -I$(DIR_IOTDATA_VARIANT)
-TEST_LIBS=-lpthread
-TEST_SOURCES=\
-    iotdata_gateway_ddup.h iotdata_gateway_mesh.h \
-    $(DIR_IOTDATA)/iotdata_mesh.h
 
-##
-
-all: $(TARGET)
-
-$(TARGET): $(MAIN) $(SOURCES)
-	$(CC) $(CFLAGS) -o $(TARGET) $(MAIN) $(LDFLAGS) $(LIBS)
-
-$(TEST): $(TEST_MAIN) $(TEST_SOURCES)
-	$(CC) $(TEST_CFLAGS) -o $(TEST) $(TEST_MAIN) $(TEST_LIBS)
-
-test: $(TEST)
-	./$(TEST)
-
-clean:
-	rm -f $(TARGET) $(TEST)
-format:
-	clang-format-19 -i $(MAIN) $(SOURCES) $(TEST_MAIN) $(TEST_SOURCES)
-
-.PHONY: all clean format test
-
-##
-
-DEV_PACKAGES=libmosquitto-dev libcjson-dev
-DEV_PACKAGES_ARMHF=$(addsuffix :armhf,$(DEV_PACKAGES))
-install-dev:
-	apt install -y $(DEV_PACKAGES)
-remove-dev:
-	apt purge -y $(DEV_PACKAGES)
-install-dev-armhf:
-	dpkg --add-architecture armhf
-	apt update
-	apt install -y gcc-arm-linux-gnueabihf $(DEV_PACKAGES_ARMHF)
-remove-dev-armhf:
-	apt purge -y gcc-arm-linux-gnueabihf $(DEV_PACKAGES_ARMHF)
-	dpkg --remove-architecture armhf
-	apt update
-.PHONY: install-dev remove-dev install-dev-armhf remove-dev-armhf
-
-##
-
+PACKAGES_DEV=libmosquitto-dev libcjson-dev
 INSTALL=iotdata-gateway
-DIR_INSTALL=/usr/local/bin
-DIR_DEFAULT=/etc/default
-DIR_SYSTEMD=/etc/systemd/system
-# Prefer a per-host config ($(TARGET).<hostname>.cfg) over the shared default,
-# matching the convention used by hostmon and connmon.
-HOSTNAME:=$(shell hostname)
-CFG_SRC:=$(if $(wildcard $(TARGET).$(HOSTNAME).cfg),$(TARGET).$(HOSTNAME).cfg,$(TARGET).cfg)
-define install_service_systemd
-	-systemctl stop $(2) 2>/dev/null || true
-	-systemctl disable $(2) 2>/dev/null || true
-	install -m 644 $(1).service $(DIR_SYSTEMD)/$(2).service
-	systemctl daemon-reload
-	systemctl enable $(2)
-	systemctl start $(2) || echo "Warning: Failed to start $(2)"
-endef
-install_target: $(TARGET)
-	install -m 755 $(TARGET) $(DIR_INSTALL)/$(INSTALL)
-install_default: $(CFG_SRC)
-	@echo "installing config from $(CFG_SRC)"
-	install -m 644 $(CFG_SRC) $(DIR_DEFAULT)/$(INSTALL)
-install_service: $(TARGET).service
-	$(call install_service_systemd,$(TARGET),$(INSTALL))
-install: install_target install_default install_service
-restart:
-	systemctl restart $(INSTALL)
-.PHONY: install install_target install_default install_service
-.PHONY: restart
+
+##
+
+include $(IOTDATA_SRC)/iotdata-common/make/target-linux.mk
 
 ##
 

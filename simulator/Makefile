@@ -1,55 +1,38 @@
 
-include ../../iotdata-common/make/config.mk
+##
 
-DIR_IOTDATA=$(IOTDATA_SRC_LIBRARY)
-DIR_IOTDATA_VARIANT=$(IOTDATA_SRC_EXAMPLE_COMMON)
-DIR_SIMULATOR=.
+IOTDATA_SRC=../..
+include $(IOTDATA_SRC)/iotdata-common/make/config.mk
+IOTDATA_SRC_EXAMPLE_SIMULATOR=$(IOTDATA_SRC_EXAMPLE)/simulator
+
+# IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
+IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_config.$(IOTDATA_HOST).h iotdata_config.$(IOTDATA_HOST).h))
 
 ##
 
 CC=gcc
-CFLAGS_DEFINES=
-CFLAGS_COMMON=-Wall -Wextra -Wpedantic
-CFLAGS_STRICT=-Werror \
-    -Wstrict-prototypes \
-    -Wold-style-definition \
-    -Wcast-align -Wcast-qual -Wconversion \
-    -Wfloat-equal -Wformat=2 -Wformat-security \
-    -Winit-self -Wjump-misses-init \
-    -Wlogical-op -Wmissing-include-dirs \
-    -Wnested-externs -Wpointer-arith \
-    -Wredundant-decls -Wshadow \
-    -Wstrict-overflow=2 -Wswitch-default \
-    -Wundef \
-    -Wunreachable-code -Wunused \
-    -Wwrite-strings
-CFLAGS_OPT=-O3
-CFLAGS_INCLUDES=-I$(DIR_IOTDATA) -I$(DIR_SIMULATOR) -I$(DIR_IOTDATA_VARIANT)
-CFLAGS= $(CFLAGS_COMMON) $(CFLAGS_STRICT) $(CFLAGS_DEFINES) $(CFLAGS_OPT) $(CFLAGS_INCLUDES)
-LDFLAGS=
-LIBS=-lm
+CFLAGS_DEFINES=-DTEST_MAIN -DIOTDATA_VARIANT='"$(abspath $(IOTDATA_VARIANT))"'
+ifneq ($(strip $(IOTDATA_CONFIG)),)
+CFLAGS_DEFINES += -DIOTDATA_CONFIG='"$(abspath $(IOTDATA_CONFIG))"'
+endif
+CFLAGS_COMMON=$(IOTDATA_CFLAGS_COMMON)
+CFLAGS_OPT=$(IOTDATA_CFLAGS_OPT)
+CFLAGS_INCLUDES=-I$(IOTDATA_SRC_EXAMPLE)/include -I$(IOTDATA_SRC_LIBRARY) -I$(IOTDATA_SRC_COMMON)/include
+CFLAGS= $(CFLAGS_COMMON) $(CFLAGS_DEFINES) $(CFLAGS_OPT) $(CFLAGS_INCLUDES)
+LDFLAGS=$(IOTDATA_LDFLAGS_COMMON)
+LIBS=$(IOTDATA_LIBS_COMMON)
 
 ##
 
 TARGET=simulator
-MAIN=$(DIR_SIMULATOR)/iotdata_variant_simulator.c
-SOURCES=$(DIR_SIMULATOR)/iotdata_variant_simulator.h \
-	$(DIR_IOTDATA_VARIANT)/iotdata_variant_suite.h \
-	$(DIR_IOTDATA)/iotdata.h $(DIR_IOTDATA)/iotdata.c
+MAIN=$(IOTDATA_SRC_EXAMPLE_SIMULATOR)/iotdata_variant_simulator.c
+SOURCES_TARGET=$(IOTDATA_SRC_EXAMPLE_SIMULATOR)/iotdata_variant_simulator.h
+SOURCES=$(SOURCES_TARGET) \
+    $(IOTDATA_SRC_COMMON)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
+    $(IOTDATA_SRC_LIBRARY_SOURCES)
 
 ##
 
-all: $(TARGET)
-
-$(TARGET): $(MAIN) $(SOURCES)
-	$(CC) $(CFLAGS) -DTEST_MAIN -o $(TARGET) $(MAIN) $(LDFLAGS) $(LIBS)
-
-clean:
-	rm -f $(TARGET)
-format:
-	clang-format -i $(MAIN) $(SOURCES)
-
-.PHONY: all clean
+include $(IOTDATA_SRC)/iotdata-common/make/target-linux.mk
 
 ##
-

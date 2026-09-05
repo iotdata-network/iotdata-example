@@ -45,8 +45,8 @@ config: ## Show the resolved source paths (from config.mk)
 	@echo "IOTDATA_SRC_DEPEND            = $(IOTDATA_SRC_DEPEND)"
 	@echo "IOTDATA_SRC_COMMON            = $(IOTDATA_SRC_COMMON)"
 	@echo "IOTDATA_SRC_EXAMPLE           = $(IOTDATA_SRC_EXAMPLE)"
-	@echo "IOTDATA_SRC_EXAMPLE_COMMON    = $(IOTDATA_SRC_EXAMPLE_COMMON)"
 	@echo "IOTDATA_SRC_EXAMPLE_SIMULATOR = $(IOTDATA_SRC_EXAMPLE_SIMULATOR)"
+	@echo "IOTDATA_VARIANT               = $(IOTDATA_VARIANT)"
 
 help: ## Show this help
 	@echo "iotdata-example — worked examples (plain 'make' builds the native ones)"

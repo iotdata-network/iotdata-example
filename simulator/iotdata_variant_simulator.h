@@ -22,36 +22,12 @@
 #ifndef IOTDATA_SIMULATOR_H
 #define IOTDATA_SIMULATOR_H
 
-#include "iotdata_variant_suite.h"
-
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 
-/* ---------------------------------------------------------------------------
- * Configuration
- * -------------------------------------------------------------------------*/
-
-#ifndef IOTSIM_NUM_SENSORS
-#define IOTSIM_NUM_SENSORS        16
-#endif
-#ifndef IOTSIM_VARIANT_TYPES
-/* Distinct variant types this instance carries (its "palette"). The pool is
- * shuffled per seed and the first IOTSIM_VARIANT_TYPES taken; the live sensors
- * are spread across them (round-robin). Set this < the suite count so a fleet of
- * instances (each seeded from its own MAC) spreads the suite out, instead of
- * every board carrying nearly all types (which looks correlated on air).
- * Defaults to the whole suite. */
-#define IOTSIM_VARIANT_TYPES      IOTDATA_VSUITE_COUNT
-#endif
-#ifndef IOTSIM_TX_MIN_MS
-#define IOTSIM_TX_MIN_MS          5000  /* 5s  minimum interval  */
-#endif
-#ifndef IOTSIM_TX_MAX_MS
-#define IOTSIM_TX_MAX_MS          15000 /* 15s maximum interval  */
-#endif
-#define IOTSIM_EXTRA_FIELDS_EVERY 10    /* every ~10th TX, add extras */
-#define IOTSIM_MAX_PACKET         128
+#include "iotdata_config.h"
+#include "iotdata_variant.h"
 
 /* ---------------------------------------------------------------------------
  * Per-sensor simulated state
@@ -97,7 +73,7 @@ typedef struct {
  * -------------------------------------------------------------------------*/
 
 typedef struct {
-    iotsim_sensor_t sensors[IOTSIM_NUM_SENSORS];
+    iotsim_sensor_t sensors[IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS];
     uint32_t rng_state; /* xorshift32 state */
     uint32_t time_base; /* sim start time for diurnal */
     int poll_next;      /* round-robin start index for iotsim_poll */
@@ -108,7 +84,7 @@ typedef struct {
  * -------------------------------------------------------------------------*/
 
 typedef struct {
-    uint8_t buf[IOTSIM_MAX_PACKET];
+    uint8_t buf[IOTDATA_CONFIG_SIMULATOR_MAX_PACKET];
     size_t len;
     uint8_t sensor_index; /* which sensor [0..15]  */
     uint8_t variant;      /* variant type          */

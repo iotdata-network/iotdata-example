@@ -1,0 +1,4 @@
+# host-local config/variant overrides (iotdata_config.<host>.h, iotdata_variant.<host>.h) are
+# never committed; the base iotdata_config.h (no <host> segment) is tracked and NOT matched here.
+iotdata_config.*.h
+iotdata_variant.*.h

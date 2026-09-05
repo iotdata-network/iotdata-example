@@ -1,4 +1,4 @@
 sdkconfig
 sdkconfig.old
 build*/
-defines.*.mk
+iotdata_config.*.h

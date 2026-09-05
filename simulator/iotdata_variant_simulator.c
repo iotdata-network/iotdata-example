@@ -14,12 +14,13 @@
 #ifdef TEST_MAIN
 #define IOTDATA_NO_JSON
 #endif
-#include "iotdata_variant_simulator.h"
 
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
+
+#include "iotdata_variant_simulator.h"
 
 /* =========================================================================
  * RNG — xorshift32 (fast, deterministic, good enough for simulation)
@@ -316,7 +317,7 @@ static void _drift_sensor(iotsim_t *sim, iotsim_sensor_t *s) {
 
 static bool _encode_sensor(iotsim_t *sim, iotsim_sensor_t *s, iotsim_packet_t *out, uint32_t time_now_ms) {
     iotdata_encoder_t enc;
-    bool extras = (s->tx_count % IOTSIM_EXTRA_FIELDS_EVERY == 0);
+    bool extras = (s->tx_count % IOTDATA_CONFIG_SIMULATOR_EXTRA_FIELDS_EVERY == 0);
 
     if (iotdata_encode_begin(&enc, out->buf, sizeof(out->buf), s->variant, s->station_id, s->sequence) != IOTDATA_OK)
         return false;
@@ -432,7 +433,7 @@ void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t st
     sim->time_base = time_now_ms;
 
     /* Shuffle the whole variant pool up front, then take the first
-     * IOTSIM_VARIANT_TYPES of it as this instance's PALETTE. The live sensors are
+     * IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES of it as this instance's PALETTE. The live sensors are
      * spread across the palette round-robin (so e.g. 8 sensors over 4 types = 2
      * each, each with independent readings). Seeding per board (e.g. from the MAC)
      * makes a fleet pick different palettes, so the suite spreads across the fleet
@@ -447,16 +448,16 @@ void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t st
         pool[i] = pool[j];
         pool[j] = tmp;
     }
-    int palette_n = IOTSIM_VARIANT_TYPES;
+    int palette_n = IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES;
     if (palette_n > IOTDATA_VSUITE_COUNT)
         palette_n = IOTDATA_VSUITE_COUNT;
-    if (palette_n > IOTSIM_NUM_SENSORS)
-        palette_n = IOTSIM_NUM_SENSORS;
+    if (palette_n > IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS)
+        palette_n = IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS;
     if (palette_n < 1)
         palette_n = 1;
 
     /* Initialise each sensor */
-    for (int i = 0; i < IOTSIM_NUM_SENSORS; i++) {
+    for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++) {
         iotsim_sensor_t *s = &sim->sensors[i];
         memset(s, 0, sizeof(*s));
         s->variant = pool[i % palette_n];
@@ -466,14 +467,14 @@ void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t st
         _init_sensor(sim, s);
 
         /* Stagger initial transmissions over the first interval window */
-        s->tx_interval_ms = (uint32_t)_rng_range(sim, IOTSIM_TX_MIN_MS, IOTSIM_TX_MAX_MS);
+        s->tx_interval_ms = (uint32_t)_rng_range(sim, IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS, IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS);
         s->next_tx_ms = time_now_ms + (uint32_t)_rng_range(sim, 0, (int32_t)s->tx_interval_ms);
     }
 }
 
 bool iotsim_poll(iotsim_t *sim, uint32_t time_now_ms, iotsim_packet_t *out) {
-    for (int n = 0; n < IOTSIM_NUM_SENSORS; n++) {
-        int i = (sim->poll_next + n) % IOTSIM_NUM_SENSORS;
+    for (int n = 0; n < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; n++) {
+        int i = (sim->poll_next + n) % IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS;
         iotsim_sensor_t *s = &sim->sensors[i];
         if ((int32_t)(time_now_ms - s->next_tx_ms) < 0)
             continue;
@@ -487,17 +488,17 @@ bool iotsim_poll(iotsim_t *sim, uint32_t time_now_ms, iotsim_packet_t *out) {
 
         s->sequence++;
         s->tx_count++;
-        s->tx_interval_ms = (uint32_t)_rng_range(sim, IOTSIM_TX_MIN_MS, IOTSIM_TX_MAX_MS);
+        s->tx_interval_ms = (uint32_t)_rng_range(sim, IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS, IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS);
         s->next_tx_ms = time_now_ms + s->tx_interval_ms;
 
-        sim->poll_next = (i + 1) % IOTSIM_NUM_SENSORS;
+        sim->poll_next = (i + 1) % IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS;
         return true;
     }
     return false;
 }
 
 const iotsim_sensor_t *iotsim_sensor(const iotsim_t *sim, int index) {
-    if (index < 0 || index >= IOTSIM_NUM_SENSORS)
+    if (index < 0 || index >= IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS)
         return NULL;
     return &sim->sensors[index];
 }
@@ -592,10 +593,10 @@ int main(int argc, char *argv[]) {
     iotsim_init(&sim, seed, 0, 0);
 
     /* Print sensor allocation */
-    printf("=== Simulator: %d sensors, seed=%" PRIu32 " ===\n\n", IOTSIM_NUM_SENSORS, seed);
+    printf("=== Simulator: %d sensors, seed=%" PRIu32 " ===\n\n", IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS, seed);
     printf("  ID  Variant             Station\n");
     printf("  --  ------------------  -------\n");
-    for (int i = 0; i < IOTSIM_NUM_SENSORS; i++) {
+    for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++) {
         const iotsim_sensor_t *s = iotsim_sensor(&sim, i);
         printf("  %2d  %-18s  %" PRIu16 "\n", i, iotdata_vsuite_name(s->variant), s->station_id);
     }
@@ -633,7 +634,7 @@ int main(int argc, char *argv[]) {
 
     printf("  ID  Variant             TXs  Bat%%  Last seq\n");
     printf("  --  ------------------  ---  ----  --------\n");
-    for (int i = 0; i < IOTSIM_NUM_SENSORS; i++) {
+    for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++) {
         const iotsim_sensor_t *s = iotsim_sensor(&sim, i);
         printf("  %2d  %-18s  %3" PRIu32 "  %3" PRIu8 "%%  %" PRIu16 "\n", i, iotdata_vsuite_name(s->variant), s->tx_count, s->battery, s->sequence);
     }

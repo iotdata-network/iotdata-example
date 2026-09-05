@@ -60,11 +60,13 @@
 
 #pragma GCC diagnostic pop
 
+#include "iotdata_config.h" // shared IOTDATA_CONFIG_* knobs (+ host-local iotdata_config.<host>.h override)
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // Application configuration
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define TX_PERIOD_MS     (60 * 1000) /* one measure+transmit cycle per minute */
+#define TX_PERIOD_MS     IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
 #define TX_PERIOD_MIN_MS 1000        /* floor, if a cycle overruns the period  */
 #define STARTUP_DELAY_MS (5 * 1000)  /* cold boot only: let the USB console attach */
 #define CONSOLE_DRAIN_MS 100         /* let the console flush before deep sleep    */
@@ -74,7 +76,7 @@
 // GPIO and UART configuration
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#if defined(AE_SDC_CARRIER)
+#if IOTDATA_CONFIG_CARRIER
 
 // GEN-LORA-I2C carrier PCB. Avoids USB-Serial-JTAG (GPIO18/19) and the strapping pins (GPIO2/8/9).
 // The BME280 goes on the carrier's 4-pin I2C sensor header, which carries 4.7k pull-ups to 3V3.
@@ -223,9 +225,9 @@ static bool e22_get_pin_aux(void) {
     return gpio_get_level(PIN_E22_AUX) == 1;
 }
 static e22900t22_config_t e22_config = {
-    .address = 0x0008,
-    .network = 0x00,
-    .channel = 0x0A,
+    .address = IOTDATA_CONFIG_LORA_ADDRESS,
+    .network = IOTDATA_CONFIG_LORA_NETWORK,
+    .channel = IOTDATA_CONFIG_LORA_CHANNEL,
     .packet_size = E22900T22_CONFIG_PACKET_SIZE_DEFAULT,
     .packet_rate = E22900T22_CONFIG_PACKET_RATE_DEFAULT,
     .crypt = E22900T22_CONFIG_CRYPT_DEFAULT,
@@ -973,7 +975,7 @@ static bool battery_probe(void) {
 #define IOTDATA_NO_PRINT
 #define IOTDATA_NO_FLOATING
 #include "iotdata.c"
-#include "iotdata_variant_suite.h"
+#include "iotdata_variant.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
