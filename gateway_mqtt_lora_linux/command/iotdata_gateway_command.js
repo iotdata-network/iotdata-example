@@ -37,7 +37,7 @@ const DEFAULTS = {
     watch: 10, // seconds, when --watch is given with no number
 };
 
-const opts = { broker: DEFAULTS.broker, prefix: DEFAULTS.prefix, target: DEFAULTS.target, watch: 0, dryRun: false, verbose: false, debug: false };
+const opts = { broker: DEFAULTS.broker, prefix: DEFAULTS.prefix, target: DEFAULTS.target, watch: 0, dryRun: false, verbose: false, debug: false, definitions: null };
 
 const display = {
     log: (...a) => console.log(...a),
@@ -143,6 +143,45 @@ const COMMANDS = {
             return a[0] ? { cmd: 'filter-clear', scope: a[0] } : { cmd: 'filter-clear' };
         },
     },
+    // --- blackbox diagnostic recorder — one vocabulary, addressed by --target (a node id, the
+    //     gateway's own id, or broadcast). The gateway acts locally when addressed to itself/broadcast
+    //     (reply on <prefix>/blackbox/resp); nodes act on the aired MANAGE frame (output on their
+    //     console). Pair a gateway/broadcast dump with --definitions to read records as JSON. ---
+    'diag': {
+        summary: "recorder: dump a target's diagnostic status",
+        usage: 'diag',
+        build() {
+            return { cmd: 'diag' };
+        },
+    },
+    'diag-enable': {
+        summary: 'recorder: enable recording on the target',
+        usage: 'diag-enable',
+        build() {
+            return { cmd: 'diag-enable' };
+        },
+    },
+    'diag-disable': {
+        summary: 'recorder: disable recording on the target',
+        usage: 'diag-disable',
+        build() {
+            return { cmd: 'diag-disable' };
+        },
+    },
+    'diag-clear': {
+        summary: 'recorder: erase the diagnostic log on the target',
+        usage: 'diag-clear',
+        build() {
+            return { cmd: 'diag-clear' };
+        },
+    },
+    'diag-dump': {
+        summary: "recorder: dump the target's stored records",
+        usage: 'diag-dump',
+        build() {
+            return { cmd: 'diag-dump' };
+        },
+    },
     'raw': {
         summary: 'send a raw JSON request (power user), e.g. raw \'{"cmd":"status"}\'',
         usage: 'raw <json>',
@@ -176,10 +215,12 @@ function usage() {
     display.log(`  --prefix <p>     topic prefix     (default: ${DEFAULTS.prefix}, or $IOTDATA_PREFIX)`);
     display.log('  --target <t>     all | broadcast | <station id: 1..4094 or 0x..>   (default: all)');
     display.log(`  --watch [secs]   after sending, print live telemetry for N seconds (default ${DEFAULTS.watch})`);
+    display.log('  --definitions <hdr>  blackbox record header (with // @blackbox tag=...); while watching,');
+    display.log('                   convert recognised record lines (e.g. a blackbox-dump reply) CSV -> JSON');
     display.log('  --dry-run | -n   print the request that would be sent, do not connect');
     display.log('  --verbose | --debug | --help\n');
     display.log('Commands:');
-    for (const [name, c] of Object.entries(COMMANDS)) display.log(`  ${name.padEnd(8)} ${c.summary}`);
+    for (const [name, c] of Object.entries(COMMANDS)) display.log(`  ${name.padEnd(16)} ${c.summary}`);
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
@@ -191,6 +232,7 @@ function parseArgv(argv) {
         if (a === '--broker') opts.broker = argv[++i];
         else if (a === '--prefix') opts.prefix = argv[++i];
         else if (a === '--target') opts.target = parseTarget(argv[++i]);
+        else if (a === '--definitions' || a === '--records') opts.definitions = argv[++i];
         else if (a === '--watch') {
             const n = Number(argv[i + 1]);
             if (!Number.isNaN(n) && argv[i + 1] !== undefined) {
@@ -207,6 +249,45 @@ function parseArgv(argv) {
         else rest.push(a);
     }
     return rest;
+}
+
+// ------------------------------------------------------------------------------------------------------------------------
+// Record CSV -> JSON, using the blackbox csv2json module + a component's record header. Returns a
+// function line->JSON-string for recognised records, or null for anything else (so callers keep the
+// raw line). Returns null overall (records stay CSV) if csv2json or the header can't be loaded.
+// ------------------------------------------------------------------------------------------------------------------------
+
+function makeRecordConverter(defsPath) {
+    const fs = require('fs');
+    const path = require('path');
+    // csv2json lives in the blackbox repo, a sibling under iotdata-depend; env override for other layouts.
+    const modPath = process.env.BLACKBOX_CSV2JSON || path.resolve(__dirname, '../../../iotdata-depend/blackbox/js/csv2json.js');
+    let parseDefinitions, csvLineToJson;
+    try {
+        ({ parseDefinitions, csvLineToJson } = require(modPath));
+    } catch (e) {
+        display.err(`warning: csv2json not found at ${modPath} (${e.message}); records stay CSV`);
+        return null;
+    }
+    let schema;
+    try {
+        schema = parseDefinitions(fs.readFileSync(defsPath, 'utf8'));
+    } catch (e) {
+        display.err(`warning: cannot read definitions '${defsPath}' (${e.message}); records stay CSV`);
+        return null;
+    }
+    const tags = Object.keys(schema);
+    display.verbose(`csv2json: ${tags.length} record type(s) from ${defsPath}: ${tags.join(', ') || '(none)'}`);
+    return (line) => {
+        if (!line) return null;
+        const tag = line.split(',', 1)[0];
+        if (!Object.prototype.hasOwnProperty.call(schema, tag)) return null; // not a known record → leave as CSV/text
+        try {
+            return JSON.stringify(csvLineToJson(line, schema));
+        } catch {
+            return null;
+        }
+    };
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
@@ -268,8 +349,15 @@ async function main() {
 
     if (opts.watch > 0) {
         const watchTopic = `${opts.prefix}/#`;
+        const convert = opts.definitions ? makeRecordConverter(opts.definitions) : null;
         display.log(`watching ${watchTopic} for ${opts.watch}s  (node STATUS output is on the node console, not MQTT)`);
-        client.on('message', (topic, msg) => display.log(`<- ${topic}  ${msg.toString()}`));
+        client.on('message', (topic, msg) => {
+            const text = msg.toString();
+            // With --definitions, turn recognised record lines (a blackbox-dump reply on
+            // <prefix>/blackbox/resp) into JSON; anything else (status lines, telemetry) stays as-is.
+            const out = convert ? text.split('\n').map((l) => convert(l.trim()) ?? l).join('\n') : text;
+            display.log(`<- ${topic}  ${out}`);
+        });
         await new Promise((resolve, reject) => client.subscribe(watchTopic, (e) => (e ? reject(e) : resolve()))).catch((e) => {
             display.err(`error: subscribe failed: ${e.message}`);
             process.exit(1);

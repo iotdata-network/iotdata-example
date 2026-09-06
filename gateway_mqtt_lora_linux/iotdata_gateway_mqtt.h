@@ -115,46 +115,50 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
     const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
     const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
 
-    if (strncmp(cmd, "blackbox-", 9) == 0) {
-        char resp[224];
-        blackbox_handle_t *const bb = st->blackbox;
-        if (bb == NULL) {
-            snprintf(resp, sizeof(resp), "blackbox: not configured");
-        } else if (strcmp(cmd, "blackbox-status") == 0) {
-            blackbox_status_t s;
-            blackbox_status(bb, &s);
-            blackbox_status_str(&s, BLACKBOX_STATUS_ALL, resp, sizeof(resp));
-        } else if (strcmp(cmd, "blackbox-enable") == 0) {
-            blackbox_enable(bb, true);
-            snprintf(resp, sizeof(resp), "blackbox: enabled");
-        } else if (strcmp(cmd, "blackbox-disable") == 0) {
-            blackbox_enable(bb, false);
-            snprintf(resp, sizeof(resp), "blackbox: disabled");
-        } else if (strcmp(cmd, "blackbox-clear") == 0) {
-            blackbox_clear(bb);
-            snprintf(resp, sizeof(resp), "blackbox: cleared");
-        } else if (strcmp(cmd, "blackbox-bound") == 0) {
-            const cJSON *const jr = cJSON_GetObjectItem(root, "records");
-            const cJSON *const jb = cJSON_GetObjectItem(root, "bytes");
-            const uint32_t mr = cJSON_IsNumber(jr) ? (uint32_t)jr->valuedouble : 0u;
-            const uint32_t mb = cJSON_IsNumber(jb) ? (uint32_t)jb->valuedouble : 0u;
-            blackbox_bound(bb, mr, mb);
-            snprintf(resp, sizeof(resp), "blackbox: bound records=%u bytes=%u", (unsigned)mr, (unsigned)mb);
-        } else if (strcmp(cmd, "blackbox-dump") == 0) {
-            size_t cur = 0;
-            char rec[BLACKBOX_LINE_MAX];
-            int nl = 0;
-            while (blackbox_pull(bb, &cur, rec, sizeof(rec)) > 0) {
-                (void)mqtt_send(st->topic_resp, rec, (int)strlen(rec));
-                nl++;
+    /* diag = the blackbox recorder, one vocabulary addressed by station id. The gateway is just
+     * another station: act locally when the target is broadcast or our own station id. A MANAGE
+     * frame is ALSO aired below when the target is broadcast or another node; a unicast to our own
+     * id is handled here and stops (nothing to put on air). */
+    if (strncmp(cmd, "diag", 4) == 0) {
+        const bool local = (target == IOTDATA_MESH_MANAGE_TARGET_ALL || target == st->station_id);
+        if (local) {
+            char resp[224];
+            blackbox_handle_t *const bb = st->blackbox;
+            if (bb == NULL) {
+                snprintf(resp, sizeof(resp), "diag: not configured");
+            } else if (strcmp(cmd, "diag") == 0) {
+                blackbox_status_t s;
+                blackbox_status(bb, &s);
+                blackbox_status_str(&s, BLACKBOX_STATUS_ALL, resp, sizeof(resp));
+            } else if (strcmp(cmd, "diag-enable") == 0) {
+                blackbox_enable(bb, true);
+                snprintf(resp, sizeof(resp), "diag: enabled");
+            } else if (strcmp(cmd, "diag-disable") == 0) {
+                blackbox_enable(bb, false);
+                snprintf(resp, sizeof(resp), "diag: disabled");
+            } else if (strcmp(cmd, "diag-clear") == 0) {
+                blackbox_clear(bb);
+                snprintf(resp, sizeof(resp), "diag: cleared");
+            } else if (strcmp(cmd, "diag-dump") == 0) {
+                size_t cur = 0;
+                char rec[BLACKBOX_LINE_MAX];
+                int nl = 0;
+                while (blackbox_pull(bb, &cur, rec, sizeof(rec)) > 0) {
+                    (void)mqtt_send(st->topic_resp, rec, (int)strlen(rec));
+                    nl++;
+                }
+                snprintf(resp, sizeof(resp), "diag: dumped %d records", nl);
+            } else {
+                snprintf(resp, sizeof(resp), "diag: unknown cmd '%s'", cmd);
             }
-            snprintf(resp, sizeof(resp), "blackbox: dumped %d records", nl);
-        } else
-            snprintf(resp, sizeof(resp), "blackbox: unknown cmd '%s'", cmd);
-        (void)mqtt_send(st->topic_resp, resp, (int)strlen(resp));
-        printf("manage: blackbox cmd='%s' -> %s\n", cmd, resp);
-        cJSON_Delete(root);
-        return;
+            (void)mqtt_send(st->topic_resp, resp, (int)strlen(resp));
+            printf("manage: diag local cmd='%s' target=%04X -> %s\n", cmd, (unsigned)target, resp);
+        }
+        if (target == st->station_id) { /* unicast to the gateway itself — done, nothing to air */
+            cJSON_Delete(root);
+            return;
+        }
+        /* broadcast or another node → fall through and air the MANAGE frame below */
     }
 
     const uint16_t seq = st->seq++;
@@ -182,6 +186,16 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
         n = iotdata_mesh_pack_manage_filter_remove(buf, st->station_id, seq, target, station);
     else if (strcmp(cmd, "filter-clear") == 0)
         n = iotdata_mesh_pack_manage_filter_clear(buf, st->station_id, seq, target, scope);
+    else if (strcmp(cmd, "diag") == 0) /* air path: broadcast or a node target (a gateway-unicast diag returned above) */
+        n = iotdata_mesh_pack_manage_diag_report(buf, st->station_id, seq, target);
+    else if (strcmp(cmd, "diag-enable") == 0)
+        n = iotdata_mesh_pack_manage_diag_enable(buf, st->station_id, seq, target, 1u);
+    else if (strcmp(cmd, "diag-disable") == 0)
+        n = iotdata_mesh_pack_manage_diag_enable(buf, st->station_id, seq, target, 0u);
+    else if (strcmp(cmd, "diag-clear") == 0)
+        n = iotdata_mesh_pack_manage_diag_clear(buf, st->station_id, seq, target);
+    else if (strcmp(cmd, "diag-dump") == 0)
+        n = iotdata_mesh_pack_manage_diag_dump(buf, st->station_id, seq, target);
     else
         fprintf(stderr, "manage: unknown cmd '%s'\n", cmd);
     if (n > 0)
