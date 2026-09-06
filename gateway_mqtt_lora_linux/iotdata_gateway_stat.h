@@ -73,7 +73,7 @@ static inline void stat_ring_count_windows(const stat_ring_t *r, time_t now, uin
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
-    bool in_use;
+    bool valid;
     uint16_t station_id;
     time_t first_seen;
     time_t last_seen;
@@ -144,7 +144,7 @@ typedef struct {
 } stat_totals_t;
 
 typedef struct {
-    bool in_use;
+    bool valid;
     uint16_t gateway_id;
     uint16_t generation;
     uint8_t cost;
@@ -159,8 +159,10 @@ typedef struct {
     time_t start_time;
     stat_link_t link; /* currently one */
     stat_station_t stations[STAT_MAX_STATIONS];
+    int stations_count; /* valid entries — lets the scans below stop at the last one */
     stat_variant_t variants[IOTDATA_VARIANT_MAPS_COUNT];
     stat_mesh_peer_t mesh_peers[STAT_MESH_PEERS_MAX];
+    int mesh_peers_count; /* ditto */
 } stat_state_t;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -191,19 +193,30 @@ void stat_end(stat_state_t *s) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+/* The station/peer tables are scanned per received packet, so the scans below stop at the last valid
+   entry: `c` counts valid entries passed, and the search can end once every one has been seen. For a
+   find-or-create that means `c == count` AND a free slot already in hand — the hole lies at or after
+   the last valid entry, so the test cannot move into the loop condition. Entries are never
+   invalidated (a full table evicts by overwrite), so there is no removal case. `i < MAX` stays in
+   every loop: it keeps a count desync a wasted scan rather than a walk off the end of the array. */
+
 static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint16_t station_id) {
     int free_slot = -1;
-    for (int i = 0; i < STAT_MAX_STATIONS; i++) {
-        if (s->stations[i].in_use) {
+    for (int i = 0, c = 0; i < STAT_MAX_STATIONS; i++) { /* UPSERT */
+        if (s->stations[i].valid) {
+            c++;
             if (s->stations[i].station_id == station_id)
                 return &s->stations[i];
         } else if (free_slot < 0)
             free_slot = i;
+        if (c == s->stations_count && free_slot >= 0)
+            break; /* every valid entry seen (no match ahead) and a free slot in hand */
     }
     int slot;
-    if (free_slot >= 0)
+    if (free_slot >= 0) {
         slot = free_slot;
-    else {
+        s->stations_count++;
+    } else { /* table full -> evict the stalest (every slot is valid) */
         slot = 0;
         for (int i = 1; i < STAT_MAX_STATIONS; i++)
             if (s->stations[i].last_seen < s->stations[slot].last_seen)
@@ -211,7 +224,7 @@ static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint1
     }
     stat_station_t *st = &s->stations[slot];
     memset(st, 0, sizeof(*st));
-    st->in_use = true;
+    st->valid = true;
     st->station_id = station_id;
     st->first_seen = time(NULL);
     return st;
@@ -329,17 +342,28 @@ void stat_on_packet_process_error(stat_state_t *s, uint16_t station_id, uint8_t 
 void stat_on_mesh_peer(stat_state_t *s, uint16_t gateway_id, uint16_t generation, uint8_t cost, uint8_t flags) {
     const time_t now = time(NULL);
     int slot = -1;
-    for (int i = 0; i < STAT_MESH_PEERS_MAX && slot < 0; i++)
-        if (s->mesh_peers[i].in_use && s->mesh_peers[i].gateway_id == gateway_id)
-            slot = i;
-    for (int i = 0; i < STAT_MESH_PEERS_MAX && slot < 0; i++)
-        if (!s->mesh_peers[i].in_use)
-            slot = i;
-    if (slot < 0)
-        for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
-            if (i == 0 || s->mesh_peers[i].last_seen < s->mesh_peers[slot].last_seen)
+    for (int i = 0, c = 0; i < STAT_MESH_PEERS_MAX && c < s->mesh_peers_count && slot < 0; i++) /* LOOKUP */
+        if (s->mesh_peers[i].valid) {
+            c++;
+            if (s->mesh_peers[i].gateway_id == gateway_id)
                 slot = i;
-    s->mesh_peers[slot].in_use = true;
+        }
+    if (slot < 0) {
+        if (s->mesh_peers_count < STAT_MESH_PEERS_MAX) { /* a free slot exists -> take the first */
+            for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
+                if (!s->mesh_peers[i].valid) {
+                    slot = i;
+                    break;
+                }
+            s->mesh_peers_count++;
+        } else { /* full -> evict the stalest (every slot is valid) */
+            slot = 0;
+            for (int i = 1; i < STAT_MESH_PEERS_MAX; i++)
+                if (s->mesh_peers[i].last_seen < s->mesh_peers[slot].last_seen)
+                    slot = i;
+        }
+    }
+    s->mesh_peers[slot].valid = true;
     s->mesh_peers[slot].gateway_id = gateway_id;
     s->mesh_peers[slot].generation = generation;
     s->mesh_peers[slot].cost = cost;
@@ -404,15 +428,12 @@ cJSON *stat_build_links_json(const stat_state_t *s, const mesh_state_t *mesh) {
 cJSON *stat_build_stations_json(const stat_state_t *s, const mesh_state_t *mesh, const ddup_state_t *dedup) {
     const time_t now = time(NULL);
     cJSON *root = cJSON_CreateObject();
-    int active = 0;
-    for (int i = 0; i < STAT_MAX_STATIONS; i++)
-        if (s->stations[i].in_use)
-            active++;
     char buf[16];
-    cJSON_AddNumberToObject(root, "count", (double)active);
+    cJSON_AddNumberToObject(root, "count", (double)s->stations_count);
     cJSON *arr = cJSON_AddArrayToObject(root, "stations");
-    for (int i = 0; i < STAT_MAX_STATIONS; i++)
-        if (s->stations[i].in_use) {
+    for (int i = 0, c = 0; i < STAT_MAX_STATIONS && c < s->stations_count; i++) /* LOOKUP */
+        if (s->stations[i].valid) {
+            c++;
             const stat_station_t *st = &s->stations[i];
             cJSON *o = cJSON_CreateObject();
             cJSON_AddStringToObject(o, "id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, st->station_id));
@@ -465,8 +486,9 @@ cJSON *stat_build_stations_json(const stat_state_t *s, const mesh_state_t *mesh,
         cJSON_AddNumberToObject(m, "tx_errors", (double)mesh->stat_errors_tx);
         cJSON_AddNumberToObject(m, "tx_bytes", (double)mesh->stat_bytes_tx);
         cJSON *peers = cJSON_AddArrayToObject(m, "peers");
-        for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
-            if (s->mesh_peers[i].in_use) {
+        for (int i = 0, c = 0; i < STAT_MESH_PEERS_MAX && c < s->mesh_peers_count; i++) /* LOOKUP */
+            if (s->mesh_peers[i].valid) {
+                c++;
                 cJSON *p = cJSON_CreateObject();
                 cJSON_AddStringToObject(p, "gateway_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, s->mesh_peers[i].gateway_id));
                 cJSON_AddNumberToObject(p, "generation", (double)s->mesh_peers[i].generation);

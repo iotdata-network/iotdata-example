@@ -40,18 +40,17 @@ typedef struct {
 
 void mesh_beacon_send(mesh_state_t *state) {
     uint8_t buf[IOTDATA_MESH_BEACON_SIZE];
-    const iotdata_mesh_beacon_t beacon = {
-        .sender_station = state->station_id,
-        .sender_seq = state->mesh_seq++,
-        .gateway_id = state->station_id,
-        .cost = 0,
-        .flags = IOTDATA_MESH_FLAG_ACCEPTING,
-        .generation = state->beacon_generation++,
-    };
-    state->beacon_generation &= (IOTDATA_MESH_GENERATION_MOD - 1);
-    iotdata_mesh_pack_beacon(buf, &beacon);
+    iotdata_mesh_pack_beacon(buf, &(const iotdata_mesh_beacon_t){
+                                      .sender_station = state->station_id,
+                                      .sender_seq = state->mesh_seq++,
+                                      .gateway_id = state->station_id,
+                                      .cost = 0,
+                                      .flags = IOTDATA_MESH_FLAG_ACCEPTING,
+                                      .generation = state->beacon_generation,
+                                  });
     if (state->debug)
-        printf("mesh: tx BEACON generation=%" PRIu16 ", station=%04" PRIX16 "\n", beacon.generation, beacon.sender_station);
+        printf("mesh: tx BEACON generation=%" PRIu16 ", station=%04" PRIX16 "\n", state->beacon_generation, state->station_id);
+    state->beacon_generation = (state->beacon_generation + 1) & (IOTDATA_MESH_GENERATION_MOD - 1);
     if (state->packet_handler(buf, IOTDATA_MESH_BEACON_SIZE)) {
         state->stat_beacons_tx++;
         state->stat_bytes_tx += (uint64_t)IOTDATA_MESH_BEACON_SIZE;
@@ -65,13 +64,12 @@ void mesh_beacon_send(mesh_state_t *state) {
 
 void mesh_ack_send(mesh_state_t *state, uint16_t origin_station, uint16_t origin_sequence) {
     uint8_t buf[IOTDATA_MESH_ACK_SIZE];
-    const iotdata_mesh_ack_t ack = {
-        .sender_station = state->station_id,
-        .sender_seq = state->mesh_seq++,
-        .origin_station = origin_station,
-        .origin_sequence = origin_sequence,
-    };
-    iotdata_mesh_pack_ack(buf, &ack);
+    iotdata_mesh_pack_ack(buf, &(const iotdata_mesh_ack_t){
+                                   .sender_station = state->station_id,
+                                   .sender_seq = state->mesh_seq++,
+                                   .origin_station = origin_station,
+                                   .origin_sequence = origin_sequence,
+                               });
     if (state->debug)
         printf("mesh: tx ACK for origin={station=%04" PRIX16 ", sequence=%" PRIu16 "}\n", origin_station, origin_sequence);
     if (state->packet_handler(buf, IOTDATA_MESH_ACK_SIZE)) {
@@ -119,6 +117,7 @@ bool mesh_handle_forward(mesh_state_t *state, const uint8_t *buf, int len, const
 
 void mesh_handle_beacon(mesh_state_t *state, const uint8_t *buf, int len) {
     /* gateway receiving another gateway's beacon -- log for multi-gateway awareness */
+    // XXX OR RELAY
     iotdata_mesh_beacon_t b;
     if (iotdata_mesh_unpack_beacon(buf, len, &b)) {
         state->stat_beacons_rx++;
@@ -149,7 +148,7 @@ void mesh_handle_neighbour_report(mesh_state_t *state, const uint8_t *buf, int l
                 iotdata_mesh_nbr_entry_t e;
                 if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &e))
                     break;
-                printf("    hears %04" PRIX16 " cost=%u rssi=%ddBm\n", e.station, (unsigned)e.cost, iotdata_mesh_rssi_from_q4(e.rssi_q4));
+                printf("        hears %04" PRIX16 " cost=%u rssi=%ddBm\n", e.station, (unsigned)e.cost, iotdata_mesh_rssi_from_q4(e.rssi_q4));
             }
         }
     } else

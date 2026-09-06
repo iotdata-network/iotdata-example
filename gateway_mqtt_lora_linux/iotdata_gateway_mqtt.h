@@ -115,10 +115,6 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
     const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
     const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
 
-    /* diag = the blackbox recorder, one vocabulary addressed by station id. The gateway is just
-     * another station: act locally when the target is broadcast or our own station id. A MANAGE
-     * frame is ALSO aired below when the target is broadcast or another node; a unicast to our own
-     * id is handled here and stops (nothing to put on air). */
     if (strncmp(cmd, "diag", 4) == 0) {
         const bool local = (target == IOTDATA_MESH_MANAGE_TARGET_ALL || target == st->station_id);
         if (local) {

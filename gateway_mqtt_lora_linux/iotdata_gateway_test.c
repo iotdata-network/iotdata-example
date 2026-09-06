@@ -19,10 +19,40 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+/* The stat table lives behind the gateway's include chain (e22 config type, mqtt state, cJSON,
+   variant map count), so the prelude below mirrors iotdata_gateway.c's — with the e22 print/sleep
+   hooks stubbed, since nothing here touches the radio. */
+#include <stdarg.h>
+#include <cjson/cJSON.h>
+
+static void test_e22_printf_stub(const char *format, ...) {
+    (void)format;
+}
+#define PRINTF_DEBUG test_e22_printf_stub
+#define PRINTF_ERROR test_e22_printf_stub
+#define PRINTF_INFO  test_e22_printf_stub
+#undef E22900T22_SUPPORT_MODULE_DIP
+#define E22900T22_SUPPORT_MODULE_USB
+#include "serial_linux.h"
+#include "e22xxxtxx.h"
+void __sleep_ms(const uint32_t ms) { /* defined after the header declares it, as in iotdata_gateway.c */
+    (void)ms;
+}
+
+#define MQTT_CONNECT_TIMEOUT 60
+#define MQTT_PUBLISH_QOS     0
+#define MQTT_PUBLISH_RETAIN  false
+#include "mqtt_linux.h"
+
+#include "iotdata_config.h"
+#include "iotdata_variant.h"
+#include "iotdata.c"
 #include "iotdata_mesh.h"
 
 #include "iotdata_gateway_mesh.h"
 #include "iotdata_gateway_ddup.h"
+#include "iotdata_gateway_stat.h"
+#include "iotdata_gateway_netw.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -1017,6 +1047,193 @@ static bool test_ddup_three_gateway_sync(void) {
 // Main
 // =========================================================================================================================================
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// Network + stat table tests.
+//
+// Both tables keep a hand-maintained `count` of their valid slots that the scan loops use to stop at
+// the last one. That invariant is not compiler-checkable and is updated wherever an entry is created,
+// so each test re-derives the true number of valid slots the slow way and compares (ASSERT_COUNT_*).
+// Entries in these tables are never invalidated -- a full table evicts by overwrite -- so the counts
+// only ever rise to the cap. The tables are large, hence the statics.
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static int netw_valid_slots(const network_t *n) {
+    int c = 0;
+    for (int i = 0; i < NETWORK_MAX; i++)
+        if (n->s[i].valid)
+            c++;
+    return c;
+}
+#define ASSERT_COUNT_NETW(n) ASSERT((n)->count == netw_valid_slots(n))
+
+static bool test_netw_upsert_on_empty(void) {
+    static network_t net;
+    network_init(&net);
+    ASSERT(network_count(&net) == 0);
+    ASSERT(network_locate(&net, 0x111) == -1); /* lookup on an empty table */
+    const net_station_t *const e = network_upsert(&net, 0x111, 1000);
+    ASSERT(e != NULL && e->station == 0x111); /* must allocate, not refuse */
+    ASSERT_EQ_INT(network_count(&net), 1);
+    ASSERT_COUNT_NETW(&net);
+    ASSERT_EQ_INT(network_locate(&net, 0x111), 0);
+    return true;
+}
+
+static bool test_netw_upsert_in_place(void) {
+    static network_t net;
+    network_init(&net);
+    const net_station_t *const a = network_upsert(&net, 0x111, 1000);
+    const net_station_t *const b = network_upsert(&net, 0x111, 1001);
+    ASSERT(a == b);                        /* same entry */
+    ASSERT_EQ_INT(network_count(&net), 1); /* must NOT double-count */
+    ASSERT_EQ_INT((int)b->rx_count, 2);
+    ASSERT_COUNT_NETW(&net);
+    return true;
+}
+
+static bool test_netw_sequential_upserts(void) {
+    static network_t net;
+    network_init(&net);
+    (void)network_upsert(&net, 0x111, 1000);
+    (void)network_upsert(&net, 0x222, 1001); /* the free slot lies past the valid entries */
+    (void)network_upsert(&net, 0x333, 1002);
+    ASSERT_EQ_INT(network_count(&net), 3);
+    ASSERT_COUNT_NETW(&net);
+    ASSERT_EQ_INT(network_locate(&net, 0x222), 1);
+    ASSERT_EQ_INT(network_locate(&net, 0x333), 2);
+    ASSERT_EQ_INT(network_locate(&net, 0x999), -1); /* absent, table non-empty */
+    return true;
+}
+
+static bool test_netw_fill_and_evict_stalest(void) {
+    static network_t net;
+    network_init(&net);
+    (void)network_upsert(&net, 0x111, 1000); /* the stalest, once the table is full */
+    for (int i = 1; i < NETWORK_MAX; i++)
+        (void)network_upsert(&net, (uint16_t)(0x400 + i), 2000 + i);
+    ASSERT_EQ_INT(network_count(&net), NETWORK_MAX);
+    ASSERT_COUNT_NETW(&net);
+    (void)network_upsert(&net, 0xABC, 9000);
+    ASSERT_EQ_INT(network_count(&net), NETWORK_MAX); /* eviction reuses a slot: count saturates */
+    ASSERT_COUNT_NETW(&net);
+    ASSERT(network_locate(&net, 0xABC) >= 0);
+    ASSERT_EQ_INT(network_locate(&net, 0x111), -1); /* the stalest was the one evicted */
+    return true;
+}
+
+static bool test_netw_all_locatable(void) {
+    static network_t net;
+    network_init(&net);
+    for (int i = 0; i < NETWORK_MAX; i++)
+        (void)network_upsert(&net, (uint16_t)(0x500 + i), 1000 + i);
+    int found = 0; /* a scan bound that cut short would lose the later entries */
+    for (int i = 0; i < NETWORK_MAX; i++)
+        if (net.s[i].valid && network_locate(&net, net.s[i].station) == i)
+            found++;
+    ASSERT_EQ_INT(found, NETWORK_MAX);
+    ASSERT_COUNT_NETW(&net);
+    return true;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static int stat_valid_stations(const stat_state_t *s) {
+    int c = 0;
+    for (int i = 0; i < STAT_MAX_STATIONS; i++)
+        if (s->stations[i].valid)
+            c++;
+    return c;
+}
+static int stat_valid_peers(const stat_state_t *s) {
+    int c = 0;
+    for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
+        if (s->mesh_peers[i].valid)
+            c++;
+    return c;
+}
+#define ASSERT_COUNT_STAT(s) \
+    do { \
+        ASSERT((s)->stations_count == stat_valid_stations(s)); \
+        ASSERT((s)->mesh_peers_count == stat_valid_peers(s)); \
+    } while (0)
+
+static bool test_stat_station_create_and_find(void) {
+    static stat_state_t s;
+    memset(&s, 0, sizeof(s));
+    stat_station_t *const a = stat_station_find_or_create(&s, 0x111);
+    ASSERT(a != NULL && a->station_id == 0x111); /* create on an EMPTY table */
+    ASSERT_EQ_INT(s.stations_count, 1);
+    ASSERT(stat_station_find_or_create(&s, 0x111) == a); /* find, not re-create */
+    ASSERT_EQ_INT(s.stations_count, 1);                  /* must NOT double-count */
+    (void)stat_station_find_or_create(&s, 0x222);        /* free slot lies past the valid entries */
+    (void)stat_station_find_or_create(&s, 0x333);
+    ASSERT_EQ_INT(s.stations_count, 3);
+    ASSERT_COUNT_STAT(&s);
+    ASSERT(stat_station_find_or_create(&s, 0x222)->station_id == 0x222); /* still findable */
+    ASSERT_EQ_INT(s.stations_count, 3);
+    return true;
+}
+
+static bool test_stat_station_fill_and_evict(void) {
+    static stat_state_t s;
+    memset(&s, 0, sizeof(s));
+    for (int i = 0; i < STAT_MAX_STATIONS; i++)
+        (void)stat_station_find_or_create(&s, (uint16_t)(0x400 + i));
+    ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);
+    ASSERT_COUNT_STAT(&s);
+    (void)stat_station_find_or_create(&s, 0xABC);       /* full -> evicts the stalest */
+    ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS); /* count saturates */
+    ASSERT_COUNT_STAT(&s);
+    ASSERT(stat_station_find_or_create(&s, 0xABC)->station_id == 0xABC);
+    return true;
+}
+
+static bool test_stat_station_all_findable(void) {
+    static stat_state_t s;
+    memset(&s, 0, sizeof(s));
+    for (int i = 0; i < STAT_MAX_STATIONS; i++)
+        (void)stat_station_find_or_create(&s, (uint16_t)(0x600 + i));
+    int found = 0; /* a scan bound that cut short would re-create instead of finding */
+    for (int i = 0; i < STAT_MAX_STATIONS; i++)
+        if (s.stations[i].valid && stat_station_find_or_create(&s, s.stations[i].station_id) == &s.stations[i])
+            found++;
+    ASSERT_EQ_INT(found, STAT_MAX_STATIONS);
+    ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);
+    ASSERT_COUNT_STAT(&s);
+    return true;
+}
+
+static bool test_stat_mesh_peer_create_and_update(void) {
+    static stat_state_t s;
+    memset(&s, 0, sizeof(s));
+    stat_on_mesh_peer(&s, 0xAAA, 1, 1, 0);
+    ASSERT_EQ_INT(s.mesh_peers_count, 1);
+    ASSERT_COUNT_STAT(&s);
+    stat_on_mesh_peer(&s, 0xAAA, 2, 1, 0); /* same gateway -> update in place */
+    ASSERT_EQ_INT(s.mesh_peers_count, 1);
+    ASSERT_COUNT_STAT(&s);
+    stat_on_mesh_peer(&s, 0xBBB, 1, 1, 0); /* second peer takes the next free slot */
+    ASSERT_EQ_INT(s.mesh_peers_count, 2);
+    ASSERT_COUNT_STAT(&s);
+    return true;
+}
+
+static bool test_stat_mesh_peer_fill_and_evict(void) {
+    static stat_state_t s;
+    memset(&s, 0, sizeof(s));
+    for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
+        stat_on_mesh_peer(&s, (uint16_t)(0xB00 + i), 1, 1, 0);
+    ASSERT_EQ_INT(s.mesh_peers_count, STAT_MESH_PEERS_MAX);
+    ASSERT_COUNT_STAT(&s);
+    stat_on_mesh_peer(&s, 0xCCC, 1, 1, 0); /* full -> evict, count saturates */
+    ASSERT_EQ_INT(s.mesh_peers_count, STAT_MESH_PEERS_MAX);
+    ASSERT_COUNT_STAT(&s);
+    return true;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 int main(void) {
     setbuf(stdout, NULL);
 
@@ -1065,6 +1282,22 @@ int main(void) {
     RUN_TEST(ddup_peer_communication);
     RUN_TEST(ddup_bidirectional_sync);
     RUN_TEST(ddup_three_gateway_sync);
+
+    printf("\n=== Network Table Tests ===\n\n");
+
+    RUN_TEST(netw_upsert_on_empty);
+    RUN_TEST(netw_upsert_in_place);
+    RUN_TEST(netw_sequential_upserts);
+    RUN_TEST(netw_fill_and_evict_stalest);
+    RUN_TEST(netw_all_locatable);
+
+    printf("\n=== Stat Table Tests ===\n\n");
+
+    RUN_TEST(stat_station_create_and_find);
+    RUN_TEST(stat_station_fill_and_evict);
+    RUN_TEST(stat_station_all_findable);
+    RUN_TEST(stat_mesh_peer_create_and_update);
+    RUN_TEST(stat_mesh_peer_fill_and_evict);
 
     printf("\n=== Results ===\n\n");
     printf("  Total: %d, Passed: %d, Failed: %d\n\n", tests_run, tests_passed, tests_run - tests_passed);

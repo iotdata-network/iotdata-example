@@ -135,16 +135,6 @@ void __sleep_ms(const uint32_t ms) {
     usleep((useconds_t)ms * 1000);
 }
 
-// bool device_mode_config(void);
-//   bool device_info_read(void);
-//   bool device_config_read_and_update(void);
-// bool device_mode_transfer(void);
-// bool device_connect(const e22900t22_module_t config_module, const e22900t22_config_t *config_device);
-//   bool device_channel_rssi_read(uint8_t *rssi);
-//   bool device_packet_read(uint8_t *packet, const int max_size, int *packet_size, uint8_t *rssi);
-//   bool device_packet_write(const uint8_t *packet, const int length);
-// void device_disconnect(void);
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -160,6 +150,8 @@ void __sleep_ms(const uint32_t ms) {
 #include "iotdata_variant.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
+#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#include "iotdata_blackbox.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -168,8 +160,6 @@ void __sleep_ms(const uint32_t ms) {
 #include "iotdata_gateway_ddup.h"
 #include "iotdata_gateway_stat.h"
 #include "iotdata_gateway_netw.h"
-#define IOTDATA_BLACKBOX_IMPLEMENTATION
-#include "iotdata_blackbox.h"
 #include "iotdata_gateway_mqtt.h"
 #include "iotdata_gateway_exec.h"
 
@@ -485,7 +475,9 @@ static void gateway_blackbox_begin(system_t *state) {
         .flush_ms = (max_seconds > 0) ? (uint32_t)max_seconds * 1000u : 0u,
         .max_records = (max_records > 0) ? (uint32_t)max_records : 0u,
         .max_bytes = (max_bytes > 0) ? (uint32_t)max_bytes : 0u,
-        .generations = (uint8_t)((gens < 0)     ? 0 : (gens > 255) ? 255 : gens),
+        .generations = (uint8_t)((gens < 0)     ? 0
+                                 : (gens > 255) ? 255
+                                                : gens),
         .persist_arg = state->blackbox_path,
         .enabled = enabled,
     };

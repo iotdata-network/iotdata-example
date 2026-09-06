@@ -78,6 +78,7 @@ typedef struct {
 
 typedef struct {
     net_station_t s[NETWORK_MAX];
+    int count; /* valid entries — kept in sync so the scans below can stop at the last one */
 } network_t;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -103,20 +104,27 @@ void network_init(network_t *n) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+/* The table is scanned per received frame, and an entry is large, so the scans below stop at the last
+   valid one rather than running the whole array: `c` counts valid entries passed, and `c < n->count`
+   means something valid still lies ahead. Entries here are never invalidated (a full table evicts by
+   overwrite), so there is no removal case to worry about. The `i < NETWORK_MAX` term stays regardless:
+   it keeps a count desync a wasted scan rather than a walk off the end of the array. */
+
 int network_count(const network_t *n) {
-    int c = 0;
-    for (int i = 0; i < NETWORK_MAX; i++)
-        if (n->s[i].valid)
-            c++;
-    return c;
+    return n->count;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 int network_locate(const network_t *n, uint16_t station) {
-    for (int i = 0; i < NETWORK_MAX; i++)
-        if (n->s[i].valid && n->s[i].station == station)
-            return i;
+    for (int i = 0, c = 0; i < NETWORK_MAX && c < n->count; i++) { /* LOOKUP */
+        const net_station_t *const e = &n->s[i];
+        if (e->valid) {
+            c++;
+            if (e->station == station)
+                return i;
+        }
+    }
     return -1;
 }
 
@@ -124,18 +132,30 @@ int network_locate(const network_t *n, uint16_t station) {
 
 net_station_t *network_upsert(network_t *n, uint16_t station, time_t now) {
     int slot = -1, empty = -1, oldest = -1;
-    for (int i = 0; i < NETWORK_MAX; i++) {
-        if (!n->s[i].valid) {
+    for (int i = 0, c = 0; i < NETWORK_MAX; i++) { /* UPSERT */
+        const net_station_t *const e = &n->s[i];
+        if (!e->valid) {
             if (empty < 0)
                 empty = i; /* first free slot; keep scanning for an existing entry */
-        } else if (n->s[i].station == station) {
-            slot = i; /* existing entry -> update in place */
+        } else {
+            c++;
+            if (e->station == station) {
+                slot = i; /* existing entry -> update in place */
+                break;
+            }
+            if (n->count == NETWORK_MAX && (oldest < 0 || e->last_seen < n->s[oldest].last_seen))
+                oldest = i; /* stalest occupied slot; only tracked when full — else a free slot is guaranteed */
+        }
+        /* Stop only once every valid entry has been seen (no match can lie ahead) AND a free slot is
+           in hand — the hole lies at or after the last valid entry, so this cannot move into the loop
+           condition. A full table never sets `empty`, so it correctly scans on to find `oldest`. */
+        if (c == n->count && empty >= 0)
             break;
-        } else if (oldest < 0 || n->s[i].last_seen < n->s[oldest].last_seen)
-            oldest = i; /* stalest occupied slot, for eviction if the table is full */
     }
     if (slot < 0) { /* new station: take a free slot if any, else evict the stalest */
         slot = (empty >= 0) ? empty : oldest;
+        if (empty >= 0) /* free slot -> one more; eviction reuses a valid slot (count unchanged) */
+            n->count++;
         memset(&n->s[slot], 0, sizeof(n->s[slot]));
         n->s[slot].valid = true;
         n->s[slot].station = station;
@@ -344,9 +364,10 @@ void network_report(const network_t *n, uint16_t gateway_id) {
     const time_t now = time(NULL);
     int n_relay = 0, n_sensor = 0, n_gw = 0, n_stale = 0;
     uint32_t loss = 0, rx_total = 0;
-    for (int i = 0; i < NETWORK_MAX; i++) {
+    for (int i = 0, c = 0; i < NETWORK_MAX && c < n->count; i++) { /* LOOKUP */
         const net_station_t *e = &n->s[i];
         if (e->valid) {
+            c++;
             if (e->kind == NET_KIND_GATEWAY)
                 n_gw++;
             else if (e->kind == NET_KIND_RELAY)
@@ -363,25 +384,29 @@ void network_report(const network_t *n, uint16_t gateway_id) {
     char stale[32] = "";
     if (n_stale > 0)
         (void)snprintf(stale, sizeof(stale), ", %d stale hidden", n_stale);
-    printf("network: gw=%04" PRIX16 " | %d relay(s), %d sensor(s)%s%s | end-to-end loss=%" PRIu32 " seq (%.1f%%):\n", gateway_id, n_relay, n_sensor, n_gw ? " (+peer gw)" : "", stale, loss, net_loss_pct(loss, rx_total));
-    for (int i = 0; i < NETWORK_MAX; i++) { /* mesh nodes: gateways + relays */
+    printf("netw: gw=%04" PRIX16 " | %d relay(s), %d sensor(s)%s%s | end-to-end loss=%" PRIu32 " seq (%.1f%%):\n", gateway_id, n_relay, n_sensor, n_gw ? " (+peer gw)" : "", stale, loss, net_loss_pct(loss, rx_total));
+    for (int i = 0, c = 0; i < NETWORK_MAX && c < n->count; i++) { /* LOOKUP — mesh nodes: gateways + relays */
         const net_station_t *e = &n->s[i];
+        if (e->valid)
+            c++;
         if (e->valid && (e->kind == NET_KIND_RELAY || e->kind == NET_KIND_GATEWAY)) {
             char hears[NET_HEARS_MAX * 20];
-            printf("  %04" PRIX16 " %-4s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%u gen=%u gw=%04" PRIX16 "%s\n", e->station, net_kind_name(e->kind), e->rssi,
-                   (long)(now - e->last_seen), e->tx.rx, e->tx.gaps, net_rate_per_min(e->tx.rx, e->first_seen, now), e->beacon_rx, e->fwd_sent, net_rate_per_min(e->fwd_sent, e->first_seen, now), e->accepting ? 'Y' : 'N', (unsigned)e->cost,
-                   (unsigned)e->generation, e->gateway, net_hears_format(e, hears, sizeof(hears)));
+            printf("       %04" PRIX16 " %-4s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%u gen=%u gw=%04" PRIX16 "%s\n", e->station, net_kind_name(e->kind),
+                   e->rssi, (long)(now - e->last_seen), e->tx.rx, e->tx.gaps, net_rate_per_min(e->tx.rx, e->first_seen, now), e->beacon_rx, e->fwd_sent, net_rate_per_min(e->fwd_sent, e->first_seen, now), e->accepting ? 'Y' : 'N',
+                   (unsigned)e->cost, (unsigned)e->generation, e->gateway, net_hears_format(e, hears, sizeof(hears)));
         }
     }
-    for (int i = 0; i < NETWORK_MAX; i++) { /* sensors (and anything not yet classified as a mesh node) */
+    for (int i = 0, c = 0; i < NETWORK_MAX && c < n->count; i++) { /* LOOKUP — sensors (and anything unclassified) */
         const net_station_t *e = &n->s[i];
+        if (e->valid)
+            c++;
         if (e->valid && !(e->kind == NET_KIND_RELAY || e->kind == NET_KIND_GATEWAY) && !net_is_stale(e, now)) {
             char via[80], rly[40] = "";
             if (e->relay_rssi != 0) /* both ends of the stick: gateway rssi (above) vs the best relay's */
                 (void)snprintf(rly, sizeof(rly), " relay=%ddBm(%04" PRIX16 ")", e->relay_rssi, e->relay_rssi_from);
-            printf("  %04" PRIX16 " %-4s rssi=%ddBm%s age=%lds var=%u uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ")%s\n", e->station,
-                   net_kind_name(e->kind), e->rssi, rly, (long)(now - e->last_seen), (unsigned)e->variant, e->uniq.rx, e->uniq.gaps, net_loss_pct(e->uniq.gaps, e->uniq.rx), net_rate_per_min(e->uniq.rx, e->first_seen, now), e->direct.rx,
-                   e->direct.dup, e->direct.gaps, e->mesh.rx, e->mesh.dup, e->mesh.gaps, net_via_format(e, via, sizeof(via)));
+            printf("       %04" PRIX16 " %-4s rssi=%ddBm%s age=%lds var=%u uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ")%s\n",
+                   e->station, net_kind_name(e->kind), e->rssi, rly, (long)(now - e->last_seen), (unsigned)e->variant, e->uniq.rx, e->uniq.gaps, net_loss_pct(e->uniq.gaps, e->uniq.rx), net_rate_per_min(e->uniq.rx, e->first_seen, now),
+                   e->direct.rx, e->direct.dup, e->direct.gaps, e->mesh.rx, e->mesh.dup, e->mesh.gaps, net_via_format(e, via, sizeof(via)));
         }
     }
 }
