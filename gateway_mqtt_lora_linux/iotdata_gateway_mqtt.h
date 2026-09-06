@@ -33,6 +33,9 @@ typedef struct {
     bool pending;
     uint8_t pending_buf[GWMQTT_MANAGE_BUF_MAX];
     int pending_len;
+    blackbox_handle_t *blackbox;
+    char topic_resp[128];
+    time_t blackbox_tick_last; /* for the periodic (batched) flush tick */
     /* stats */
     uint32_t stat_req_rx, stat_req_bad, stat_tx, stat_tx_err, stat_overrun;
 } gwmqtt_manage_state_t;
@@ -40,6 +43,8 @@ typedef struct {
 /* The mosquitto message callback has no user-data argument, so the state is reached
    through this file-scope pointer, set in gwmqtt_manage_begin. */
 static gwmqtt_manage_state_t *g_gwmqtt_manage = NULL;
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static uint16_t gwmqtt_manage_parse_target(const cJSON *jt) {
     if (jt == NULL)
@@ -78,6 +83,18 @@ static uint8_t gwmqtt_manage_parse_scope(const cJSON *js) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+static void gwmqtt_blackbox_tick(void) {
+    gwmqtt_manage_state_t *const st = g_gwmqtt_manage;
+    if (st != NULL && st->blackbox != NULL) {
+        const time_t now = time(NULL);
+        if (st->blackbox_tick_last != 0 && st->blackbox_tick_last != now)
+            blackbox_tick(st->blackbox, (uint32_t)(now - st->blackbox_tick_last) * 1000u);
+        st->blackbox_tick_last = now;
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), const unsigned char *payload, const int len) {
 
     gwmqtt_manage_state_t *const st = g_gwmqtt_manage;
@@ -97,6 +114,49 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
     const uint8_t scope = gwmqtt_manage_parse_scope(cJSON_GetObjectItem(root, "scope"));
     const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
     const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
+
+    if (strncmp(cmd, "blackbox-", 9) == 0) {
+        char resp[224];
+        blackbox_handle_t *const bb = st->blackbox;
+        if (bb == NULL) {
+            snprintf(resp, sizeof(resp), "blackbox: not configured");
+        } else if (strcmp(cmd, "blackbox-status") == 0) {
+            blackbox_status_t s;
+            blackbox_status(bb, &s);
+            blackbox_status_str(&s, BLACKBOX_STATUS_ALL, resp, sizeof(resp));
+        } else if (strcmp(cmd, "blackbox-enable") == 0) {
+            blackbox_enable(bb, true);
+            snprintf(resp, sizeof(resp), "blackbox: enabled");
+        } else if (strcmp(cmd, "blackbox-disable") == 0) {
+            blackbox_enable(bb, false);
+            snprintf(resp, sizeof(resp), "blackbox: disabled");
+        } else if (strcmp(cmd, "blackbox-clear") == 0) {
+            blackbox_clear(bb);
+            snprintf(resp, sizeof(resp), "blackbox: cleared");
+        } else if (strcmp(cmd, "blackbox-bound") == 0) {
+            const cJSON *const jr = cJSON_GetObjectItem(root, "records");
+            const cJSON *const jb = cJSON_GetObjectItem(root, "bytes");
+            const uint32_t mr = cJSON_IsNumber(jr) ? (uint32_t)jr->valuedouble : 0u;
+            const uint32_t mb = cJSON_IsNumber(jb) ? (uint32_t)jb->valuedouble : 0u;
+            blackbox_bound(bb, mr, mb);
+            snprintf(resp, sizeof(resp), "blackbox: bound records=%u bytes=%u", (unsigned)mr, (unsigned)mb);
+        } else if (strcmp(cmd, "blackbox-dump") == 0) {
+            size_t cur = 0;
+            char rec[BLACKBOX_LINE_MAX];
+            int nl = 0;
+            while (blackbox_pull(bb, &cur, rec, sizeof(rec)) > 0) {
+                (void)mqtt_send(st->topic_resp, rec, (int)strlen(rec));
+                nl++;
+            }
+            snprintf(resp, sizeof(resp), "blackbox: dumped %d records", nl);
+        } else
+            snprintf(resp, sizeof(resp), "blackbox: unknown cmd '%s'", cmd);
+        (void)mqtt_send(st->topic_resp, resp, (int)strlen(resp));
+        printf("manage: blackbox cmd='%s' -> %s\n", cmd, resp);
+        cJSON_Delete(root);
+        return;
+    }
+
     const uint16_t seq = st->seq++;
 
     /* NB: `cmd` points into the cJSON tree, so every use of it must precede cJSON_Delete. */
@@ -183,6 +243,7 @@ bool gwmqtt_manage_begin(gwmqtt_manage_state_t *st, const char *topic_prefix, ui
         return false;
     }
     snprintf(st->topic_req, sizeof(st->topic_req), "%s" GWMQTT_MANAGE_TOPIC, topic_prefix);
+    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s/blackbox/resp", topic_prefix);
 
     g_gwmqtt_manage = st;
     st->enabled = true;

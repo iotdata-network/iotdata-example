@@ -60,7 +60,7 @@
 
 #pragma GCC diagnostic pop
 
-#include "iotdata_config.h" // shared IOTDATA_CONFIG_* knobs (+ host-local iotdata_config.<host>.h override)
+#include "iotdata_config.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // Application configuration
@@ -152,10 +152,6 @@ static const char *centi_str(char *const buf, const size_t size, const int32_t c
 // EBYTE E22-xxxTxx serial transport
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/*
- * e22xxxtxx.h builds multi-part output lines (no trailing \n on some calls),
- * so we use printf rather than ESP_LOG which adds prefixes and newlines.
- */
 static bool debug_e22 = false;
 #define PRINTF_DEBUG(fmt, ...) \
     do { \

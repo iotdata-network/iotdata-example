@@ -53,6 +53,9 @@
 
 #include "iotdata_config.h"
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 /*
  * Every cooperative wait in this app funnels through __SLEEP_MS — directly, or
  * via __sleep_ms() which the e22 driver calls (its AUX wait loop and serial read
@@ -101,9 +104,6 @@ static inline uint32_t __JITTER(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // EBYTE E22-xxxTxx DIP module GPIO and UART configuration
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// Two hardware variants, selected at build time via IOTDATA_CONFIG_CARRIER (shared header
-// iotdata_config.h; default 1 = AE SDC carrier PCB pin map). Set it 0 (or in a host-local
-// iotdata_config.<host>.h) for the original bench wiring.
 
 #if IOTDATA_CONFIG_CARRIER
 
@@ -140,10 +140,6 @@ static const char *__tag_app = "app";
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/*
- * e22xxxtxx.h builds multi-part output lines (no trailing \n on some calls),
- * so we use printf rather than ESP_LOG which adds prefixes and newlines.
- */
 static bool debug_e22 = false;
 #define PRINTF_DEBUG(fmt, ...) \
     do { \

@@ -242,6 +242,7 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
         // management: transmit any MANAGE frame queued by the mqtt-thread callback
         if (*running)
             gwmqtt_manage_pump();
+        gwmqtt_blackbox_tick(); /* periodic flush of the RAM-cached records (batched mode) */
 
         // stats publish/display
         if (*running && state->stat_publish_interval > 0 && intervalable(state->stat_publish_interval, &state->stat_publish_interval_last) > 0)

@@ -168,6 +168,8 @@ void __sleep_ms(const uint32_t ms) {
 #include "iotdata_gateway_ddup.h"
 #include "iotdata_gateway_stat.h"
 #include "iotdata_gateway_netw.h"
+#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#include "iotdata_blackbox.h"
 #include "iotdata_gateway_mqtt.h"
 #include "iotdata_gateway_exec.h"
 
@@ -237,6 +239,13 @@ const struct option config_options [] = {
     {"stat-network-interval",           required_argument, 0, 0},
     {"stat-publish-mqtt-topic-prefix",  required_argument, 0, 0},
     //
+    {"blackbox-enabled",                required_argument, 0, 0},
+    {"blackbox-ram-max-records",        required_argument, 0, 0},
+    {"blackbox-ram-max-seconds",        required_argument, 0, 0},
+    {"blackbox-file-directory",         required_argument, 0, 0},
+    {"blackbox-file-max-bytes",         required_argument, 0, 0},
+    {"blackbox-file-generations",       required_argument, 0, 0},
+    //
     {"debug",                           required_argument, 0, 0},
     {"debug-data",                      required_argument, 0, 0},
     {0, 0, 0, 0}
@@ -288,6 +297,12 @@ const config_option_help_t config_options_help [] = {
     {"stat-network-interval",           "Network/stations table stdout interval in seconds (default: 300; 0 disables)"},
     {"stat-publish-mqtt-topic-prefix",  "Stat publish MQTT topic prefix (default: 'iotdata/stats')"},
     //
+    {"blackbox-enabled",                "Enable the blackbox diagnostic recorder (true/false, default: false)"},
+    {"blackbox-ram-max-records",        "RAM pool maximum records (0 = unbounded, default: 0)"},
+    {"blackbox-ram-max-seconds",        "RAM pool maximum seconds before flush to file (0 = write-through, default: 0)"},
+    {"blackbox-file-directory",         "CSV file directory (default: '.')"},
+    {"blackbox-file-max-bytes",         "CSV file maximum bytes, rotates past this (0 = unbounded, default: 0)"},
+    {"blackbox-file-generations",       "CSV file maximum rotated generations to keep (<file>.1 .. .N; 0 = overwrite/no backup, default: 10)"},
     {"debug",                           "Debug output (true/false)"},
     {"debug-data",                      "Debug data (hex dump of received packet data) output (true/false)"},
 };
@@ -410,6 +425,10 @@ typedef struct {
     ddup_state_t ddup_state;
     stat_state_t stat_state;
     process_state_t process_state;
+    blackbox_handle_t blackbox;
+    blackbox_config_t blackbox_config;
+    char blackbox_pool[IOTDATA_BLACKBOX_POOL_SZ];
+    char blackbox_path[512];
     volatile bool running;
 } system_t;
 
@@ -451,6 +470,43 @@ void signal_handler(const int sig __attribute__((unused))) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+static void gateway_blackbox_begin(system_t *state) {
+    const bool enabled = config_get_bool("blackbox-enabled", false);
+    const int max_records = (int)config_get_integer("blackbox-ram-max-records", 0);
+    const int max_seconds = (int)config_get_integer("blackbox-ram-max-seconds", 0);
+    const int max_bytes = (int)config_get_integer("blackbox-file-max-bytes", 0);
+    const char *const dir = config_get_string("blackbox-file-directory", ".");
+    const int gens = (int)config_get_integer("blackbox-file-generations", 10);
+    snprintf(state->blackbox_path, sizeof(state->blackbox_path), "%s/iotdata_gateway_blackbox.csv", dir);
+    state->blackbox_config = (blackbox_config_t){
+        .pool = state->blackbox_pool,
+        .pool_sz = sizeof(state->blackbox_pool),
+        .flush = (max_seconds > 0) ? BLACKBOX_FLUSH_BATCH_TIME : BLACKBOX_FLUSH_WRITE_THROUGH,
+        .flush_ms = (max_seconds > 0) ? (uint32_t)max_seconds * 1000u : 0u,
+        .max_records = (max_records > 0) ? (uint32_t)max_records : 0u,
+        .max_bytes = (max_bytes > 0) ? (uint32_t)max_bytes : 0u,
+        .generations = (uint8_t)((gens < 0)     ? 0 : (gens > 255) ? 255 : gens),
+        .persist_arg = state->blackbox_path,
+        .enabled = enabled,
+    };
+    if (blackbox_init(&state->blackbox, &state->blackbox_config) != 0) {
+        fprintf(stderr, "blackbox: init failed (path=%s)\n", state->blackbox_path);
+        return;
+    }
+    (void)iotdata_blackbox_lifecycle(&state->blackbox, IOTDATA_BB_LC_START, 0);
+    printf("blackbox: %s (path=%s, flush=%s)\n", enabled ? "enabled" : "disabled (default)", state->blackbox_path, (max_seconds > 0) ? "ram-cache/batched" : "write-through");
+}
+
+static void gateway_blackbox_end(system_t *state) {
+    if (state->blackbox.cfg != NULL) {
+        (void)iotdata_blackbox_lifecycle(&state->blackbox, IOTDATA_BB_LC_STOP, 0);
+        (void)blackbox_flush(&state->blackbox);
+        blackbox_deinit(&state->blackbox);
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 int main(int argc, char *argv[]) {
 
     int ret = EXIT_FAILURE;
@@ -464,6 +520,8 @@ int main(int argc, char *argv[]) {
 
     if (!system_config(state, argc, argv))
         goto end_all;
+
+    gateway_blackbox_begin(state);
 
     // LORA SERIAL/DEVICE
     if (!serial_begin(&state->lora_serial_config) || !serial_connect()) {
@@ -482,6 +540,7 @@ int main(int argc, char *argv[]) {
     if (!mqtt_begin(&state->mqtt_config))
         goto end_device;
     (void)gwmqtt_manage_begin(&state->manage, state->process_state.mqtt_topic_prefix, state->mesh_state.station_id, device_packet_write);
+    state->manage.blackbox = (state->blackbox.cfg != NULL) ? &state->blackbox : NULL;
 
     state->running = true;
 
@@ -507,6 +566,7 @@ end_device:
 end_serial:
     serial_end();
 end_all:
+    gateway_blackbox_end(state);
     return ret;
 }
 
