@@ -281,7 +281,6 @@ static e22900t22_config_t e22_config = {
 #include "iotdata_blackbox.h"
 
 static RTC_NOINIT_ATTR char blackbox_pool[IOTDATA_BLACKBOX_POOL_SZ];
-RTC_NOINIT_ATTR uint32_t iotdata_blackbox_seq;
 static blackbox_handle_t blackbox;
 static const blackbox_config_t blackbox_config = {
     .pool = blackbox_pool,
@@ -292,8 +291,7 @@ static const blackbox_config_t blackbox_config = {
 };
 
 static void blackbox_start(const esp_reset_reason_t reason) {
-    if (reason == ESP_RST_POWERON)
-        iotdata_blackbox_seq = 0;
+    iotdata_blackbox_begin();
     if (blackbox_init(&blackbox, &blackbox_config) != 0) {
         ESP_LOGW(__tag_app, "blackbox: init failed -- diagnostics disabled");
         return;
