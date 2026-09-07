@@ -244,7 +244,6 @@ static e22900t22_config_t e22_config = {
 
 /*
  * Strip everything except the encoder for minimal ESP32 build:
- *   - NO_DECODE:  no decoder (encoder-only)
  *   - NO_JSON:    no cJSON dependency
  *   - NO_DUMP:    no dump output
  *   - NO_PRINT:   no print output
@@ -254,7 +253,6 @@ static e22900t22_config_t e22_config = {
  * conversion from internal centi-units to iotdata_float_t correctly
  * under NO_FLOATING (they pass centi-values directly).
  */
-#define IOTDATA_NO_DECODE
 #define IOTDATA_NO_JSON
 #define IOTDATA_NO_DUMP
 #define IOTDATA_NO_PRINT
@@ -262,6 +260,8 @@ static e22900t22_config_t e22_config = {
 #include "iotdata_variant_simulator.h"
 #include "iotdata_variant_simulator.c"
 #include "iotdata.c"
+#include "iotdata_node.h"
+#include "iotdata_node_endpoint.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // Blackbox diagnostics
@@ -317,6 +317,94 @@ static void blackbox_start(const esp_reset_reason_t reason) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static uint32_t tx_count = 0, tx_errors = 0;
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// Node personality, one per simulated sensor
+//
+// A simulator is a fleet in one box, so each virtual sensor keeps its own receive window and they
+// drift apart rather than all waking together -- which is what a real fleet does, and the thing
+// worth simulating.
+//
+// One difference from the real sensor: it appends RECEIVE to the telemetry frame it was already
+// sending (two bytes), whereas here the frames are built inside the simulator library, so the
+// advertisement goes out as a frame of its own immediately afterwards. Same moment, same effect on
+// whoever is holding a command -- just an extra frame of airtime that a real node would not spend.
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static iotsim_t g_sim;
+static idep_node_t sim_nodes[IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS];
+
+static void sim_node_status(const uint16_t station, iotdata_kvr_t *const kv) {
+    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_UPTIME, (uint32_t)(__MILLIS() / 1000));
+    iotdata_kvr_add_u8(kv, IOTDATA_NODE_STATUS_REASON, IOTDATA_NODE_REASON_UNKNOWN);
+    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_HEAP_FREE, (uint32_t)esp_get_free_heap_size());
+    for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++)
+        if (sim_nodes[i].station_id == station) {
+            const iotsim_sensor_t *const s = iotsim_sensor(&g_sim, i);
+            if (s != NULL)
+                iotdata_kvr_add_u16(kv, IOTDATA_NODE_STATUS_SUPPLY, (uint16_t)(s->battery * 30u)); /* % -> a plausible mV */
+            break;
+        }
+}
+
+static bool sim_node_tx(const uint8_t *const packet, const size_t len) {
+    if (!device_packet_write(packet, (int)len)) {
+        tx_errors++;
+        return false;
+    }
+    tx_count++;
+    return true;
+}
+
+static const idep_version_t sim_version = {
+    .firmware = "0.01",
+    .application = "iotdata_simulator",
+    .platform = CONFIG_IDF_TARGET,
+    .build = __DATE__,
+};
+
+static const idep_config_t sim_cfg = {
+    .version = &sim_version,
+    .status = sim_node_status,
+    .tx = sim_node_tx,
+    .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
+    .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
+};
+
+static void sim_receive_poll(void) {
+    bool any_open = false;
+    const uint32_t now = __MILLIS();
+    for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS && !any_open; i++)
+        any_open = idep_window_active(&sim_nodes[i], now);
+    if (!any_open)
+        return;
+
+    uint8_t buf[IDEP_PACKET_MAX];
+    int len = 0;
+    uint8_t rssi = 0;
+    while (device_packet_read(buf, (int)sizeof(buf), &len, &rssi) && len > 0) {
+        for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++) {
+            if (!idep_window_active(&sim_nodes[i], __MILLIS()))
+                continue;
+            bool reboot = false;
+            if (idep_on_frame(&sim_cfg, &sim_nodes[i], buf, (size_t)len, &reboot))
+                ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " acted on a downstream command", sim_nodes[i].station_id);
+            if (reboot) {
+                ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " REBOOT commanded -- restarting", sim_nodes[i].station_id);
+                BLACKBOX_EVENT(IOTDATA_BB_LC_STOP, 0);
+                __SLEEP_MS(200);
+                esp_restart();
+            }
+        }
+        len = 0;
+    }
+
+    for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++)
+        if (sim_nodes[i].window_open && !idep_window_active(&sim_nodes[i], __MILLIS())) {
+            idep_window_end(&sim_nodes[i]);
+            ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " receive window closed", sim_nodes[i].station_id);
+        }
+}
 
 static void transmit_packet(const iotsim_packet_t *pkt) {
 
@@ -430,25 +518,31 @@ bool app_exec(void) {
     (void)esp_efuse_mac_get_default(mac);
     const uint32_t mac32 = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];
     const uint32_t seed = mac32 ? mac32 : 0xDEADBEEFU;
-    /* Station ids must fit iotdata's 12-bit station field (<= IOTDATA_STATION_MAX = 4095);
-       give each board a disjoint IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS-wide band within that range. */
-    const uint16_t nbands = (uint16_t)(IOTDATA_STATION_MAX / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS); /* 4095/8 = 511 bands */
+    /* Station ids must be ASSIGNABLE (1..4094): banding the whole 4095-wide field would let the
+       top band's last sensor land on the broadcast id -- not today at 8 sensors, but at 5 it would.
+       Banding the assignable range instead makes nbands*NUM_SENSORS <= 4094 for any count. */
+    const uint16_t nbands = (uint16_t)(IOTDATA_STATION_ASSIGNABLE_MAX / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS); /* 4094/8 = 511 */
     const uint16_t station_base = (uint16_t)((mac32 % nbands) * (uint32_t)IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
     const uint32_t t0 = __MILLIS();
-    static iotsim_t sim; // too large for stack
-    iotsim_init(&sim, seed, t0, station_base);
+    iotsim_t *const sim = &g_sim;
+    iotsim_init(sim, seed, t0, station_base);
     ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed,
              (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS));
     ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS, IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES, (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS / 1000),
              (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS / 1000));
     for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++) {
-        const iotsim_sensor_t *s = iotsim_sensor(&sim, i);
+        const iotsim_sensor_t *s = iotsim_sensor(sim, i);
+        idep_node_init(&sim_nodes[i], s->station_id);
+        /* stagger the first window across the fleet, so they do not all open at once: a real fleet
+           is spread by however its members happened to be powered up */
+        sim_nodes[i].elapsed_ms = (uint32_t)((uint64_t)IDEP_RECEIVE_EVERY_MS * (uint32_t)i / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
         ESP_LOGI(__tag_app, "  [%2d] %-18s stn=%-4" PRIu16 " bat=%" PRIu8 "%%", i, iotdata_vsuite_name(s->variant), s->station_id, s->battery);
     }
+    ESP_LOGI(__tag_app, "node: receive window %us every %uh, per sensor", (unsigned)(IDEP_RECEIVE_WINDOW_MS / 1000), (unsigned)(IDEP_RECEIVE_EVERY_MS / 3600000u));
 
     /* --- Application loop — poll simulator, transmit when ready --- */
     int rssi_channel_dbm = -100;
-    uint32_t rssi_time_last = 0, tx_count_last = 0;
+    uint32_t rssi_time_last = 0, tx_count_last = 0, window_last_ms = __MILLIS();
     for (;;) {
         if (__MILLIS() >= rssi_time_last + RSSI_INTERVAL_MS) {
             rssi_time_last = __MILLIS();
@@ -456,11 +550,31 @@ bool app_exec(void) {
             if (device_channel_rssi_read(&rssi_raw))
                 rssi_channel_dbm = get_rssi_dbm(rssi_raw);
         }
+        /* age every sensor's window by the time actually spent round the loop */
+        const uint32_t now = __MILLIS();
+        const uint32_t delta = now - window_last_ms;
+        window_last_ms = now;
+        for (int i = 0; i < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS; i++)
+            (void)idep_window_advance(&sim_cfg, &sim_nodes[i], delta);
+
         iotsim_packet_t pkt;
-        while (iotsim_poll(&sim, __MILLIS(), &pkt)) {
+        while (iotsim_poll(sim, __MILLIS(), &pkt)) {
             transmit_packet(&pkt);
             __SLEEP_MS(5);
+            /* this sensor has just spoken, so if its window is due this is the moment to say so */
+            const int idx = pkt.sensor_index;
+            if (idx >= 0 && idx < IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS && idep_window_pending(&sim_nodes[idx])) {
+                sim_nodes[idx].sequence = (uint16_t)(pkt.sequence + 1u);
+                if (idep_receive_announce(&sim_cfg, &sim_nodes[idx])) {
+                    idep_window_begin(&sim_cfg, &sim_nodes[idx], __MILLIS());
+                    ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " receive window open for %ums", sim_nodes[idx].station_id, (unsigned)IDEP_RECEIVE_WINDOW_MS);
+                }
+                __SLEEP_MS(5);
+            }
         }
+
+        /* anything on air while at least one window is open may be a command for that sensor */
+        sim_receive_poll();
         if (tx_count >= tx_count_last + STATUS_EVERY_N_TX) {
             tx_count_last = tx_count;
             ESP_LOGI(__tag_app, "status: tx=%" PRIu32 " errors=%" PRIu32 " rssi=%d dBm uptime=%" PRIu32 "s", tx_count, tx_errors, rssi_channel_dbm, (__MILLIS() - t0) / 1000);

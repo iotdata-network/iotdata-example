@@ -955,7 +955,6 @@ static bool battery_probe(void) {
 
 /*
  * Strip everything except the encoder for a minimal ESP32 build:
- *   - NO_DECODE:   no decoder (encoder-only)
  *   - NO_JSON:     no cJSON dependency
  *   - NO_DUMP:     no dump output
  *   - NO_PRINT:    no print output
@@ -965,13 +964,14 @@ static bool battery_probe(void) {
  * their native fixed point: centi-degC is exactly what the temperature field
  * wants, so nothing is converted and no float support is linked in.
  */
-#define IOTDATA_NO_DECODE
 #define IOTDATA_NO_JSON
 #define IOTDATA_NO_DUMP
 #define IOTDATA_NO_PRINT
 #define IOTDATA_NO_FLOATING
 #include "iotdata.c"
 #include "iotdata_variant.h"
+#include "iotdata_node.h"
+#include "iotdata_node_endpoint.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -992,9 +992,28 @@ typedef struct {
     size_t len;
 } packet_t;
 
-static bool packet_build(packet_t *const out, const uint16_t station, const uint16_t sequence, const bme280_reading_t *const reading, const battery_reading_t *const battery, uint8_t flags) {
+static void sensor_node_status(const uint16_t station, iotdata_kvr_t *const kv);
+static bool sensor_node_tx(const uint8_t *const packet, const size_t len);
+static void sensor_receive_window(void); /* defined below app_cycle, which opens it */
 
-    static iotdata_encoder_t enc; /* too large for a comfortable stack frame */
+static const idep_version_t sensor_version = {
+    .firmware = "0.01",
+    .application = "iotdata_sensor_bme280",
+    .platform = CONFIG_IDF_TARGET,
+    .build = __DATE__,
+};
+
+static const idep_config_t idep_cfg = {
+    .version = &sensor_version,
+    .status = sensor_node_status,
+    .tx = sensor_node_tx,
+    .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
+    .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
+};
+
+static bool packet_build(packet_t *const out, const uint16_t station, const uint16_t sequence, const bme280_reading_t *const reading, const battery_reading_t *const battery, uint8_t flags, const bool advertise_receive) {
+
+    static iotdata_encoder_t enc;
 
     iotdata_status_t rc;
     if ((rc = iotdata_encode_begin(&enc, out->buf, sizeof(out->buf), PACKET_VARIANT, station, sequence)) != IOTDATA_OK) {
@@ -1019,6 +1038,9 @@ static bool packet_build(packet_t *const out, const uint16_t station, const uint
     if (flags != 0 && (rc = iotdata_encode_flags(&enc, flags)) != IOTDATA_OK)
         ESP_LOGW(__tag_app, "encode_flags: %s", iotdata_strerror(rc));
 
+    if (advertise_receive && !idep_receive_append(&idep_cfg, &enc))
+        ESP_LOGW(__tag_app, "encode_receive: no room");
+
     if ((rc = iotdata_encode_end(&enc, &out->len)) != IOTDATA_OK) {
         ESP_LOGE(__tag_app, "encode_end: %s", iotdata_strerror(rc));
         return false;
@@ -1035,7 +1057,8 @@ static bool packet_build(packet_t *const out, const uint16_t station, const uint
 typedef struct {
     uint32_t magic;
     uint16_t station_id;    /* derived from the factory MAC: stable per board  */
-    uint16_t sequence;      /* rolling packet counter, wraps at 16 bits        */
+    uint16_t sequence;      /* rolling packet counter, skips the reserved 0xFFFF */
+    idep_node_t node;       /* node personality: sequence, receive window, stats */
     uint32_t cycles;        /* wake cycles since the last restart              */
     uint32_t tx_count;      /* packets transmitted                             */
     uint32_t tx_errors;     /* packets the radio would not take                */
@@ -1056,7 +1079,7 @@ static uint16_t state_station_id(void) {
     uint8_t mac[6] = { 0 };
     (void)esp_efuse_mac_get_default(mac);
     const uint32_t mac32 = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];
-    const uint16_t station_id = (uint16_t)((mac32 % IOTDATA_STATION_MAX) + 1);
+    const uint16_t station_id = iotdata_station_from_id(mac32); /* 1..4094: never 0, never broadcast */
     ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X station=%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], station_id);
     return station_id;
 }
@@ -1065,6 +1088,7 @@ static void state_reset(void) {
     memset(&state, 0, sizeof(state));
     state.magic = STATE_MAGIC;
     state.station_id = state_station_id();
+    idep_node_init(&state.node, state.station_id);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -1117,6 +1141,29 @@ static void blackbox_start(const esp_reset_reason_t reason, const bool restarted
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // Application
 // -----------------------------------------------------------------------------------------------------------------------------------------
+
+static uint8_t sensor_node_reason(void) {
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:
+        return IOTDATA_NODE_REASON_POWER_ON;
+    case ESP_RST_SW:
+        return IOTDATA_NODE_REASON_SOFTWARE;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+        return IOTDATA_NODE_REASON_WATCHDOG;
+    case ESP_RST_BROWNOUT:
+        return IOTDATA_NODE_REASON_BROWNOUT;
+    case ESP_RST_PANIC:
+        return IOTDATA_NODE_REASON_PANIC;
+    case ESP_RST_DEEPSLEEP:
+        return IOTDATA_NODE_REASON_DEEPSLEEP;
+    case ESP_RST_EXT:
+        return IOTDATA_NODE_REASON_EXTERNAL;
+    default:
+        return IOTDATA_NODE_REASON_UNKNOWN;
+    }
+}
 
 static const char *reset_reason_str(esp_reset_reason_t r) {
     switch (r) {
@@ -1194,10 +1241,14 @@ static bool app_cycle(void) {
 
     /* --- packet --- */
     packet_t packet;
-    if (!packet_build(&packet, state.station_id, state.sequence, measured ? &reading : NULL, powered ? &battery : NULL, flags))
+    /* One cycle's worth of time has passed since the last window; if that tips us over the
+       interval, this is the frame that advertises the next one. */
+    const bool advertise = idep_window_advance(&idep_cfg, &state.node, TX_PERIOD_MS);
+
+    if (!packet_build(&packet, state.station_id, state.sequence, measured ? &reading : NULL, powered ? &battery : NULL, flags, advertise))
         return false;
-    ESP_LOGI(__tag_app, "packet: variant=%s station=%" PRIu16 " sequence=%" PRIu16 " flags=0x%02" PRIX8, iotdata_vsuite_name(PACKET_VARIANT), state.station_id, state.sequence, flags);
-    state.sequence++;
+    ESP_LOGI(__tag_app, "packet: variant=%s station=%" PRIu16 " sequence=%" PRIu16 " flags=0x%02" PRIX8 "%s", iotdata_vsuite_name(PACKET_VARIANT), state.station_id, state.sequence, flags, advertise ? " +receive" : "");
+    state.sequence = iotdata_sequence_next(state.sequence); /* never lands on the downstream marker */
 
     /* --- radio --- */
     bool transmitted = false;
@@ -1205,6 +1256,10 @@ static bool app_cycle(void) {
     if (ready) {
         state.radio_configured = true;
         transmitted = lora_transmit(packet.buf, packet.len);
+        /* the window has to start the instant the advertisement is on the air, and the radio must
+           still be up for it -- so before lora_end(), not after */
+        if (transmitted && advertise)
+            sensor_receive_window();
     }
     lora_end(ready); /* on every path: the module must not be left awake for the sleep ahead */
 
@@ -1213,6 +1268,56 @@ static bool app_cycle(void) {
     else
         state.tx_errors++;
     return transmitted && measured;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// The receive window: the only time this node can be commanded.
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static void sensor_node_status(__attribute__((unused)) const uint16_t station, iotdata_kvr_t *const kv) {
+    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_UPTIME, (uint32_t)(esp_timer_get_time() / 1000000));
+    iotdata_kvr_add_u8(kv, IOTDATA_NODE_STATUS_REASON, sensor_node_reason());
+    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_HEAP_FREE, (uint32_t)esp_get_free_heap_size());
+    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_HEAP_MIN, (uint32_t)esp_get_minimum_free_heap_size());
+    iotdata_kvr_add_u16(kv, IOTDATA_NODE_STATUS_RESTARTS, (uint16_t)state.cycles);
+    if (state.battery_present && state.battery_mv > 0)
+        iotdata_kvr_add_u16(kv, IOTDATA_NODE_STATUS_SUPPLY, (uint16_t)state.battery_mv);
+}
+
+static bool sensor_node_tx(const uint8_t *const packet, const size_t len) {
+    return lora_transmit(packet, len);
+}
+
+static void sensor_receive_window(void) {
+
+    const uint32_t opened = (uint32_t)(esp_timer_get_time() / 1000);
+    idep_window_begin(&idep_cfg, &state.node, opened);
+    ESP_LOGI(__tag_app, "receive: window open for %ums (station=%" PRIu16 ")", (unsigned)IDEP_RECEIVE_WINDOW_MS, state.station_id);
+    BLACKBOX_EVENT(IOTDATA_BB_LC_WAKE, 0);
+
+    bool reboot = false;
+    unsigned frames = 0, acted = 0;
+    while (idep_window_active(&state.node, (uint32_t)(esp_timer_get_time() / 1000))) {
+        uint8_t buf[IDEP_PACKET_MAX];
+        int len = 0;
+        uint8_t rssi = 0;
+        if (device_packet_read(buf, (int)sizeof(buf), &len, &rssi) && len > 0) {
+            frames++;
+            if (idep_on_frame(&idep_cfg, &state.node, buf, (size_t)len, &reboot))
+                acted++;
+        }
+        __SLEEP_MS(10); /* yield and pat the watchdog: the window is long by MCU standards */
+    }
+    idep_window_end(&state.node);
+    ESP_LOGI(__tag_app, "receive: window closed (%u frame(s) heard, %u for us)", frames, acted);
+
+    if (reboot) {
+        ESP_LOGW(__tag_app, "node: REBOOT commanded -- restarting");
+        BLACKBOX_EVENT(IOTDATA_BB_LC_STOP, 0);
+        BLACKBOX_FLUSH();
+        __SLEEP_MS(CONSOLE_DRAIN_MS);
+        esp_restart();
+    }
 }
 
 /* Sleep out the remainder of the period, so the cycle time is TX_PERIOD_MS

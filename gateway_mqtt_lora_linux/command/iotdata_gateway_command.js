@@ -182,6 +182,70 @@ const COMMANDS = {
             return { cmd: 'diag-dump' };
         },
     },
+    // --- node: the iotdata system TLVs (iotdata_node.h), spoken by EVERY node -- gateway, relay,
+    //     sensor, simulator. Addressed by --target like everything else, because a gateway is just
+    //     another station: a target of its own id it answers itself, anything else goes on air.
+    //
+    //     Unlike the mesh commands, the reply comes back over MQTT as JSON on <prefix>/node/resp,
+    //     so --watch shows it. But a SLEEPING target (a sensor) will not answer promptly: the
+    //     gateway holds the command and delivers it in that node's next receive window, which may
+    //     be hours away. That is the design, not a fault -- see iotdata_node.h.
+    'node': {
+        summary: 'node: request every report the target can produce',
+        usage: 'node',
+        build() {
+            return { cmd: 'node' };
+        },
+    },
+    'node-version': {
+        summary: 'node: request what it IS: firmware, hardware, platform, build',
+        usage: 'node-version',
+        build() {
+            return { cmd: 'node-version' };
+        },
+    },
+    'node-variant': {
+        summary: 'node: request which telemetry variants it produces (empty for a gateway or relay)',
+        usage: 'node-variant',
+        build() {
+            return { cmd: 'node-variant' };
+        },
+    },
+    'node-control': {
+        summary: 'node: request its command inventory: what it will accept',
+        usage: 'node-control',
+        build() {
+            return { cmd: 'node-control' };
+        },
+    },
+    'node-status': {
+        summary: 'node: request how it is DOING: uptime, restarts, supply, heap',
+        usage: 'node-status',
+        build() {
+            return { cmd: 'node-status' };
+        },
+    },
+    'node-config': {
+        summary: 'node: request its settable operating parameters',
+        usage: 'node-config',
+        build() {
+            return { cmd: 'node-config' };
+        },
+    },
+    'node-diagnostics': {
+        summary: 'node: request its recorded diagnostic data (blackbox)',
+        usage: 'node-diagnostics',
+        build() {
+            return { cmd: 'node-diagnostics' };
+        },
+    },
+    'node-content': {
+        summary: 'node: request bulk payload: firmware image, user data',
+        usage: 'node-content',
+        build() {
+            return { cmd: 'node-content' };
+        },
+    },
     'raw': {
         summary: 'send a raw JSON request (power user), e.g. raw \'{"cmd":"status"}\'',
         usage: 'raw <json>',
@@ -350,7 +414,7 @@ async function main() {
     if (opts.watch > 0) {
         const watchTopic = `${opts.prefix}/#`;
         const convert = opts.definitions ? makeRecordConverter(opts.definitions) : null;
-        display.log(`watching ${watchTopic} for ${opts.watch}s  (node STATUS output is on the node console, not MQTT)`);
+        display.log(`watching ${watchTopic} for ${opts.watch}s  (node-* replies arrive here as JSON; mesh/diag output goes to the node console)`);
         client.on('message', (topic, msg) => {
             const text = msg.toString();
             // With --definitions, turn recognised record lines (a blackbox-dump reply on

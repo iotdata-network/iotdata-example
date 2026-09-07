@@ -217,6 +217,8 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
                 // heard both directly and via a relay publishes once — whichever path adds {station,
                 // seq} first wins, the other is suppressed. is_new is true unless it was a duplicate
                 // (always true when mesh is off). Track the reception either way for observability.
+                /* a packet may carry system TLVs (node reports) as well as telemetry */
+                (void)gwnode_on_packet(packet_buffer, (size_t)packet_length, station_id);
                 const bool is_new = ddup_check_sensor_packet(state, station_id, sequence);
                 network_note_receive(&state->network, station_id, variant_id, sequence, NET_PATH_DIRECT, is_new, (state->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, 0, time(NULL));
                 if (is_new)
@@ -240,6 +242,7 @@ bool process_run(process_state_t *state, mesh_state_t *mesh_state, ddup_state_t 
         if (*running)
             gwmqtt_manage_pump();
         gwmqtt_blackbox_tick(); /* periodic flush of the RAM-cached records (batched mode) */
+        gwnode_tick();          /* node: startup reports, then each type on its configured period */
 
         // stats publish/display
         if (*running && state->stat_publish_interval > 0 && intervalable(state->stat_publish_interval, &state->stat_publish_interval_last) > 0)

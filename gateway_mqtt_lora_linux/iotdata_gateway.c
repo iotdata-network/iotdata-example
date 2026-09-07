@@ -150,6 +150,8 @@ void __sleep_ms(const uint32_t ms) {
 #include "iotdata_variant.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
+#include "iotdata_down.h"
+#include "iotdata_node.h"
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 #include "iotdata_blackbox.h"
 
@@ -159,6 +161,7 @@ void __sleep_ms(const uint32_t ms) {
 #include "iotdata_gateway_mesh.h"
 #include "iotdata_gateway_ddup.h"
 #include "iotdata_gateway_stat.h"
+#include "iotdata_gateway_node.h"
 #include "iotdata_gateway_netw.h"
 #include "iotdata_gateway_mqtt.h"
 #include "iotdata_gateway_exec.h"
@@ -357,6 +360,14 @@ void iotdata_mesh_config_populate(mesh_state_t *cfg) {
 
     cfg->enabled = config_get_bool("mesh-enable", false);
     cfg->station_id = (uint16_t)config_get_integer("mesh-station-id", GATEWAY_STATION_ID_DEFAULT);
+    /* This one is typed by an operator rather than derived, so it is the only station id in the
+       fleet that can be wrong. 0 is not a station, and the broadcast id would make the gateway
+       treat every broadcast as addressed to it alone. */
+    if (!iotdata_station_is_assignable(cfg->station_id)) {
+        fprintf(stderr, "config: mesh-station-id %u is reserved (must be 1..%u) -- using %u\n", (unsigned)cfg->station_id, (unsigned)IOTDATA_STATION_ASSIGNABLE_MAX,
+                (unsigned)GATEWAY_STATION_ID_DEFAULT);
+        cfg->station_id = GATEWAY_STATION_ID_DEFAULT;
+    }
     cfg->beacon_interval = (time_t)config_get_integer("mesh-beacon-interval", INTERVAL_BEACON_DEFAULT);
     cfg->debug = config_get_bool("mesh-debug", false);
 
@@ -414,6 +425,7 @@ typedef struct {
     mesh_state_t mesh_state;
     ddup_state_t ddup_state;
     stat_state_t stat_state;
+    gwnode_state_t node_state;
     process_state_t process_state;
     blackbox_handle_t blackbox;
     blackbox_config_t blackbox_config;
@@ -545,6 +557,7 @@ int main(int argc, char *argv[]) {
 
     // GATEWAY PROCESSOR
     stat_begin(&state->stat_state, IOTDATA_GATEWAY_VERSION, state->mesh_state.station_id, &state->lora_device_config);
+    gwnode_begin(&state->node_state, state->mesh_state.station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->blackbox, device_packet_write, state->process_state.mqtt_topic_prefix);
     ret = process_run(&state->process_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
     stat_end(&state->stat_state);
 

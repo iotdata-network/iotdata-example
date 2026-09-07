@@ -115,6 +115,52 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
     const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
     const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
 
+    /* node: the iotdata system TLVs. "node" alone asks for every report; "node-<type>" asks for
+       one, where <type> is a name from iotdata_node.h (version/variant/control/status/config/
+       diagnostics). We build the same kvr CONTROL payload a remote manager would send, so the
+       MQTT and (later) radio paths run through identical code. */
+    if (strncmp(cmd, "node", 4) == 0 && (cmd[4] == '\0' || cmd[4] == '-')) {
+        uint8_t kvbuf[32];
+        iotdata_kvr_t kv;
+        iotdata_kvr_init(&kv, kvbuf, sizeof(kvbuf));
+        if (cmd[4] == '\0') { /* everything that can be asked for -- so not CONTENT, not RECEIVE */
+            for (uint8_t type = 0; type <= IOTDATA_TLV_TYPE_SYSTEM_MAX; type++)
+                if (iotdata_node_tlv_control_key(type) != IOTDATA_NODE_TLV_NONE && type != IOTDATA_NODE_TLV_CONTENT)
+                    iotdata_kvr_add_flag(&kv, iotdata_node_tlv_control_key(type));
+        } else {
+            const char *const want = &cmd[5];
+            uint8_t found = IOTDATA_NODE_TLV_NONE;
+            for (uint8_t type = 0; type <= IOTDATA_TLV_TYPE_SYSTEM_MAX; type++) {
+                const char *const nm = iotdata_node_tlv_name(type);
+                if (nm != NULL && strcmp(nm, want) == 0) {
+                    found = type;
+                    break;
+                }
+            }
+            if (found != IOTDATA_NODE_TLV_NONE && iotdata_node_tlv_control_key(found) == IOTDATA_NODE_TLV_NONE) {
+                char resp[128];
+                snprintf(resp, sizeof(resp), "node: '%s' cannot be requested", want);
+                (void)mqtt_send(st->topic_resp, resp, (int)strlen(resp));
+                fprintf(stderr, "manage: %s\n", resp);
+                cJSON_Delete(root);
+                return;
+            }
+            if (found == IOTDATA_NODE_TLV_NONE) {
+                char resp[128];
+                snprintf(resp, sizeof(resp), "node: unknown tlv '%s'", want);
+                (void)mqtt_send(st->topic_resp, resp, (int)strlen(resp));
+                fprintf(stderr, "manage: %s\n", resp);
+                cJSON_Delete(root);
+                return;
+            }
+            iotdata_kvr_add_flag(&kv, iotdata_node_tlv_control_key(found));
+        }
+        printf("manage: node cmd='%s' target=%04X -> %zu byte control\n", cmd, (unsigned)target, kv.len);
+        gwnode_on_mqtt(kvbuf, kv.len, target);
+        cJSON_Delete(root);
+        return;
+    }
+
     if (strncmp(cmd, "diag", 4) == 0) {
         const bool local = (target == IOTDATA_MESH_MANAGE_TARGET_ALL || target == st->station_id);
         if (local) {
