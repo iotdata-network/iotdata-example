@@ -815,7 +815,40 @@ setInterval(() => send('stats', snapshot()), 5000);
 // are. Empty when no reference is configured, which also disables distances.
 const REF_LINK = REF ? `<a class="ref" href="https://www.google.com/maps/search/?api=1&amp;query=${REF.lat},${REF.lon}" target="_blank" rel="noopener noreferrer">${REF.lat.toFixed(6)}, ${REF.lon.toFixed(6)}</a>` : '';
 
+// ---------------------------------------------------------------------------- map
+
+// Google Maps needs a browser-side API key, and unlike the network server key this one is meant
+// to be public: it names the project to bill, so it necessarily ships inside the page for the
+// browser to present. Google's answer to that exposure is restriction rather than secrecy — tie
+// the key to the Maps JavaScript API and to the referrers you serve from, in the Cloud console.
+// It still lives in the config file rather than in this source, so the repo stays clean and each
+// host can carry its own. With no key the header link disappears and /map says why.
+const MAP_KEY = cfg['map-api-key'] ?? null;
+// hybrid rather than roadmap: walking a site, the useful backdrop is the actual tree line,
+// tracks and rooflines, with the road labels still drawn over them. roadmap, satellite and
+// terrain are the other three.
+const MAP_TYPE = cfg['map-type'] ?? 'hybrid';
+// Only used when there is a single point to show. With more than one the view is fitted to them.
+const MAP_ZOOM = parseInt(cfg['map-zoom'] ?? '17', 10);
+
+// With twenty devices the gateway's bare coordinates stop being the useful thing in the title
+// bar, so the map takes their place — the reference position is still one click away, now with
+// everything else drawn around it. Falls back to the coordinates when no key is configured.
+const MAP_LINK = MAP_KEY
+    ? '<a class="ref" href="/map" target="_blank" rel="noopener noreferrer">[map]</a>'
+    : REF_LINK;
+
 // ---------------------------------------------------------------------------- page
+
+// A radio mast throwing two arcs: this box is the LoRa gateway the rest of the mesh reports
+// to, and none of the other machines' icons are radio-themed. Inlined as a data: URI so the
+// page stays a single response with no second request for 400 bytes. Two things bite here:
+// '#' must be %23-escaped or the URL truncates at a fragment, and the SVG uses single quotes
+// so the href can keep its double ones. One mid-tone colour rather than the --good/--weak
+// palette, which is semantic on this page and would be read as a health indicator; teal also
+// stays legible against both light and dark browser chrome, which the page's own colours,
+// swapped by prefers-color-scheme, would not.
+const FAVICON = `<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='%230d9488' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><path d='M16 12.5V27'/><path d='M10.5 27L16 20l5.5 7'/><path d='M21.2 8.3A6.5 6.5 0 0 1 21.2 16.7'/><path d='M10.8 8.3A6.5 6.5 0 0 0 10.8 16.7'/></svg>">`;
 
 const PAGE = `<!doctype html>
 <html lang="en">
@@ -823,6 +856,7 @@ const PAGE = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>iotdata monitor</title>
+${FAVICON}
 <style>
   :root {
     --bg:#f6f7f9; --fg:#14171a; --dim:#6b7280; --line:#dfe3e8; --card:#fff;
@@ -907,7 +941,7 @@ const PAGE = `<!doctype html>
 </head>
 <body>
 <header>
-  <div class="bar"><b>iotdata gateway</b>${REF_LINK}<button id="gbtn" class="gbtn" hidden aria-expanded="false"></button><span id="stat"><span id="dot"></span><span id="msg">connecting</span></span></div>
+  <div class="bar"><b>iotdata gateway</b>${MAP_LINK}<button id="gbtn" class="gbtn" hidden aria-expanded="false"></button><span id="stat"><span id="dot"></span><span id="msg">connecting</span></span></div>
   <div id="gnss" hidden><div class="lbl" id="glbl">tracker</div><table><tbody></tbody></table></div>
   <table id="sum"><tbody></tbody></table>
   <div class="note">counts are cumulative; rate and avg rssi over the last ${WINDOW} packets</div>
@@ -1155,6 +1189,257 @@ es.addEventListener('gnss', function (ev) { renderGnss(JSON.parse(ev.data)); });
 </body>
 </html>`;
 
+// A second page rather than a panel on the first: the map is heavy, it is opened deliberately,
+// and the monitor page stays as light as it was. It carries no data of its own — it subscribes
+// to the same /events stream and plots what the stats and gnss views already contain, so there
+// is one source of truth and nothing to keep in step. Per-hop mesh routing is the obvious thing
+// to draw here later; the layer split below leaves room for it.
+const MAP_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>iotdata map</title>
+${FAVICON}
+<style>
+  html, body { margin:0; height:100%; background:#14171a;
+               font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  #map { position:absolute; inset:0; }
+  #panel { position:absolute; z-index:5; top:10px; left:10px; width:min(58vw,290px);
+           max-height:calc(100% - 20px); overflow:auto; background:rgba(255,255,255,.93);
+           color:#14171a; border-radius:8px; padding:8px 10px;
+           box-shadow:0 1px 5px rgba(0,0,0,.35); }
+  #panel h1 { margin:0 0 5px; font-size:13px; font-weight:650;
+              display:flex; gap:8px; align-items:baseline; }
+  #panel h1 a { margin-left:auto; color:#0d9488; text-decoration:none;
+                font-size:11.5px; font-weight:600; }
+  .k { display:flex; align-items:center; gap:6px; margin:1px 0; font-size:12px; }
+  .k i { width:9px; height:9px; border-radius:50%; flex:none; box-shadow:0 0 0 1.5px #fff; }
+  .k b { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:650; }
+  .k span { color:#6b7280; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .muted { color:#6b7280; font-size:11.5px; margin-top:6px; }
+  /* Marker labels sit directly on satellite imagery, which is arbitrarily light or dark. */
+  .mlbl { text-shadow:0 0 3px rgba(0,0,0,.95), 0 0 7px rgba(0,0,0,.85); }
+  .iw { font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+        color:#14171a; min-width:150px; }
+  .iw b { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  #err { position:absolute; inset:0; z-index:6; display:none; align-items:center;
+         justify-content:center; padding:2em; text-align:center; color:#f87171; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="err"></div>
+<div id="panel">
+  <h1>iotdata gateway<a href="/">monitor &rarr;</a></h1>
+  <div id="legend"></div>
+  <div id="note" class="muted">waiting for the monitor stream</div>
+</div>
+<script>
+var REF = ${REF ? `{ lat: ${REF.lat}, lng: ${REF.lon} }` : 'null'};
+var MAPTYPE = '${MAP_TYPE}';
+var ZOOM = ${MAP_ZOOM};
+
+var map = null, live = false, info = null, pinned = false, fitted = false;
+var gwm = null, sm = {}, tk = [], trail = null;
+var data = { stats: [], gnss: { n: 0, rows: [] } };
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function metres(m) {
+  return m == null ? '-' : m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(2) + ' km';
+}
+function ago(a) {
+  return a == null ? 'never' : a < 90 ? a + 's' : a < 5400 ? Math.round(a / 60) + 'm' : Math.round(a / 3600) + 'h';
+}
+// The same thresholds the station table uses for its stale styling, so the two pages agree.
+function colour(a) {
+  if (a == null) return '#6b7280';
+  if (a <= 300) return '#0a7d36';
+  if (a <= 3600) return '#a86400';
+  return '#c02a2a';
+}
+// labelOrigin is expressed in the symbol's own units, before scale is applied, so one constant
+// keeps the text just clear of the circle at whatever size it is drawn.
+function sym(fill, scale, ring) {
+  return { path: google.maps.SymbolPath.CIRCLE, scale: scale, fillColor: fill, fillOpacity: 1,
+           strokeColor: '#fff', strokeWeight: ring, labelOrigin: new google.maps.Point(0, 2.5) };
+}
+function tag(text) {
+  return { text: text, className: 'mlbl', color: '#fff', fontSize: '11px', fontWeight: '600' };
+}
+function fail(msg) {
+  var e = document.getElementById('err');
+  e.textContent = msg;
+  e.style.display = 'flex';
+}
+
+// Hover to read a station, click to pin it open. Hover alone would be useless on the phone that
+// actually gets carried around the site, so both gestures do the same thing and a pinned window
+// simply survives the mouse leaving.
+function show(marker, html, click) {
+  if (pinned && !click) return;
+  if (!info) info = new google.maps.InfoWindow();
+  if (click) pinned = true;
+  info.setContent(html);
+  info.open({ anchor: marker, map: map });
+}
+function hide(force) {
+  if (info && (!pinned || force)) info.close();
+  if (force) pinned = false;
+}
+function bind(marker, body) {
+  marker.addListener('mouseover', function () { show(marker, body(), false); });
+  marker.addListener('mouseout', function () { hide(false); });
+  marker.addListener('click', function () { pinned = false; show(marker, body(), true); });
+}
+
+function stationInfo(s) {
+  var h = '<div class="iw"><b>' + esc(s.id) + '</b>';
+  if (s.name) h += ' &middot; ' + esc(s.name);
+  h += '<br>' + s.count + ' pkts';
+  if (s.rate != null) h += ' &middot; ' + s.rate.toFixed(1) + '/m';
+  if (s.rssiAvg != null) h += '<br>' + Math.round(s.rssiAvg) + ' dBm avg';
+  if (s.lost) h += '<br>' + s.lost + ' lost (' + s.lossPct.toFixed(1) + '%)';
+  if (s.distance != null) h += '<br>' + metres(s.distance) + ' from gateway';
+  return h + '<br>last seen ' + ago(s.age) + ' ago</div>';
+}
+function fixInfo(g) {
+  var h = '<div class="iw"><b>' + esc(g.device) + '</b><br>' + new Date(g.t).toLocaleString();
+  h += '<br>' + g.lat.toFixed(6) + ', ' + g.lon.toFixed(6);
+  if (g.distance != null) h += '<br>' + metres(g.distance) + ' from gateway';
+  if (g.battery != null) h += '<br>battery ' + g.battery + '%';
+  if (g.rssi != null) h += '<br>' + g.rssi + ' dBm' + (g.snr != null ? ' / ' + g.snr + ' dB' : '');
+  if (g.sf != null) h += ' &middot; SF' + g.sf;
+  if (g.rx > 1) h += '<br>' + g.rx + ' receptions';
+  if (g.event) h += '<br>' + esc(g.event);
+  return h + '</div>';
+}
+
+function draw() {
+  if (!live) return;
+  var site = [], i, s;
+
+  if (REF && !gwm) {
+    gwm = new google.maps.Marker({ position: REF, map: map, zIndex: 40, title: 'gateway',
+                                   icon: sym('#0d9488', 8, 3), label: tag('gateway') });
+    bind(gwm, function () {
+      return '<div class="iw"><b>gateway</b><br>' + REF.lat.toFixed(6) + ', ' + REF.lng.toFixed(6) + '</div>';
+    });
+  }
+  if (REF) site.push(REF);
+
+  var seen = {};
+  for (i = 0; i < data.stats.length; i++) {
+    s = data.stats[i];
+    if (s.lat == null || s.lon == null) continue;
+    seen[s.id] = 1;
+    var p = { lat: s.lat, lng: s.lon };
+    site.push(p);
+    if (sm[s.id]) {
+      sm[s.id].row = s;
+      sm[s.id].setIcon(sym(colour(s.age), 7, 2));
+      sm[s.id].setPosition(p);
+    } else {
+      var m = new google.maps.Marker({ position: p, map: map, zIndex: 30, title: s.id,
+                                       icon: sym(colour(s.age), 7, 2), label: tag(s.name || s.id) });
+      m.row = s;
+      bind(m, (function (mm) { return function () { return stationInfo(mm.row); }; })(m));
+      sm[s.id] = m;
+    }
+  }
+  for (var id in sm) if (sm.hasOwnProperty(id) && !seen[id]) { sm[id].setMap(null); delete sm[id]; }
+
+  // The track is redrawn wholesale: it is capped at tracker-show entries, so there is nothing
+  // to gain from reconciling it the way the stations are.
+  for (i = 0; i < tk.length; i++) tk[i].setMap(null);
+  tk = [];
+  var path = [], rows = data.gnss.rows || [];
+  for (i = 0; i < rows.length; i++) {
+    var g = rows[i];
+    if (g.lat == null || g.lon == null) continue;
+    var q = { lat: g.lat, lng: g.lon }, newest = i === rows.length - 1;
+    path.push(q);
+    var t = new google.maps.Marker({ position: q, map: map, zIndex: newest ? 35 : 10,
+                                     title: g.device,
+                                     icon: { path: google.maps.SymbolPath.CIRCLE,
+                                             scale: newest ? 6 : 4, fillColor: '#0d9488',
+                                             fillOpacity: newest ? 1 : 0.7, strokeColor: '#fff',
+                                             strokeWeight: newest ? 2 : 1 } });
+    bind(t, (function (gg) { return function () { return fixInfo(gg); }; })(g));
+    tk.push(t);
+  }
+  if (path.length > 1) {
+    if (trail) trail.setPath(path);
+    else trail = new google.maps.Polyline({ path: path, map: map, zIndex: 5, strokeColor: '#0d9488',
+                                            strokeOpacity: 0.85, strokeWeight: 2 });
+  } else if (trail) { trail.setMap(null); trail = null; }
+
+  // Fitted to the gateway and the stations, not to the track. The tracker can legitimately be a
+  // long way from the site — it is in the lab while the gateway is on site — and letting it into
+  // the bounds would zoom out to include both and show neither usefully. On site the two coincide
+  // and this makes no difference. Only the track case falls back to fitting the fixes.
+  if (!fitted) {
+    var pts = site.length ? site : path;
+    if (pts.length === 1) { map.setCenter(pts[0]); map.setZoom(ZOOM); fitted = true; }
+    else if (pts.length > 1) {
+      var b = new google.maps.LatLngBounds();
+      for (i = 0; i < pts.length; i++) b.extend(pts[i]);
+      map.fitBounds(b, 60);
+      fitted = true;
+    }
+  }
+}
+
+function panel() {
+  var html = '', missing = [], mapped = 0, i;
+  if (REF) html += '<div class="k"><i style="background:#0d9488"></i><b>gateway</b></div>';
+  for (i = 0; i < data.stats.length; i++) {
+    var s = data.stats[i];
+    if (s.lat == null || s.lon == null) { missing.push(s.id); continue; }
+    mapped++;
+    html += '<div class="k"><i style="background:' + colour(s.age) + '"></i><b>' + esc(s.id) +
+            '</b> <span>' + (s.name ? esc(s.name) + ' &middot; ' : '') + ago(s.age) + '</span></div>';
+  }
+  document.getElementById('legend').innerHTML = html;
+
+  var shown = (data.gnss.rows || []).length, total = data.gnss.n || 0, txt;
+  txt = mapped + ' station' + (mapped === 1 ? '' : 's') + ' mapped';
+  if (total) txt += ', ' + (shown < total ? 'latest ' + shown + ' of ' + total : total) +
+                    ' tracker fix' + (total === 1 ? '' : 'es');
+  if (missing.length) txt += '. No position configured for ' + esc(missing.join(', ')) + '.';
+  document.getElementById('note').textContent = txt;
+}
+
+function start() {
+  map = new google.maps.Map(document.getElementById('map'), {
+    center: REF || { lat: 0, lng: 0 }, zoom: REF ? ZOOM : 2, mapTypeId: MAPTYPE,
+    streetViewControl: false, tilt: 0
+  });
+  map.addListener('click', function () { hide(true); });
+  live = true;
+  draw();
+}
+window.start = start;
+// Google reports a rejected or misrestricted key out of band rather than as a script error.
+window.gm_authFailure = function () {
+  fail('Google rejected the Maps API key: check it has the Maps JavaScript API enabled and that this origin passes its referrer restrictions.');
+};
+setTimeout(function () {
+  if (!live) fail('Google Maps did not load. Check this machine can reach maps.googleapis.com.');
+}, 15000);
+
+// view=map suppresses the packet backlog the monitor page wants on connect: this page plots
+// stats and positions, and has no use for five hundred individual records over cellular.
+var es = new EventSource('/events?view=map');
+es.addEventListener('stats', function (ev) { data.stats = JSON.parse(ev.data); panel(); draw(); });
+es.addEventListener('gnss', function (ev) { data.gnss = JSON.parse(ev.data); panel(); draw(); });
+</script>
+<script async src="https://maps.googleapis.com/maps/api/js?key=${MAP_KEY}&loading=async&callback=start"></script>
+</body>
+</html>`;
+
 // ---------------------------------------------------------------------------- server
 
 const server = http.createServer((req, res) => {
@@ -1178,7 +1463,8 @@ const server = http.createServer((req, res) => {
         });
         // Replay what we have so a phone arriving late, or reconnecting after the screen slept,
         // sees context rather than an empty page until the next packet lands.
-        for (const rec of history) send('packet', rec, res);
+        const q = new URLSearchParams(req.url.split('?')[1] || '');
+        if (q.get('view') !== 'map') for (const rec of history) send('packet', rec, res);
         send('stats', snapshot(), res);
         send('gnss', gnssView(), res);
         clients.add(res);
@@ -1198,6 +1484,20 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    if (url === '/map') {
+        if (!MAP_KEY) {
+            res.writeHead(503, { 'Content-Type': 'text/plain' });
+            res.end('map not configured: set map-api-key in the config\n');
+            return;
+        }
+        res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+        });
+        res.end(MAP_PAGE);
+        return;
+    }
+
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('not found\n');
 });
@@ -1208,6 +1508,11 @@ server.listen(PORT, BIND, () => {
     console.log(`  config  ${cfgFrom}`);
     console.log(`  broker  ${BROKER}:${MQTT_PORT}  topic ${TOPIC}  keep ${KEEP}  window ${WINDOW}`);
     console.log(`  ref     ${REF ? `${REF.lat}, ${REF.lon}${REF.alt != null ? ` (${REF.alt} m)` : ''}` : '(not configured: no distances)'}`);
+    // The key is a public one by nature, but a log is a different audience from a page:
+    // enough to tell two hosts' keys apart, not enough to use.
+    console.log(
+        `  map     ${MAP_KEY ? `/map (${MAP_TYPE}, key ${MAP_KEY.slice(0, 6)}\u2026${MAP_KEY.slice(-4)})` : '(not configured: no map-api-key)'}`
+    );
     for (const id of known) {
         const s = STATIONS[id];
         console.log(`  station ${id}  ${s.name || '(unnamed)'}${s.distance != null ? `  ${Math.round(s.distance)} m` : ''}`);
