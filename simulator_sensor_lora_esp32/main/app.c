@@ -264,6 +264,58 @@ static e22900t22_config_t e22_config = {
 #include "iotdata.c"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// Blackbox diagnostics
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+#if IOTDATA_BLACKBOX_ENABLE
+
+#ifndef IOTDATA_BLACKBOX_POOL_SZ
+#define IOTDATA_BLACKBOX_POOL_SZ 1024u
+#endif
+#if IOTDATA_BLACKBOX_ENABLE >= 2
+#define BLACKBOX_PERSIST BLACKBOX_PERSIST_ESP_FLASH
+#else
+#define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
+#endif
+#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#include "iotdata_blackbox.h"
+
+static RTC_NOINIT_ATTR char blackbox_pool[IOTDATA_BLACKBOX_POOL_SZ];
+RTC_NOINIT_ATTR uint32_t iotdata_blackbox_seq;
+static blackbox_handle_t blackbox;
+static const blackbox_config_t blackbox_config = {
+    .pool = blackbox_pool,
+    .pool_sz = sizeof(blackbox_pool),
+    .flush = BLACKBOX_FLUSH_MANUAL, /* flushed explicitly after each event; a no-op under PERSIST_NONE */
+    .persist_arg = "diag",          /* ESP_FLASH: the partition label; ignored by PERSIST_NONE */
+    .enabled = true,                /* compiled in == collecting; the compile-time knob is the gate */
+};
+
+static void blackbox_start(const esp_reset_reason_t reason) {
+    if (reason == ESP_RST_POWERON)
+        iotdata_blackbox_seq = 0;
+    if (blackbox_init(&blackbox, &blackbox_config) != 0) {
+        ESP_LOGW(__tag_app, "blackbox: init failed -- diagnostics disabled");
+        return;
+    }
+    (void)iotdata_blackbox_lifecycle(&blackbox, IOTDATA_BB_LC_BOOT, (uint8_t)reason);
+    (void)blackbox_flush(&blackbox);
+}
+#define BLACKBOX_START(reason) blackbox_start((reason))
+#define BLACKBOX_EVENT(ev, reason) \
+    do { \
+        (void)iotdata_blackbox_lifecycle(&blackbox, (ev), (uint8_t)(reason)); \
+        (void)blackbox_flush(&blackbox); \
+    } while (0)
+
+#else
+
+#define BLACKBOX_START(reason)     ((void)0)
+#define BLACKBOX_EVENT(ev, reason) ((void)0)
+
+#endif
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static uint32_t tx_count = 0, tx_errors = 0;
@@ -325,22 +377,28 @@ bool app_exec(void) {
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
 
+    BLACKBOX_START(reset_reason);
+
     /* --- Hardware init --- */
     e22_gpio_init();
     if (!serial_connect()) {
         ESP_LOGE(__tag_app, "serial_connect failed");
+        BLACKBOX_EVENT(IOTDATA_BB_LC_ERROR, 1);
         return false;
     }
     if (!device_connect(E22900T22_MODULE_DIP, &e22_config)) {
         ESP_LOGE(__tag_app, "device_connect failed");
+        BLACKBOX_EVENT(IOTDATA_BB_LC_ERROR, 2);
         return false;
     }
     ESP_LOGI(__tag_app, "device: e22 connected");
     if (!(device_mode_config() && device_info_read() && device_config_read_and_update() && device_mode_transfer())) {
         ESP_LOGE(__tag_app, "device_mode/info/config/mode failed");
+        BLACKBOX_EVENT(IOTDATA_BB_LC_ERROR, 3);
         return false;
     }
     ESP_LOGI(__tag_app, "device: e22 configured, transfer mode active");
+    BLACKBOX_EVENT(IOTDATA_BB_LC_START, 0);
 
 #if TEST_FIXED_PAYLOAD
     /* PHY-crack test (DISABLED via TEST_FIXED_PAYLOAD=0): transmit a fixed, known,
@@ -435,6 +493,7 @@ void app_main(void) {
     __SLEEP_MS(STARTUP_DELAY_MS);
     if (!app_exec()) {
         ESP_LOGE(__tag_app, "failed");
+        BLACKBOX_EVENT(IOTDATA_BB_LC_STOP, 0);
         __SLEEP_MS(30 * 1000);
         esp_restart();
     }

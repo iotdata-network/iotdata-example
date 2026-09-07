@@ -17,15 +17,23 @@ VERSION  = 1.00
 
 SOURCES  = main/$(NAME).c
 
+# Blackbox diagnostics:
+#   0 = off (compiled out entirely)
+#   1 = RAM only    — store in RTC_NOINIT ring; survives deep sleep and watchdog/panic resets, but not a power cycle.
+#   2 = RAM + flash — the ring is backed into the `diag` partition (partitions.csv), so records outlive a power loss.
+BLACKBOX_ENABLE ?= 2
+
 ##
 
 BUILDER_DEFS = \
     -DIOTDATA_SRC_LIBRARY=$(IOTDATA_SRC_LIBRARY) \
     -DIOTDATA_SRC_DEPEND_E22XXXTXX=$(IOTDATA_SRC_DEPEND_E22XXXTXX) \
+    -DIOTDATA_SRC_DEPEND_BLACKBOX=$(IOTDATA_SRC_DEPEND_BLACKBOX) \
     -DIOTDATA_SRC_EXAMPLE=$(IOTDATA_SRC_EXAMPLE) \
     -DIOTDATA_SRC_EXAMPLE_SIMULATOR=$(IOTDATA_SRC_EXAMPLE_SIMULATOR) \
     -DIOTDATA_SRC_COMMON=$(IOTDATA_SRC_COMMON) \
-    -DIOTDATA_VARIANT=$(IOTDATA_VARIANT)
+    -DIOTDATA_VARIANT=$(IOTDATA_VARIANT) \
+    -DIOTDATA_BLACKBOX_ENABLE=$(BLACKBOX_ENABLE)
 ifneq ($(strip $(IOTDATA_CONFIG)),)
 BUILDER_DEFS += -DIOTDATA_CONFIG=$(abspath $(IOTDATA_CONFIG))
 endif

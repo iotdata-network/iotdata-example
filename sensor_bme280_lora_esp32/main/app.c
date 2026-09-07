@@ -1068,6 +1068,55 @@ static void state_reset(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// Blackbox diagnostics
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+#if IOTDATA_BLACKBOX_ENABLE
+
+#ifndef IOTDATA_BLACKBOX_POOL_SZ
+#define IOTDATA_BLACKBOX_POOL_SZ 1024u
+#endif
+#if IOTDATA_BLACKBOX_ENABLE >= 2
+#define BLACKBOX_PERSIST BLACKBOX_PERSIST_ESP_FLASH
+#else
+#define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
+#endif
+#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#include "iotdata_blackbox.h"
+
+static RTC_NOINIT_ATTR char blackbox_pool[IOTDATA_BLACKBOX_POOL_SZ];
+RTC_NOINIT_ATTR uint32_t iotdata_blackbox_seq;
+static blackbox_handle_t blackbox;
+static const blackbox_config_t blackbox_config = {
+    .pool = blackbox_pool,
+    .pool_sz = sizeof(blackbox_pool),
+    .flush = BLACKBOX_FLUSH_MANUAL, /* flushed explicitly before sleep; a no-op under PERSIST_NONE */
+    .persist_arg = "diag",          /* ESP_FLASH: the partition label; ignored by PERSIST_NONE */
+    .enabled = true,                /* compiled in == collecting; the compile-time knob is the gate */
+};
+
+static void blackbox_start(const esp_reset_reason_t reason, const bool restarted) {
+    if (reason == ESP_RST_POWERON)
+        iotdata_blackbox_seq = 0;
+    if (blackbox_init(&blackbox, &blackbox_config) != 0) {
+        ESP_LOGW(__tag_app, "blackbox: init failed -- diagnostics disabled");
+        return;
+    }
+    (void)iotdata_blackbox_lifecycle(&blackbox, restarted ? IOTDATA_BB_LC_BOOT : IOTDATA_BB_LC_WAKE, (uint8_t)reason);
+}
+#define BLACKBOX_START(reason, restarted) blackbox_start((reason), (restarted))
+#define BLACKBOX_EVENT(ev, reason)        (void)iotdata_blackbox_lifecycle(&blackbox, (ev), (uint8_t)(reason))
+#define BLACKBOX_FLUSH()                  (void)blackbox_flush(&blackbox)
+
+#else
+
+#define BLACKBOX_START(reason, restarted) ((void)0)
+#define BLACKBOX_EVENT(ev, reason)        ((void)0)
+#define BLACKBOX_FLUSH()                  ((void)0)
+
+#endif
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // Application
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -1179,6 +1228,9 @@ static void app_sleep(const int64_t time_start_us) {
 
     ESP_LOGI(__tag_app, "cycle %" PRIu32 " done: tx=%" PRIu32 " errors=%" PRIu32 " awake=%" PRId64 "ms, sleeping %" PRId64 "ms", state.cycles, state.tx_count, state.tx_errors, awake_ms, sleep_ms);
 
+    BLACKBOX_EVENT(IOTDATA_BB_LC_SLEEP, (uint8_t)(sleep_ms / 1000));
+    BLACKBOX_FLUSH(); /* one flash append per cycle when persisting; a no-op in RAM-only mode */
+
     /* The USB-Serial-JTAG console goes down with the chip and takes anything still
        queued with it, so give the host a moment to collect this cycle's output. */
     __SLEEP_MS(CONSOLE_DRAIN_MS);
@@ -1208,6 +1260,8 @@ void app_main(void) {
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     const bool restarted = (reset_reason != ESP_RST_DEEPSLEEP) || state.magic != STATE_MAGIC;
 
+    BLACKBOX_START(reset_reason, restarted);
+
     if (restarted) {
         ESP_LOGI(__tag_app, "iotdata bme280 lora sensor: %s variant, every %us", iotdata_vsuite_name(PACKET_VARIANT), (unsigned)(TX_PERIOD_MS / 1000));
         ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
@@ -1216,8 +1270,10 @@ void app_main(void) {
         __SLEEP_MS(STARTUP_DELAY_MS);            /* cold boot only, so it costs nothing per cycle */
     }
 
-    if (!app_cycle())
+    if (!app_cycle()) {
         ESP_LOGE(__tag_app, "cycle %" PRIu32 " incomplete", state.cycles);
+        BLACKBOX_EVENT(IOTDATA_BB_LC_ERROR, state.tx_errors);
+    }
     state.cycles++;
 
     app_sleep(time_start);
