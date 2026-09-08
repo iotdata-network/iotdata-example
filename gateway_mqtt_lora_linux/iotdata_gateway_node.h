@@ -1,35 +1,13 @@
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
-//
-// iotdata_gateway_node.h - the gateway's NODE personality: the system TLVs of iotdata_node.h.
-//
-// Every iotdata node (gateway, relay, sensor) answers the same system TLVs. This module is the
-// gateway's implementation of that: it owns everything needed to BE a node, so the rest of the
-// gateway does not have to know about it.
-//
-//   - builds the reports about ourselves: VERSION, VARIANT, STATUS, CONFIG, CONTROL, DIAGNOSTICS
-//   - executes CONTROL commands addressed to us (or broadcast), in wire order, skipping any key
-//     we do not implement
-//   - owns the periodic/startup emission timers (the CONFIG period_* keys)
-//
-// TWO ENTRY POINTS, one body of logic:
-//
-//   node_on_packet()  an iotdata packet arrived over the radio for us or broadcast
-//   node_on_mqtt()    an MQTT management request arrived for us or broadcast
-//
-// Both funnel into node_process_tlvs(). A reply is published to MQTT as JSON (so a manager sees
-// it regardless of which way it asked) and, when the request came off the radio, also transmitted
-// back to the asker.
-//
-// Encoding is kvr throughout (see iotdata_node.h): binary values in a RAW TLV.
-//
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
 #define NODE_KV_MAX     200 /* a kvr payload we build; a TLV caps at 255 anyway */
 #define NODE_PACKET_MAX 240
 #define NODE_TYPE_COUNT 8 /* types are 0x00..0x07; index by type for per-type state */
 #define NODE_JSON_MAX   1024
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef bool (*node_tx_handler_t)(const uint8_t *packet, const int length);
 
