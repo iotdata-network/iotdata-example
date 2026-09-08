@@ -207,7 +207,7 @@ void mesh_receive_neighbour_report(mesh_state_t *st, const uint8_t *buf, int len
                 iotdata_mesh_nbr_entry_t e;
                 if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &e))
                     break;
-                PRINTF_INFO("        %04" PRIX16 " cost=%u rssi=%ddBm\n", e.station, (unsigned)e.cost, iotdata_mesh_rssi_from_q4(e.rssi_q4));
+                PRINTF_INFO("      %04" PRIX16 " cost=%u rssi=%ddBm\n", e.station, (unsigned)e.cost, iotdata_mesh_rssi_from_q4(e.rssi_q4));
             }
         }
     } else {

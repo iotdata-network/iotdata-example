@@ -87,7 +87,7 @@ void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, in
         stat_on_packet_process_error(st->state_stat, station_id, variant_id);
     }
     if (st->debug)
-        PRINTF_INFO("        -> %s (%d bytes%s%s)\n", st->_buffer_mqtt_topic, (int)strlen(payload), via ? " via " : "", via ? via : "");
+        PRINTF_INFO("      -> %s (%d bytes%s%s)\n", st->_buffer_mqtt_topic, (int)strlen(payload), via ? " via " : "", via ? via : "");
     free(json);
 }
 
