@@ -14,7 +14,7 @@ PLATFORM = esp32c3
 NAME     = app
 VERSION  = 1.00
 
-SOURCES  = main/$(NAME).c
+SOURCES  = main/$(NAME).c main/*.h
 
 # Blackbox diagnostics:
 #   0 = off (compiled out entirely)

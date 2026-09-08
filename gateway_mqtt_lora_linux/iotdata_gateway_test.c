@@ -287,7 +287,7 @@ static bool test_mesh_receive_forward_new(void) {
 
     uint8_t inner[8] = { 0x10, 0x42, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD };
     uint8_t fwd_buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 8];
-    iotdata_mesh_pack_forward(fwd_buf, 0x0005, 50, 3, inner, 8);
+    iotdata_mesh_pack_forward(fwd_buf, sizeof (fwd_buf), 0x0005, 50, 3, inner, 8);
 
     iotdata_mesh_forward_t fw;
     ASSERT(mesh_receive_forward_r(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &fw));
@@ -343,7 +343,7 @@ static void fwd_test_state(process_state_t *ps, mesh_state_t *ms, stat_state_t *
     uint8_t buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 4]; \
     do { \
         const uint8_t _inner[4] = { 0xC0, 0x42, 0x00, 0x01 }; \
-        iotdata_mesh_pack_forward(buf, 0x0005, 50, 3, _inner, 4); \
+        iotdata_mesh_pack_forward(buf, sizeof (buf), 0x0005, 50, 3, _inner, 4); \
     } while (0)
 
 static bool test_process_forward_new_acks(void) {

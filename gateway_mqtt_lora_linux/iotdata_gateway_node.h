@@ -113,15 +113,26 @@ static int node_build_control(__attribute__((unused)) const node_state_t *st, ui
     return kv.overflow ? -1 : (int)kv.len;
 }
 
+/* Records are pulled until the packet is full; the cursor lets the caller resume where this
+   stopped. blackbox_pull() ADVANCES the cursor before we know whether the record fits, so a record
+   that does not fit is put back by rewinding -- otherwise one record is silently lost at every
+   packet boundary. A record too large for a KV value can never fit any packet, so it is skipped
+   rather than rewound: rewinding would stall the stream on it forever. */
 static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t size, size_t *cursor) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
     iotdata_kvr_add_u8(&kv, IOTDATA_NODE_DIAGNOSTICS_TYPE, IOTDATA_NODE_DIAG_BLACKBOX);
+    size_t prev = *cursor;
     while (blackbox_pull(&st->bbox->handle, cursor, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
         const size_t n = strlen(st->_buffer_blackbox_rec);
-        if (kv.len + 2u + n > size)
-            break;
-        iotdata_kvr_add(&kv, IOTDATA_NODE_DIAGNOSTICS_DATA, st->_buffer_blackbox_rec, (uint8_t)n);
+        if (n <= 255u) { /* a KV value length is one byte; larger is unreachable today, and skipped */
+            if (kv.len + 2u + n > size) {
+                *cursor = prev; /* does not fit THIS packet: put it back for the next one */
+                break;
+            }
+            iotdata_kvr_add(&kv, IOTDATA_NODE_DIAGNOSTICS_DATA, st->_buffer_blackbox_rec, (uint8_t)n);
+        }
+        prev = *cursor;
     }
     return kv.overflow ? -1 : (int)kv.len;
 }
