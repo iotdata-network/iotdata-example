@@ -17,61 +17,65 @@
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-typedef bool (*gwmqtt_tx_handler_t)(const uint8_t *packet, const int length);
+typedef bool (*ctrl_tx_handler_t)(const uint8_t *packet, const int length);
 
-#define GWMQTT_MANAGE_BUF_MAX 64 /* MANAGE frames are small (STATUS is 8 bytes) */
-#define GWMQTT_MANAGE_TOPIC   "/manage/req"
+#define CTRL_MANAGE_BUF_MAX 64 /* MANAGE frames are small (STATUS is 8 bytes) */
+#define CTRL_MANAGE_TOPIC   "/manage/req"
 
 typedef struct {
-    bool enabled;
     uint16_t station_id; /* gateway station id — the MANAGE sender */
     uint16_t seq;        /* MANAGE sender sequence (touched only on the mqtt thread) */
-    gwmqtt_tx_handler_t tx;
+    ctrl_tx_handler_t tx;
     char topic_req[128];
     pthread_mutex_t lock;
-    /* single pending slot: produced by the mqtt-thread callback, drained by the main loop */
+    /* Single pending slot: produced by the mqtt-thread callback, drained by the main loop.
+       Everything the callback wants done goes through here, because the mosquitto thread must not
+       touch the radio or any of the node/mesh state the main loop owns. `kind` says which of the
+       two it is -- a packed MANAGE frame to transmit, or a node CONTROL payload to execute. */
     bool pending;
-    uint8_t pending_buf[GWMQTT_MANAGE_BUF_MAX];
+    enum { CTRL_PENDING_MANAGE = 0, CTRL_PENDING_NODE } pending_kind;
+    uint8_t pending_buf[CTRL_MANAGE_BUF_MAX];
     int pending_len;
+    uint16_t pending_target; /* node only: who the CONTROL is addressed to */
     blackbox_handle_t *blackbox;
     char topic_resp[128];
+    char _buffer_resp[244];
+    char _buffer_blackbox_rec[BLACKBOX_LINE_MAX];
     time_t blackbox_tick_last; /* for the periodic (batched) flush tick */
     /* stats */
     uint32_t stat_req_rx, stat_req_bad, stat_tx, stat_tx_err, stat_overrun;
-} gwmqtt_manage_state_t;
+} ctrl_state_t;
 
 /* The mosquitto message callback has no user-data argument, so the state is reached
-   through this file-scope pointer, set in gwmqtt_manage_begin. */
-static gwmqtt_manage_state_t *g_gwmqtt_manage = NULL;
+   through this file-scope pointer, set in ctrl_begin. */
+static ctrl_state_t *g_ctrl = NULL;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static uint16_t gwmqtt_manage_parse_target(const cJSON *jt) {
-    if (jt == NULL)
-        return IOTDATA_MESH_MANAGE_TARGET_ALL; /* default: broadcast */
-    if (cJSON_IsString(jt) && jt->valuestring != NULL) {
-        if (strcmp(jt->valuestring, "all") == 0 || strcmp(jt->valuestring, "broadcast") == 0)
-            return IOTDATA_MESH_MANAGE_TARGET_ALL;
-        return (uint16_t)(strtol(jt->valuestring, NULL, 0) & 0x0FFF);
+static uint16_t ctrl_parse_target(const cJSON *jt) {
+    if (jt != NULL) {
+        if (cJSON_IsString(jt) && jt->valuestring != NULL) {
+            if (strcmp(jt->valuestring, "all") == 0 || strcmp(jt->valuestring, "broadcast") == 0)
+                return IOTDATA_MESH_MANAGE_TARGET_ALL;
+            return (uint16_t)(strtol(jt->valuestring, NULL, 0) & 0x0FFF);
+        }
+        if (cJSON_IsNumber(jt))
+            return (uint16_t)(jt->valueint & 0x0FFF);
     }
-    if (cJSON_IsNumber(jt))
-        return (uint16_t)(jt->valueint & 0x0FFF);
     return IOTDATA_MESH_MANAGE_TARGET_ALL;
 }
 
-/* A station id parameter (for peers-remove / block / allow / unfilter). 0 if absent. */
-static uint16_t gwmqtt_manage_parse_station(const cJSON *jt) {
-    if (jt == NULL)
-        return 0;
-    if (cJSON_IsString(jt) && jt->valuestring != NULL)
-        return (uint16_t)(strtol(jt->valuestring, NULL, 0) & 0x0FFF);
-    if (cJSON_IsNumber(jt))
-        return (uint16_t)(jt->valueint & 0x0FFF);
+static uint16_t ctrl_parse_station(const cJSON *jt) {
+    if (jt != NULL) {
+        if (cJSON_IsString(jt) && jt->valuestring != NULL)
+            return (uint16_t)(strtol(jt->valuestring, NULL, 0) & 0x0FFF);
+        if (cJSON_IsNumber(jt))
+            return (uint16_t)(jt->valueint & 0x0FFF);
+    }
     return 0;
 }
 
-/* Filter-clear scope: "manual" / "auto" / else all. */
-static uint8_t gwmqtt_manage_parse_scope(const cJSON *js) {
+static uint8_t ctrl_parse_scope(const cJSON *js) {
     if (cJSON_IsString(js) && js->valuestring != NULL) {
         if (strcmp(js->valuestring, "manual") == 0)
             return IOTDATA_MESH_MANAGE_FILTER_SCOPE_MANUAL;
@@ -82,36 +86,23 @@ static uint8_t gwmqtt_manage_parse_scope(const cJSON *js) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-
-static void gwmqtt_blackbox_tick(void) {
-    gwmqtt_manage_state_t *const st = g_gwmqtt_manage;
-    if (st != NULL && st->blackbox != NULL) {
-        const time_t now = time(NULL);
-        if (st->blackbox_tick_last != 0 && st->blackbox_tick_last != now)
-            blackbox_tick(st->blackbox, (uint32_t)(now - st->blackbox_tick_last) * 1000u);
-        st->blackbox_tick_last = now;
-    }
-}
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), const unsigned char *payload, const int len) {
+static void ctrl_on_message(const char *topic __attribute__((unused)), const unsigned char *payload, const int len) {
+    ctrl_state_t *const st = g_ctrl;
 
-    gwmqtt_manage_state_t *const st = g_gwmqtt_manage;
-    if (st == NULL)
-        return;
     st->stat_req_rx++;
 
     cJSON *const root = cJSON_ParseWithLength((const char *)payload, (size_t)len);
     if (root == NULL) {
         st->stat_req_bad++;
-        fprintf(stderr, "manage: bad JSON request (%d bytes)\n", len);
+        PRINTF_ERROR("manage: bad JSON request (%d bytes)\n", len);
         return;
     }
 
-    const uint16_t target = gwmqtt_manage_parse_target(cJSON_GetObjectItem(root, "target"));
-    const uint16_t station = gwmqtt_manage_parse_station(cJSON_GetObjectItem(root, "station"));
-    const uint8_t scope = gwmqtt_manage_parse_scope(cJSON_GetObjectItem(root, "scope"));
+    const uint16_t target = ctrl_parse_target(cJSON_GetObjectItem(root, "target"));
+    const uint16_t station = ctrl_parse_station(cJSON_GetObjectItem(root, "station"));
+    const uint8_t scope = ctrl_parse_scope(cJSON_GetObjectItem(root, "scope"));
     const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
     const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
 
@@ -138,25 +129,36 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
                 }
             }
             if (found != IOTDATA_NODE_TLV_NONE && iotdata_node_tlv_control_key(found) == IOTDATA_NODE_TLV_NONE) {
-                char resp[128];
-                snprintf(resp, sizeof(resp), "node: '%s' cannot be requested", want);
-                (void)mqtt_send(st->topic_resp, resp, (int)strlen(resp));
-                fprintf(stderr, "manage: %s\n", resp);
+                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "node: '%s' cannot be requested", want);
+                (void)mqtt_send(st->topic_resp, st->_buffer_resp, (int)strlen(st->_buffer_resp));
+                PRINTF_ERROR("manage: %s\n", st->_buffer_resp);
                 cJSON_Delete(root);
                 return;
             }
             if (found == IOTDATA_NODE_TLV_NONE) {
-                char resp[128];
-                snprintf(resp, sizeof(resp), "node: unknown tlv '%s'", want);
-                (void)mqtt_send(st->topic_resp, resp, (int)strlen(resp));
-                fprintf(stderr, "manage: %s\n", resp);
+                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "node: unknown tlv '%s'", want);
+                (void)mqtt_send(st->topic_resp, st->_buffer_resp, (int)strlen(st->_buffer_resp));
+                PRINTF_ERROR("manage: %s\n", st->_buffer_resp);
                 cJSON_Delete(root);
                 return;
             }
             iotdata_kvr_add_flag(&kv, iotdata_node_tlv_control_key(found));
         }
-        printf("manage: node cmd='%s' target=%04X -> %zu byte control\n", cmd, (unsigned)target, kv.len);
-        gwnode_on_mqtt(kvbuf, kv.len, target);
+        PRINTF_INFO("manage: node cmd='%s' target=%04X -> %zu byte control\n", cmd, (unsigned)target, kv.len);
+        /* staged, NOT executed here: this is the mosquitto thread, and node_on_mqtt() transmits
+           and mutates node state the main loop owns */
+        if (kv.len > 0 && kv.len <= CTRL_MANAGE_BUF_MAX) {
+            pthread_mutex_lock(&st->lock);
+            if (st->pending)
+                st->stat_overrun++;
+            memcpy(st->pending_buf, kvbuf, kv.len);
+            st->pending_len = (int)kv.len;
+            st->pending_target = target;
+            st->pending_kind = CTRL_PENDING_NODE;
+            st->pending = true;
+            pthread_mutex_unlock(&st->lock);
+        } else
+            st->stat_req_bad++;
         cJSON_Delete(root);
         return;
     }
@@ -164,37 +166,35 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
     if (strncmp(cmd, "diag", 4) == 0) {
         const bool local = (target == IOTDATA_MESH_MANAGE_TARGET_ALL || target == st->station_id);
         if (local) {
-            char resp[224];
             blackbox_handle_t *const bb = st->blackbox;
             if (bb == NULL) {
-                snprintf(resp, sizeof(resp), "diag: not configured");
+                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: not configured");
             } else if (strcmp(cmd, "diag") == 0) {
                 blackbox_status_t s;
                 blackbox_status(bb, &s);
-                blackbox_status_str(&s, BLACKBOX_STATUS_ALL, resp, sizeof(resp));
+                blackbox_status_str(&s, BLACKBOX_STATUS_ALL, st->_buffer_resp, sizeof(st->_buffer_resp));
             } else if (strcmp(cmd, "diag-enable") == 0) {
                 blackbox_enable(bb, true);
-                snprintf(resp, sizeof(resp), "diag: enabled");
+                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: enabled");
             } else if (strcmp(cmd, "diag-disable") == 0) {
                 blackbox_enable(bb, false);
-                snprintf(resp, sizeof(resp), "diag: disabled");
+                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: disabled");
             } else if (strcmp(cmd, "diag-clear") == 0) {
                 blackbox_clear(bb);
-                snprintf(resp, sizeof(resp), "diag: cleared");
+                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: cleared");
             } else if (strcmp(cmd, "diag-dump") == 0) {
                 size_t cur = 0;
-                char rec[BLACKBOX_LINE_MAX];
                 int nl = 0;
-                while (blackbox_pull(bb, &cur, rec, sizeof(rec)) > 0) {
-                    (void)mqtt_send(st->topic_resp, rec, (int)strlen(rec));
+                while (blackbox_pull(bb, &cur, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
+                    (void)mqtt_send(st->topic_resp, st->_buffer_blackbox_rec, (int)strlen(st->_buffer_blackbox_rec));
                     nl++;
                 }
-                snprintf(resp, sizeof(resp), "diag: dumped %d records", nl);
+                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: dumped %d records", nl);
             } else {
-                snprintf(resp, sizeof(resp), "diag: unknown cmd '%s'", cmd);
+                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: unknown cmd '%s'", cmd);
             }
-            (void)mqtt_send(st->topic_resp, resp, (int)strlen(resp));
-            printf("manage: diag local cmd='%s' target=%04X -> %s\n", cmd, (unsigned)target, resp);
+            (void)mqtt_send(st->topic_resp, st->_buffer_resp, (int)strlen(st->_buffer_resp));
+            PRINTF_INFO("manage: diag local cmd='%s' target=%04X -> %s\n", cmd, (unsigned)target, st->_buffer_resp);
         }
         if (target == st->station_id) { /* unicast to the gateway itself — done, nothing to air */
             cJSON_Delete(root);
@@ -206,7 +206,7 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
     const uint16_t seq = st->seq++;
 
     /* NB: `cmd` points into the cJSON tree, so every use of it must precede cJSON_Delete. */
-    uint8_t buf[GWMQTT_MANAGE_BUF_MAX];
+    uint8_t buf[CTRL_MANAGE_BUF_MAX];
     int n = 0;
     if (strcmp(cmd, "status") == 0)
         n = iotdata_mesh_pack_manage_status(buf, st->station_id, seq, target);
@@ -239,12 +239,12 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
     else if (strcmp(cmd, "diag-dump") == 0)
         n = iotdata_mesh_pack_manage_diag_dump(buf, st->station_id, seq, target);
     else
-        fprintf(stderr, "manage: unknown cmd '%s'\n", cmd);
+        PRINTF_ERROR("manage: unknown cmd '%s'\n", cmd);
     if (n > 0)
-        printf("manage: request cmd='%s' target=%04X station=%04X -> MANAGE (%d bytes)\n", cmd, (unsigned)target, (unsigned)station, n);
+        PRINTF_INFO("manage: request cmd='%s' target=%04X station=%04X -> MANAGE (%d bytes)\n", cmd, (unsigned)target, (unsigned)station, n);
     cJSON_Delete(root);
 
-    if (n <= 0 || n > GWMQTT_MANAGE_BUF_MAX) {
+    if (n <= 0 || n > CTRL_MANAGE_BUF_MAX) {
         st->stat_req_bad++; /* unknown command (n==0) or a pack failure */
         return;
     }
@@ -254,63 +254,77 @@ static void gwmqtt_manage_on_message(const char *topic __attribute__((unused)), 
         st->stat_overrun++; /* previous frame not yet sent — overwrite with the newest */
     memcpy(st->pending_buf, buf, (size_t)n);
     st->pending_len = n;
+    st->pending_kind = CTRL_PENDING_MANAGE;
     st->pending = true;
     pthread_mutex_unlock(&st->lock);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
-void gwmqtt_manage_pump(void) {
+void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
 
-    gwmqtt_manage_state_t *const st = g_gwmqtt_manage;
-    if (st == NULL || !st->enabled)
-        return;
-
-    uint8_t buf[GWMQTT_MANAGE_BUF_MAX];
-    int n = 0;
+    uint8_t buf[CTRL_MANAGE_BUF_MAX];
+    int n = 0, kind = CTRL_PENDING_MANAGE;
+    uint16_t target = 0;
     pthread_mutex_lock(&st->lock);
     if (st->pending) {
         n = st->pending_len;
         memcpy(buf, st->pending_buf, (size_t)n);
+        kind = st->pending_kind;
+        target = st->pending_target;
         st->pending = false;
     }
     pthread_mutex_unlock(&st->lock);
-
     if (n > 0) {
-        if (st->tx != NULL && st->tx(buf, n)) {
-            st->stat_tx++;
-            printf("manage: tx MANAGE (%d bytes)\n", n);
+        if (kind == CTRL_PENDING_NODE) { /* runs here, on the main loop, where the node state lives */
+            node_on_mqtt(ns, buf, (size_t)n, target);
         } else {
-            st->stat_tx_err++;
-            fprintf(stderr, "manage: tx MANAGE failed (%d bytes)\n", n);
+            if (st->tx != NULL && st->tx(buf, n)) {
+                st->stat_tx++;
+                PRINTF_INFO("manage: tx MANAGE (%d bytes)\n", n);
+            } else {
+                st->stat_tx_err++;
+                PRINTF_ERROR("manage: tx MANAGE failed (%d bytes)\n", n);
+            }
         }
+    }
+
+    if (st->blackbox != NULL) {
+        const time_t now = time(NULL);
+        if (st->blackbox_tick_last != 0 && st->blackbox_tick_last != now)
+            blackbox_tick(st->blackbox, (uint32_t)(now - st->blackbox_tick_last) * 1000u);
+        st->blackbox_tick_last = now;
     }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool gwmqtt_manage_begin(gwmqtt_manage_state_t *st, const char *topic_prefix, uint16_t station_id, gwmqtt_tx_handler_t tx) {
+bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, uint16_t station_id, ctrl_tx_handler_t tx) {
 
     memset(st, 0, sizeof(*st));
     st->station_id = station_id;
     st->tx = tx;
     if (pthread_mutex_init(&st->lock, NULL) != 0) {
-        fprintf(stderr, "manage: mutex init failed\n");
+        PRINTF_ERROR("manage: mutex init failed\n");
         return false;
     }
-    snprintf(st->topic_req, sizeof(st->topic_req), "%s" GWMQTT_MANAGE_TOPIC, topic_prefix);
+    snprintf(st->topic_req, sizeof(st->topic_req), "%s" CTRL_MANAGE_TOPIC, topic_prefix);
     snprintf(st->topic_resp, sizeof(st->topic_resp), "%s/blackbox/resp", topic_prefix);
 
-    g_gwmqtt_manage = st;
-    st->enabled = true;
-
-    if (!mqtt_subscribe(st->topic_req, MQTT_PUBLISH_QOS, gwmqtt_manage_on_message)) {
-        fprintf(stderr, "manage: subscribe to '%s' failed\n", st->topic_req);
-        st->enabled = false;
+    g_ctrl = st;
+    if (!mqtt_subscribe(st->topic_req, MQTT_PUBLISH_QOS, ctrl_on_message)) {
+        PRINTF_ERROR("manage: subscribe to '%s' failed\n", st->topic_req);
         return false;
     }
-    printf("manage: enabled, station=%04" PRIX16 ", request-topic='%s'\n", station_id, st->topic_req);
+    PRINTF_INFO("manage: station=%04" PRIX16 ", request-topic='%s'\n", station_id, st->topic_req);
     return true;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+void ctrl_end(__attribute__((unused)) ctrl_state_t *st) {
+    g_ctrl = NULL;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

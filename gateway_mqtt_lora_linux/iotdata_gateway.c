@@ -58,6 +58,44 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+bool iotdata_log_debug_enabled = false;
+
+__attribute__((format(printf, 3, 4))) static void iotdata_log_write(FILE *const to, const char level, const char *const format, ...) {
+    struct timespec ts;
+    struct tm tm;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    localtime_r(&ts.tv_sec, &tm);
+    fprintf(to, "%c (%02d:%02d:%02d.%03ld) ", level, tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000L);
+    va_list args;
+    va_start(args, format);
+    vfprintf(to, format, args);
+    va_end(args);
+    /* the call sites carry their own newline, inherited from the printf they replaced */
+}
+
+#define PRINTF_INFO(...)  iotdata_log_write(stdout, 'I', __VA_ARGS__)
+#define PRINTF_WARN(...)  iotdata_log_write(stderr, 'W', __VA_ARGS__)
+#define PRINTF_ERROR(...) iotdata_log_write(stderr, 'E', __VA_ARGS__)
+#define PRINTF_DEBUG(...) \
+    do { \
+        if (iotdata_log_debug_enabled) \
+            iotdata_log_write(stdout, 'D', __VA_ARGS__); \
+    } while (0)
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+__attribute__((format(printf, 3, 4))) static inline const char *snprintf_inline(char *buf, size_t size, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    (void)vsnprintf(buf, size, fmt, args);
+    va_end(args);
+    return buf;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 time_t intervalable(const time_t interval, time_t *last) {
     time_t now = time(NULL);
     if (*last == 0) {
@@ -77,7 +115,9 @@ time_t intervalable(const time_t interval, time_t *last) {
 
 void debug_hexdump(const char *prefix, const uint8_t *data, size_t length) {
     for (size_t offset = 0; offset < length; offset += 16) {
-        printf("%s[%04X] ", prefix ? prefix : "", (unsigned)offset);
+        /* only the line START is logged: the hex and ascii columns below append to it with bare
+           printf, so the timestamp lands once per line rather than once per column */
+        PRINTF_INFO("%s[%04X] ", prefix ? prefix : "", (unsigned)offset);
         for (size_t i = 0; i < 16; i++) {
             if (i == 8)
                 printf(" ");
@@ -104,30 +144,7 @@ void debug_hexdump(const char *prefix, const uint8_t *data, size_t length) {
 
 #include "serial_linux.h"
 
-bool e22_debug = false;
-void e22_printf_debug(const char *format, ...) {
-    if (!e22_debug)
-        return;
-    va_list args;
-    va_start(args, format);
-    vfprintf(stdout, format, args);
-    va_end(args);
-}
-void e22_printf_stdout(const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    vfprintf(stdout, format, args);
-    va_end(args);
-}
-void e22_printf_stderr(const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    vfprintf(stderr, format, args);
-    va_end(args);
-}
-#define PRINTF_DEBUG e22_printf_debug
-#define PRINTF_ERROR e22_printf_stderr
-#define PRINTF_INFO  e22_printf_stdout
+/* PRINTF_DEBUG / PRINTF_INFO / PRINTF_ERROR are defined above, under the includes. */
 #undef E22900T22_SUPPORT_MODULE_DIP
 #define E22900T22_SUPPORT_MODULE_USB
 #include "e22xxxtxx.h"
@@ -163,7 +180,7 @@ void __sleep_ms(const uint32_t ms) {
 #include "iotdata_gateway_stat.h"
 #include "iotdata_gateway_node.h"
 #include "iotdata_gateway_netw.h"
-#include "iotdata_gateway_mqtt.h"
+#include "iotdata_gateway_ctrl.h"
 #include "iotdata_gateway_exec.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -178,7 +195,11 @@ void __sleep_ms(const uint32_t ms) {
 #define SERIAL_BITS_DEFAULT        SERIAL_8N1
 
 #define STAT_INTERVAL_DEFAULT      (5 * 60)
-#define INTERVAL_RSSI_DEFAULT      (1 * 60)
+/* Channel RSSI is the ambient noise floor, read by a UART command round-trip to the module -- it
+   is not the per-packet RSSI (that arrives appended to each frame and stays on by default).
+   Nothing consumes the channel figure, so it is off unless asked for: a non-zero value is both
+   "enabled" and the poll interval in seconds. */
+#define INTERVAL_RSSI_CHANNEL_DEFAULT 0
 #define INTERVAL_BEACON_DEFAULT    60 /* seconds */
 
 #define GATEWAY_STATION_ID_DEFAULT 1
@@ -259,7 +280,7 @@ const config_option_help_t config_options_help [] = {
     {"lora-packet-rate",                "Lora E22 packet rate (default: 0)"},
     {"lora-transmit-power",             "Lora E22 transmit power level 0-3 (default: 0)"},
     {"lora-transmission-method",        "Lora E22 transmission method 0=transparent, 1=fixed-point (default: 0)"},
-    {"lora-rssi-channel",               "Lora E22 enable channel RSSI capture in seconds (default: 60; 0 disables)"},
+    {"lora-rssi-channel",               "Lora E22 channel (ambient) RSSI poll interval in seconds (default: 0 = disabled)"},
     {"lora-rssi-packet",                "Lora E22 enable packet RSSI capture (default: true)"},
     {"lora-listen-before-transmit",     "Lora E22 enable listen-before-transmit mode (default: true)"},
     {"lora-read-timeout-command",       "Lora E22 command read timeout in milliseconds (default: 1000)"},
@@ -322,20 +343,20 @@ void lora_config_populate(serial_config_t *cfg_serial, e22900t22_config_t *cfg) 
     cfg->transmission_method = (uint8_t)config_get_integer("lora-transmission-method", E22900T22_CONFIG_TRANSMISSION_METHOD_DEFAULT);
     cfg->relay_enabled = E22900T22_CONFIG_RELAY_ENABLED_DEFAULT;
     cfg->listen_before_transmit = config_get_bool("lora-listen-before-transmit", E22900T22_CONFIG_LISTEN_BEFORE_TRANSMIT);
-    cfg->rssi_channel = config_get_integer("lora-rssi-channel", 1) > 0;                           // XXX
+    cfg->rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT) > 0; /* off: also stops the module computing it */
     cfg->rssi_packet = config_get_bool("lora-rssi-packet", E22900T22_CONFIG_RSSI_PACKET_DEFAULT); // XXX
     cfg->read_timeout_command = (uint32_t)config_get_integer("lora-read-timeout-command", E22900T22_CONFIG_READ_TIMEOUT_COMMAND_DEFAULT);
     cfg->read_timeout_packet = (uint32_t)config_get_integer("lora-read-timeout-packet", E22900T22_CONFIG_READ_TIMEOUT_PACKET_DEFAULT);
     cfg->debug = config_get_bool("lora-debug", false);
-    e22_debug = cfg->debug;
+    iotdata_log_debug_enabled = cfg->debug;
 
-    printf("config: lora: port=%s, rate=%d, bits=%s, "
-           "address=0x%04" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", packet-size=%d, packet-rate=%d, "
-           "transmit-power=%" PRIu8 ", transmission-method=%s, mode-relay=%s, mode-listen-before-transmit=%s, "
-           "rssi-channel=%s, rssi-packet=%s, read-timeout-command=%" PRIu32 "ms, read-timeout-packet=%" PRIu32 "ms, debug=%s\n",
-           cfg_serial->port, cfg_serial->rate, serial_bits_str(cfg_serial->bits), cfg->address, cfg->network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->packet_rate, cfg->transmit_power,
-           cfg->transmission_method == E22900T22_CONFIG_TRANSMISSION_METHOD_TRANSPARENT ? "transparent" : "fixed-point", cfg->relay_enabled ? "on" : "off", cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
-           cfg->rssi_packet ? "on" : "off", cfg->read_timeout_command, cfg->read_timeout_packet, cfg->debug ? "on" : "off");
+    PRINTF_INFO("config: lora: port=%s, rate=%d, bits=%s, "
+                "address=0x%04" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", packet-size=%d, packet-rate=%d, "
+                "transmit-power=%" PRIu8 ", transmission-method=%s, mode-relay=%s, mode-listen-before-transmit=%s, "
+                "rssi-channel=%s, rssi-packet=%s, read-timeout-command=%" PRIu32 "ms, read-timeout-packet=%" PRIu32 "ms, debug=%s\n",
+                cfg_serial->port, cfg_serial->rate, serial_bits_str(cfg_serial->bits), cfg->address, cfg->network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->packet_rate, cfg->transmit_power,
+                cfg->transmission_method == E22900T22_CONFIG_TRANSMISSION_METHOD_TRANSPARENT ? "transparent" : "fixed-point", cfg->relay_enabled ? "on" : "off", cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
+                cfg->rssi_packet ? "on" : "off", cfg->read_timeout_command, cfg->read_timeout_packet, cfg->debug ? "on" : "off");
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -351,8 +372,8 @@ void mqtt_config_populate(mqtt_config_t *cfg) {
     cfg->reconnect_delay_max = (unsigned int)config_get_integer("mqtt-reconnect-delay-max", MQTT_RECONNECT_DELAY_MAX_DEFAULT);
     cfg->debug = config_get_bool("mqtt-debug", false);
 
-    printf("config: mqtt: client=%s, server=%s, tls-insecure=%s, synchronous=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, cfg->tls_insecure ? "on" : "off", cfg->use_synchronous ? "on" : "off",
-           cfg->reconnect_delay, cfg->reconnect_delay_max);
+    PRINTF_INFO("config: mqtt: client=%s, server=%s, tls-insecure=%s, synchronous=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, cfg->tls_insecure ? "on" : "off", cfg->use_synchronous ? "on" : "off",
+                cfg->reconnect_delay, cfg->reconnect_delay_max);
 }
 
 void iotdata_mesh_config_populate(mesh_state_t *cfg) {
@@ -364,14 +385,13 @@ void iotdata_mesh_config_populate(mesh_state_t *cfg) {
        fleet that can be wrong. 0 is not a station, and the broadcast id would make the gateway
        treat every broadcast as addressed to it alone. */
     if (!iotdata_station_is_assignable(cfg->station_id)) {
-        fprintf(stderr, "config: mesh-station-id %u is reserved (must be 1..%u) -- using %u\n", (unsigned)cfg->station_id, (unsigned)IOTDATA_STATION_ASSIGNABLE_MAX,
-                (unsigned)GATEWAY_STATION_ID_DEFAULT);
+        PRINTF_ERROR("config: mesh-station-id %u is reserved (must be 1..%u) -- using %u\n", (unsigned)cfg->station_id, (unsigned)IOTDATA_STATION_ASSIGNABLE_MAX, (unsigned)GATEWAY_STATION_ID_DEFAULT);
         cfg->station_id = GATEWAY_STATION_ID_DEFAULT;
     }
     cfg->beacon_interval = (time_t)config_get_integer("mesh-beacon-interval", INTERVAL_BEACON_DEFAULT);
     cfg->debug = config_get_bool("mesh-debug", false);
 
-    printf("config: mesh: enabled=%c, station-id=%04" PRIX16 ", beacon-interval=%" PRIu32 "s, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->station_id, (uint32_t)cfg->beacon_interval, cfg->debug ? "on" : "off");
+    PRINTF_INFO("config: mesh: enabled=%c, station-id=%04" PRIX16 ", beacon-interval=%" PRIu32 "s, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->station_id, (uint32_t)cfg->beacon_interval, cfg->debug ? "on" : "off");
 }
 
 void iotdata_ddup_config_populate(ddup_state_t *cfg) {
@@ -384,7 +404,7 @@ void iotdata_ddup_config_populate(ddup_state_t *cfg) {
     cfg->delay_ms = (uint32_t)config_get_integer("ddup-delay", DDUP_DELAY_MS_DEFAULT);
     cfg->debug = config_get_bool("ddup-debug", false);
 
-    printf("config: ddup: enabled=%c, port=%" PRIu16 ", peers=%s, delay=%" PRIu32 "ms, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->port, peers, cfg->delay_ms, cfg->debug ? "on" : "off");
+    PRINTF_INFO("config: ddup: enabled=%c, port=%" PRIu16 ", peers=%s, delay=%" PRIu32 "ms, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->port, peers, cfg->delay_ms, cfg->debug ? "on" : "off");
 }
 
 void stat_config_populate(stat_state_t *cfg) {
@@ -397,19 +417,19 @@ void stat_config_populate(stat_state_t *cfg) {
     if (len > 0 && cfg->mqtt_topic[len - 1] == '/')
         cfg->mqtt_topic[len - 1] = '\0';
 
-    printf("config: stat: mqtt-topic=%s\n", cfg->mqtt_topic);
+    PRINTF_INFO("config: stat: mqtt-topic=%s\n", cfg->mqtt_topic);
 }
 
 void process_config_populate(process_state_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
     cfg->mqtt_topic_prefix = config_get_string("mqtt-topic-prefix", MQTT_TOPIC_PREFIX_DEFAULT);
-    cfg->interval_rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_DEFAULT);          // XXX
-    cfg->capture_rssi_channel = (cfg->interval_rssi_channel > 0);                                         // XXX
+    cfg->interval_rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT); /* same key, same default as the module flag above */
+    cfg->capture_rssi_channel = (cfg->interval_rssi_channel > 0);
     cfg->capture_rssi_packet = config_get_bool("lora-rssi-packet", E22900T22_CONFIG_RSSI_PACKET_DEFAULT); // XXX
     cfg->stat_display_interval = config_get_integer("stat-display-interval", STAT_INTERVAL_DEFAULT);
     cfg->stat_publish_interval = config_get_integer("stat-publish-interval", STAT_INTERVAL_DEFAULT);
-    cfg->stat_network_interval = config_get_integer("stat-network-interval", STAT_INTERVAL_DEFAULT);
+    cfg->stat_netw_interval = config_get_integer("stat-network-interval", STAT_INTERVAL_DEFAULT);
     cfg->debug = config_get_bool("debug", false);
     cfg->debug_data = config_get_bool("debug-data", false);
 }
@@ -421,11 +441,11 @@ typedef struct {
     serial_config_t lora_serial_config;
     e22900t22_config_t lora_device_config;
     mqtt_config_t mqtt_config;
-    gwmqtt_manage_state_t manage;
     mesh_state_t mesh_state;
     ddup_state_t ddup_state;
     stat_state_t stat_state;
-    gwnode_state_t node_state;
+    node_state_t node_state;
+    ctrl_state_t ctrl_state;
     process_state_t process_state;
     blackbox_handle_t blackbox;
     blackbox_config_t blackbox_config;
@@ -465,7 +485,7 @@ bool system_config(system_t *state, const int argc, char *argv[]) {
 
 void signal_handler(const int sig __attribute__((unused))) {
     if (system_state.running) {
-        printf("stopping\n");
+        PRINTF_INFO("stopping\n");
         system_state.running = false;
     }
 }
@@ -494,11 +514,11 @@ static void gateway_blackbox_begin(system_t *state) {
         .enabled = enabled,
     };
     if (blackbox_init(&state->blackbox, &state->blackbox_config) != 0) {
-        fprintf(stderr, "blackbox: init failed (path=%s)\n", state->blackbox_path);
+        PRINTF_ERROR("blackbox: init failed (path=%s)\n", state->blackbox_path);
         return;
     }
     (void)iotdata_blackbox_lifecycle(&state->blackbox, IOTDATA_BB_LC_START, 0);
-    printf("blackbox: %s (path=%s, flush=%s)\n", enabled ? "enabled" : "disabled (default)", state->blackbox_path, (max_seconds > 0) ? "ram-cache/batched" : "write-through");
+    PRINTF_INFO("blackbox: %s (path=%s, flush=%s)\n", enabled ? "enabled" : "disabled (default)", state->blackbox_path, (max_seconds > 0) ? "ram-cache/batched" : "write-through");
 }
 
 static void gateway_blackbox_end(system_t *state) {
@@ -516,54 +536,61 @@ int main(int argc, char *argv[]) {
     int ret = EXIT_FAILURE;
 
     setbuf(stdout, NULL);
-    printf("starting (iotdata gateway: variants=%d, features=mesh,dedup,stats,mqtt)\n", IOTDATA_VARIANT_MAPS_COUNT);
+    PRINTF_INFO("starting (iotdata gateway: variants=%d, features=mesh,dedup,stats,mqtt)\n", IOTDATA_VARIANT_MAPS_COUNT);
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
     system_t *state = &system_state;
 
     if (!system_config(state, argc, argv))
-        goto end_all;
+        return ret;
+    const uint16_t station_id = state->mesh_state.station_id; // from config
 
     gateway_blackbox_begin(state);
 
-    // LORA SERIAL/DEVICE
+    // DEVICE (LORA SERIAL/DEVICE)
     if (!serial_begin(&state->lora_serial_config) || !serial_connect()) {
-        fprintf(stderr, "device: serial connect failure (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
+        PRINTF_ERROR("device: serial connect failure (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
         goto end_all;
     }
     if (!device_connect(E22900T22_MODULE_USB, &state->lora_device_config)) {
-        fprintf(stderr, "device: module connect failure (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
+        PRINTF_ERROR("device: module connect failure (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
         goto end_serial;
     }
-    printf("device: connect success (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
+    PRINTF_INFO("device: connect success (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
     if (!(device_mode_config() && device_info_read() && device_config_read_and_update() && device_mode_transfer()))
         goto end_device;
 
     // MQTT BROKER
     if (!mqtt_begin(&state->mqtt_config))
         goto end_device;
-    (void)gwmqtt_manage_begin(&state->manage, state->process_state.mqtt_topic_prefix, state->mesh_state.station_id, device_packet_write);
-    state->manage.blackbox = (state->blackbox.cfg != NULL) ? &state->blackbox : NULL;
 
     state->running = true;
 
-    // IOTDATA MESH/DDUP
-    network_init(&state->process_state.network);
-    if (!mesh_begin(&state->mesh_state, device_packet_write, ddup_check_and_add_handler, (void *)&state->process_state))
+    // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
+    netw_init(&state->process_state.network);
+    if (!node_begin(&state->node_state, station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->blackbox, device_packet_write, state->process_state.mqtt_topic_prefix))
         goto end_mqtt;
-    if (!ddup_begin(&state->ddup_state, state->mesh_state.station_id, &state->mesh_state.dedup_ring, &state->running))
+    if (!mesh_begin(&state->mesh_state, device_packet_write, ddup_insert_handler, (void *)&state->process_state))
+        goto end_node;
+    if (!ddup_begin(&state->ddup_state, station_id, &state->mesh_state.dedup_ring, &state->running))
         goto end_mesh;
+    if (!ctrl_begin(&state->ctrl_state, state->process_state.mqtt_topic_prefix, station_id, device_packet_write))
+        goto end_ddup;
+    state->ctrl_state.blackbox = (state->blackbox.cfg != NULL) ? &state->blackbox : NULL;
 
-    // GATEWAY PROCESSOR
-    stat_begin(&state->stat_state, IOTDATA_GATEWAY_VERSION, state->mesh_state.station_id, &state->lora_device_config);
-    gwnode_begin(&state->node_state, state->mesh_state.station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->blackbox, device_packet_write, state->process_state.mqtt_topic_prefix);
-    ret = process_run(&state->process_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
+    // PROCESS
+    stat_begin(&state->stat_state, IOTDATA_GATEWAY_VERSION, station_id, &state->lora_device_config);
+    ret = process_run(&state->process_state, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
     stat_end(&state->stat_state);
 
+    ctrl_end(&state->ctrl_state);
+end_ddup:
     ddup_end(&state->ddup_state);
 end_mesh:
     mesh_end(&state->mesh_state);
+end_node:
+    node_end(&state->node_state);
 end_mqtt:
     mqtt_end();
 end_device:

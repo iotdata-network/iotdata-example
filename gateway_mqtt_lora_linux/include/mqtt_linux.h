@@ -53,7 +53,7 @@ bool mqtt_send(const char *topic, const char *message, const int length) {
     const int result = mosquitto_publish(mosq, NULL, topic, length, message, MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN);
     if (result != MOSQ_ERR_SUCCESS) {
         mqtt_stat_publish_errors++;
-        fprintf(stderr, "mqtt: publish error: %s\n", mosquitto_strerror(result));
+        PRINTF_ERROR("mqtt: publish error: %s\n", mosquitto_strerror(result));
         return false;
     }
     mqtt_stat_publishes++;
@@ -78,10 +78,10 @@ bool mqtt_subscribe(const char *topic, const int qos, void (*callback)(const cha
     mqtt_message_callback = callback;
     const int result = mosquitto_subscribe(mosq, NULL, topic, qos);
     if (result != MOSQ_ERR_SUCCESS) {
-        fprintf(stderr, "mqtt: subscribe error: %s\n", mosquitto_strerror(result));
+        PRINTF_ERROR("mqtt: subscribe error: %s\n", mosquitto_strerror(result));
         return false;
     }
-    printf("mqtt: subscribed to topic '%s' (qos=%d)\n", topic, qos);
+    PRINTF_INFO("mqtt: subscribed to topic '%s' (qos=%d)\n", topic, qos);
     return true;
 }
 
@@ -92,10 +92,10 @@ bool mqtt_unsubscribe(const char *topic) {
         return false;
     const int result = mosquitto_unsubscribe(mosq, NULL, topic);
     if (result != MOSQ_ERR_SUCCESS) {
-        fprintf(stderr, "mqtt: unsubscribe error: %s\n", mosquitto_strerror(result));
+        PRINTF_ERROR("mqtt: unsubscribe error: %s\n", mosquitto_strerror(result));
         return false;
     }
-    printf("mqtt: unsubscribed from topic '%s'\n", topic);
+    PRINTF_INFO("mqtt: unsubscribed from topic '%s'\n", topic);
     return true;
 }
 
@@ -127,7 +127,7 @@ static void __mqtt_connect_callback(struct mosquitto *m, void *o __attribute__((
     if (m != mosq)
         return;
     if (r != 0) {
-        fprintf(stderr, "mqtt: connect failed: %s\n", mosquitto_connack_string(r));
+        PRINTF_ERROR("mqtt: connect failed: %s\n", mosquitto_connack_string(r));
         return;
     }
     mqtt_connected = true;
@@ -135,7 +135,7 @@ static void __mqtt_connect_callback(struct mosquitto *m, void *o __attribute__((
     mqtt_stat_last_connect_time = time(NULL);
     mqtt_reconnect_delay_current = mqtt_reconnect_delay_base;
     mqtt_reconnect_next_attempt = 0;
-    printf("mqtt: connected\n");
+    PRINTF_INFO("mqtt: connected\n");
 }
 
 static void __mqtt_disconnect_callback(struct mosquitto *m, void *o __attribute__((unused)), int r) {
@@ -144,9 +144,9 @@ static void __mqtt_disconnect_callback(struct mosquitto *m, void *o __attribute_
     mqtt_connected = false;
     mqtt_stat_disconnects++;
     if (r == 0)
-        printf("mqtt: disconnected (clean)\n");
+        PRINTF_INFO("mqtt: disconnected (clean)\n");
     else
-        fprintf(stderr, "mqtt: disconnected unexpectedly: rc=%d\n", r);
+        PRINTF_ERROR("mqtt: disconnected unexpectedly: rc=%d\n", r);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -157,14 +157,14 @@ static void __mqtt_reconnect_attempt(void) {
         return;
     if (mqtt_reconnect_delay_current == 0)
         mqtt_reconnect_delay_current = mqtt_reconnect_delay_base ? mqtt_reconnect_delay_base : 1;
-    printf("mqtt: attempting reconnect\n");
+    PRINTF_INFO("mqtt: attempting reconnect\n");
     const int r = mosquitto_reconnect(mosq);
     if (r == MOSQ_ERR_SUCCESS) {
         mqtt_stat_reconnects++;
         mqtt_reconnect_delay_current = mqtt_reconnect_delay_base;
         mqtt_reconnect_next_attempt = 0;
     } else {
-        fprintf(stderr, "mqtt: reconnect failed: %s (next attempt in %us)\n", mosquitto_strerror(r), mqtt_reconnect_delay_current);
+        PRINTF_ERROR("mqtt: reconnect failed: %s (next attempt in %us)\n", mosquitto_strerror(r), mqtt_reconnect_delay_current);
         mqtt_reconnect_next_attempt = now + mqtt_reconnect_delay_current;
         mqtt_reconnect_delay_current *= 2;
         if (mqtt_reconnect_delay_max_base > 0 && mqtt_reconnect_delay_current > mqtt_reconnect_delay_max_base)
@@ -180,7 +180,7 @@ void mqtt_loop(const int timeout_ms) {
         if (mqtt_connected) {
             mqtt_connected = false;
             mqtt_stat_disconnects++;
-            fprintf(stderr, "mqtt: loop error: %s\n", mosquitto_strerror(rc));
+            PRINTF_ERROR("mqtt: loop error: %s\n", mosquitto_strerror(rc));
         }
         __mqtt_reconnect_attempt();
     }
@@ -193,23 +193,23 @@ bool mqtt_begin(const mqtt_config_t *cfg) {
     int port;
     bool ssl;
     if (!__mqtt_parse(cfg->server, host, sizeof(host), &port, &ssl)) {
-        fprintf(stderr, "mqtt: error parsing details in '%s'\n", cfg->server);
+        PRINTF_ERROR("mqtt: error parsing details in '%s'\n", cfg->server);
         return false;
     }
-    printf("mqtt: connecting (host='%s', port=%d, ssl=%s, client='%s')\n", host, port, ssl ? "true" : "false", cfg->client);
+    PRINTF_INFO("mqtt: connecting (host='%s', port=%d, ssl=%s, client='%s')\n", host, port, ssl ? "true" : "false", cfg->client);
     char client_id[24];
     snprintf(client_id, sizeof(client_id), "%s-%06X", cfg->client ? cfg->client : "mqtt-linux", (unsigned int)(time(NULL) ^ getpid()) & 0xFFFFFF);
     mosquitto_lib_init();
     mosq = mosquitto_new(client_id, true, NULL);
     if (!mosq) {
-        fprintf(stderr, "mqtt: error creating client instance\n");
+        PRINTF_ERROR("mqtt: error creating client instance\n");
         return false;
     }
     if (ssl) {
         mosquitto_tls_set(mosq, NULL, NULL, NULL, NULL, NULL);
         if (cfg->tls_insecure) {
             mosquitto_tls_insecure_set(mosq, true);
-            printf("mqtt: WARNING tls certificate validation disabled\n");
+            PRINTF_INFO("mqtt: WARNING tls certificate validation disabled\n");
         }
     }
     mosquitto_connect_callback_set(mosq, __mqtt_connect_callback);
@@ -223,14 +223,14 @@ bool mqtt_begin(const mqtt_config_t *cfg) {
     mqtt_reconnect_next_attempt = 0;
     int result;
     if ((result = mosquitto_connect(mosq, host, port, MQTT_CONNECT_TIMEOUT)) != MOSQ_ERR_SUCCESS) {
-        fprintf(stderr, "mqtt: error connecting to broker: %s\n", mosquitto_strerror(result));
+        PRINTF_ERROR("mqtt: error connecting to broker: %s\n", mosquitto_strerror(result));
         mosquitto_destroy(mosq);
         mosq = NULL;
         return false;
     }
     mqtt_synchronous = cfg->use_synchronous;
     if (!mqtt_synchronous && (result = mosquitto_loop_start(mosq)) != MOSQ_ERR_SUCCESS) {
-        fprintf(stderr, "mqtt: error starting loop: %s\n", mosquitto_strerror(result));
+        PRINTF_ERROR("mqtt: error starting loop: %s\n", mosquitto_strerror(result));
         mosquitto_disconnect(mosq);
         mosquitto_destroy(mosq);
         mosq = NULL;

@@ -14,29 +14,64 @@
 #define CONFIG_MAX_STRING 255
 
 typedef struct {
-    char *key;
-    char *value;
+    const char *key;
+    const char *value;
 } config_entry_t;
 
+#ifndef CONFIG_MAX_ENTRIES
 #define CONFIG_MAX_ENTRIES 64
+#endif
+#ifndef CONFIG_POOL_SIZE
+#define CONFIG_POOL_SIZE 4096
+#endif
+
 config_entry_t config_entries[CONFIG_MAX_ENTRIES];
 int config_entry_count = 0;
+
+/* Keys and values live here rather than in strdup'd blocks. Config is parsed once at startup and
+   never freed, so an allocator bought nothing but a dependency -- and this has to run somewhere
+   without one eventually. Fixed key/value arrays would have been simpler still, but 64 entries at
+   a few hundred bytes each is tens of KB of .bss to hold a handful of short strings.
+
+   Bump-allocated and never reclaimed: overriding a value (a command-line argument beating a config
+   file entry) appends a new string and orphans the old one. Bounded, because that happens only
+   while parsing, and the pool is sized for far more churn than that. */
+static char config_pool[CONFIG_POOL_SIZE];
+static size_t config_pool_used = 0;
+
+static const char *__config_pool_add(const char *const s) {
+    const size_t n = strlen(s) + 1;
+    if (config_pool_used + n > sizeof(config_pool)) {
+        PRINTF_ERROR("config: string pool full (%zu bytes), ignoring '%s'\n", sizeof(config_pool), s);
+        return NULL;
+    }
+    char *const out = &config_pool[config_pool_used];
+    memcpy(out, s, n);
+    config_pool_used += n;
+    return out;
+}
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void __config_set_value(const char *key, const char *value) {
     for (int i = 0; i < config_entry_count; i++)
         if (strcmp(config_entries[i].key, key) == 0) {
-            free(config_entries[i].value);
-            config_entries[i].value = strdup(value);
+            const char *const v = __config_pool_add(value);
+            if (v != NULL)
+                config_entries[i].value = v; /* the previous one stays in the pool, orphaned */
             return;
         }
-    if (config_entry_count < CONFIG_MAX_ENTRIES) {
-        config_entries[config_entry_count].key = strdup(key);
-        config_entries[config_entry_count].value = strdup(value);
-        config_entry_count++;
-    } else
-        fprintf(stderr, "config: too many entries, ignoring %s=%s\n", key, value);
+    if (config_entry_count >= CONFIG_MAX_ENTRIES) {
+        PRINTF_ERROR("config: too many entries, ignoring %s=%s\n", key, value);
+        return;
+    }
+    const char *const k = __config_pool_add(key);
+    const char *const v = __config_pool_add(value);
+    if (k == NULL || v == NULL)
+        return; /* pool exhausted: the message is already out, and the default will stand */
+    config_entries[config_entry_count].key = k;
+    config_entries[config_entry_count].value = v;
+    config_entry_count++;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -57,7 +92,7 @@ int config_get_integer(const char *key, const int default_value) {
             const long val = strtol(config_entries[i].value, &endptr, 0);
             if (*endptr == '\0')
                 return (int)val;
-            fprintf(stderr, "config: invalid integer value '%s' for key '%s', using default\n", config_entries[i].value, key);
+            PRINTF_ERROR("config: invalid integer value '%s' for key '%s', using default\n", config_entries[i].value, key);
             return default_value;
         }
     return default_value;
@@ -72,7 +107,7 @@ bool config_get_bool(const char *key, const bool default_value) {
                 return true;
             if (strcasecmp(config_entries[i].value, "false") == 0 || strcmp(config_entries[i].value, "0") == 0)
                 return false;
-            fprintf(stderr, "config: invalid boolean value '%s' for key '%s', using default\n", config_entries[i].value, key);
+            PRINTF_ERROR("config: invalid boolean value '%s' for key '%s', using default\n", config_entries[i].value, key);
         }
     return default_value;
 }
@@ -84,7 +119,7 @@ serial_bits_t config_get_bits(const char *key, const serial_bits_t default_value
         if (strcmp(config_entries[i].key, key) == 0) {
             if (strcmp(config_entries[i].value, "8N1") == 0)
                 return SERIAL_8N1;
-            fprintf(stderr, "config: invalid bits value '%s', using default\n", config_entries[i].value);
+            PRINTF_ERROR("config: invalid bits value '%s', using default\n", config_entries[i].value);
         }
     return default_value;
 }
@@ -94,10 +129,10 @@ serial_bits_t config_get_bits(const char *key, const serial_bits_t default_value
 static bool __config_load_file(const char *filename) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
-        fprintf(stderr, "config: could not load '%s'\n", filename);
+        PRINTF_ERROR("config: could not load '%s'\n", filename);
         return false;
     }
-    char line[CONFIG_MAX_STRING];
+    static char line[CONFIG_MAX_STRING]; /* startup only, main thread */
     while (fgets(line, sizeof(line), file)) {
         char *equals = strchr(line, '=');
         if (equals) {
@@ -165,7 +200,7 @@ bool config_load(const char *config_file, const int argc, char *argv[], const st
     while ((c = getopt_long(argc, (char **)argv, "", options_long, &option_index)) != -1)
         if (c == 0 && strcmp(options_long[option_index].name, "config") != 0)
             __config_set_value(options_long[option_index].name, optarg);
-    printf("config: file='%s'", config_file);
+    PRINTF_INFO("config: file='%s'", config_file);
     for (int i = 1; options_long[i].name != NULL; i++) {
         const char *value = config_get_string(options_long[i].name, NULL);
         if (value != NULL)

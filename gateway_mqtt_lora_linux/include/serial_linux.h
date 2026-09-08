@@ -49,13 +49,13 @@ bool serial_connect(void) {
         return false;
     serial_fd = open(_serial_cfg->port, O_RDWR | O_NOCTTY);
     if (serial_fd < 0) {
-        fprintf(stderr, "serial: error opening port: %s\n", strerror(errno));
+        PRINTF_ERROR("serial: error opening port: %s\n", strerror(errno));
         return false;
     }
     struct termios tty;
     memset(&tty, 0, sizeof(tty));
     if (tcgetattr(serial_fd, &tty) != 0) {
-        fprintf(stderr, "serial: error getting port attributes: %s\n", strerror(errno));
+        PRINTF_ERROR("serial: error getting port attributes: %s\n", strerror(errno));
         goto serial_failed;
     }
     speed_t baud;
@@ -85,13 +85,13 @@ bool serial_connect(void) {
         baud = B115200;
         break;
     default:
-        fprintf(stderr, "serial: unsupported baud rate: %d\n", _serial_cfg->rate);
+        PRINTF_ERROR("serial: unsupported baud rate: %d\n", _serial_cfg->rate);
         goto serial_failed;
     }
     cfsetispeed(&tty, baud);
     cfsetospeed(&tty, baud);
     if (_serial_cfg->bits != SERIAL_8N1) {
-        fprintf(stderr, "serial: unsupported bits: %s\n", serial_bits_str(_serial_cfg->bits));
+        PRINTF_ERROR("serial: unsupported bits: %s\n", serial_bits_str(_serial_cfg->bits));
         goto serial_failed;
     }
     tty.c_cflag |= (tcflag_t)(CLOCAL | CREAD);
@@ -107,7 +107,7 @@ bool serial_connect(void) {
     tty.c_cc[VMIN] = 0;
     tty.c_cc[VTIME] = 10;
     if (tcsetattr(serial_fd, TCSANOW, &tty) != 0) {
-        fprintf(stderr, "serial: error setting port attributes: %s\n", strerror(errno));
+        PRINTF_ERROR("serial: error setting port attributes: %s\n", strerror(errno));
         goto serial_failed;
     }
     tcflush(serial_fd, TCIOFLUSH);

@@ -31,12 +31,23 @@ static void test_e22_printf_stub(const char *format, ...) {
 #define PRINTF_DEBUG test_e22_printf_stub
 #define PRINTF_ERROR test_e22_printf_stub
 #define PRINTF_INFO  test_e22_printf_stub
+#define PRINTF_WARN  test_e22_printf_stub
 #undef E22900T22_SUPPORT_MODULE_DIP
 #define E22900T22_SUPPORT_MODULE_USB
 #include "serial_linux.h"
 #include "e22xxxtxx.h"
 void __sleep_ms(const uint32_t ms) { /* defined after the header declares it, as in iotdata_gateway.c */
     (void)ms;
+}
+
+/* mirrored from iotdata_gateway.c, which this harness does not include: the stat/ddup headers
+   below call it */
+__attribute__((format(printf, 3, 4))) static inline const char *snprintf_inline(char *buf, size_t size, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    (void)vsnprintf(buf, size, fmt, args);
+    va_end(args);
+    return buf;
 }
 
 #define MQTT_CONNECT_TIMEOUT 60
@@ -162,10 +173,10 @@ static bool test_mesh_begin_no_packet_handler(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// mesh_beacon_send
+// mesh_transmit_beacon
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool test_mesh_beacon_send_ok(void) {
+static bool test_mesh_transmit_beacon_ok(void) {
     reset_test_helpers();
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
@@ -173,7 +184,7 @@ static bool test_mesh_beacon_send_ok(void) {
     ms.station_id = 0x0042;
     ms.packet_handler = test_packet_handler;
 
-    mesh_beacon_send(&ms);
+    mesh_transmit_beacon(&ms);
 
     ASSERT_EQ_INT(packet_handler_calls, 1);
     ASSERT_EQ_INT(captured_lengths[0], IOTDATA_MESH_BEACON_SIZE);
@@ -189,7 +200,7 @@ static bool test_mesh_beacon_send_ok(void) {
     return true;
 }
 
-static bool test_mesh_beacon_send_fail(void) {
+static bool test_mesh_transmit_beacon_fail(void) {
     reset_test_helpers();
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
@@ -197,7 +208,7 @@ static bool test_mesh_beacon_send_fail(void) {
     ms.station_id = 0x0042;
     ms.packet_handler = test_packet_handler_fail;
 
-    mesh_beacon_send(&ms);
+    mesh_transmit_beacon(&ms);
 
     ASSERT_EQ_INT(ms.stat_beacons_tx, 0u);
     return true;
@@ -212,17 +223,17 @@ static bool test_mesh_beacon_generation_wraps(void) {
     ms.packet_handler = test_packet_handler;
     ms.beacon_generation = (uint16_t)(IOTDATA_MESH_GENERATION_MOD - 1);
 
-    mesh_beacon_send(&ms);
+    mesh_transmit_beacon(&ms);
 
     ASSERT_EQ_INT(ms.beacon_generation, 0u);
     return true;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// mesh_ack_send
+// mesh_transmit_ack
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool test_mesh_ack_send_ok(void) {
+static bool test_mesh_transmit_ack_ok(void) {
     reset_test_helpers();
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
@@ -230,7 +241,7 @@ static bool test_mesh_ack_send_ok(void) {
     ms.station_id = 0x0001;
     ms.packet_handler = test_packet_handler;
 
-    mesh_ack_send(&ms, 0x0002, 100);
+    mesh_transmit_ack(&ms, 0x0002, 100);
 
     ASSERT_EQ_INT(packet_handler_calls, 1);
     ASSERT_EQ_INT(captured_lengths[0], IOTDATA_MESH_ACK_SIZE);
@@ -245,10 +256,10 @@ static bool test_mesh_ack_send_ok(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// mesh_handle_forward
+// mesh_receive_forward
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool test_mesh_handle_forward_new(void) {
+static bool test_mesh_receive_forward_new(void) {
     reset_test_helpers();
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
@@ -265,9 +276,9 @@ static bool test_mesh_handle_forward_new(void) {
 
     const uint8_t *inner_out;
     int inner_len;
-    ASSERT(mesh_handle_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
+    ASSERT(mesh_receive_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
 
-    ASSERT_EQ_INT(ms.stat_forwards_rx, 1u);
+    ASSERT_EQ_INT(ms.ctrl[IOTDATA_MESH_CTRL_FORWARD].rx, 1u);
     ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
     ASSERT_EQ_INT(inner_len, 8);
     ASSERT_EQ_INT(dedup_handler_calls, 1);
@@ -277,7 +288,7 @@ static bool test_mesh_handle_forward_new(void) {
     return true;
 }
 
-static bool test_mesh_handle_forward_duplicate(void) {
+static bool test_mesh_receive_forward_duplicate(void) {
     reset_test_helpers();
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
@@ -293,9 +304,9 @@ static bool test_mesh_handle_forward_duplicate(void) {
 
     const uint8_t *inner_out;
     int inner_len;
-    ASSERT(!mesh_handle_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
+    ASSERT(!mesh_receive_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
 
-    ASSERT_EQ_INT(ms.stat_forwards_rx, 1u);
+    ASSERT_EQ_INT(ms.ctrl[IOTDATA_MESH_CTRL_FORWARD].rx, 1u);
     ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 0u);
     ASSERT_EQ_INT(ms.stat_duplicates, 1u);
     /* ACK still sent even for duplicates */
@@ -304,7 +315,7 @@ static bool test_mesh_handle_forward_duplicate(void) {
     return true;
 }
 
-static bool test_mesh_handle_forward_no_dedup(void) {
+static bool test_mesh_receive_forward_no_dedup(void) {
     reset_test_helpers();
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
@@ -319,14 +330,14 @@ static bool test_mesh_handle_forward_no_dedup(void) {
 
     const uint8_t *inner_out;
     int inner_len;
-    ASSERT(mesh_handle_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
+    ASSERT(mesh_receive_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
 
-    ASSERT_EQ_INT(ms.stat_forwards_rx, 1u);
+    ASSERT_EQ_INT(ms.ctrl[IOTDATA_MESH_CTRL_FORWARD].rx, 1u);
     ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
     return true;
 }
 
-static bool test_mesh_handle_forward_too_short(void) {
+static bool test_mesh_receive_forward_too_short(void) {
     reset_test_helpers();
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
@@ -337,11 +348,11 @@ static bool test_mesh_handle_forward_too_short(void) {
     uint8_t short_buf[4] = { 0xF0, 0x05, 0x00, 0x32 };
     const uint8_t *inner_out;
     int inner_len;
-    ASSERT(!mesh_handle_forward(&ms, short_buf, 4, &inner_out, &inner_len));
+    ASSERT(!mesh_receive_forward(&ms, short_buf, 4, &inner_out, &inner_len));
     return true;
 }
 
-static bool test_mesh_handle_forward_disabled_no_ack(void) {
+static bool test_mesh_receive_forward_disabled_no_ack(void) {
     reset_test_helpers();
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
@@ -357,7 +368,7 @@ static bool test_mesh_handle_forward_disabled_no_ack(void) {
 
     const uint8_t *inner_out;
     int inner_len;
-    ASSERT(mesh_handle_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
+    ASSERT(mesh_receive_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
 
     /* no ACK when disabled */
     ASSERT_EQ_INT(packet_handler_calls, 0);
@@ -366,10 +377,10 @@ static bool test_mesh_handle_forward_disabled_no_ack(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// mesh_handle_beacon / route_error / pong
+// mesh_receive_beacon / route_error / pong
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool test_mesh_handle_beacon_rx(void) {
+static bool test_mesh_receive_beacon_rx(void) {
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
     ms.debug = false;
@@ -385,12 +396,12 @@ static bool test_mesh_handle_beacon_rx(void) {
     };
     iotdata_mesh_pack_beacon(buf, &b);
 
-    mesh_handle_beacon(&ms, buf, IOTDATA_MESH_BEACON_SIZE);
+    mesh_receive_beacon(&ms, buf, IOTDATA_MESH_BEACON_SIZE);
     /* no crash = pass */
     return true;
 }
 
-static bool test_mesh_handle_route_error_rx(void) {
+static bool test_mesh_receive_route_error_rx(void) {
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
 
@@ -398,11 +409,11 @@ static bool test_mesh_handle_route_error_rx(void) {
     iotdata_mesh_pack_header(buf, 0x0010, 5);
     buf[4] = (uint8_t)((IOTDATA_MESH_CTRL_ROUTE_ERROR << 4) | IOTDATA_MESH_REASON_PARENT_LOST);
 
-    mesh_handle_route_error(&ms, buf, IOTDATA_MESH_ROUTE_ERROR_SIZE);
+    mesh_receive_route_error(&ms, buf, IOTDATA_MESH_ROUTE_ERROR_SIZE);
     return true;
 }
 
-static bool test_mesh_handle_pong_rx(void) {
+static bool test_mesh_receive_pong_rx(void) {
     mesh_state_t ms;
     memset(&ms, 0, sizeof(ms));
 
@@ -411,7 +422,7 @@ static bool test_mesh_handle_pong_rx(void) {
     buf[4] = (uint8_t)(IOTDATA_MESH_CTRL_PONG << 4);
     memset(&buf[5], 0, (size_t)(IOTDATA_MESH_PONG_SIZE - 5));
 
-    mesh_handle_pong(&ms, buf, IOTDATA_MESH_PONG_SIZE);
+    mesh_receive_pong(&ms, buf, IOTDATA_MESH_PONG_SIZE);
     return true;
 }
 
@@ -427,13 +438,13 @@ static bool test_mesh_seq_increments(void) {
     ms.station_id = 0x0001;
     ms.packet_handler = test_packet_handler;
 
-    mesh_beacon_send(&ms);
+    mesh_transmit_beacon(&ms);
     ASSERT_EQ_INT(ms.mesh_seq, 1u);
 
-    mesh_ack_send(&ms, 0x0002, 1);
+    mesh_transmit_ack(&ms, 0x0002, 1);
     ASSERT_EQ_INT(ms.mesh_seq, 2u);
 
-    mesh_beacon_send(&ms);
+    mesh_transmit_beacon(&ms);
     ASSERT_EQ_INT(ms.mesh_seq, 3u);
     return true;
 }
@@ -588,10 +599,10 @@ static bool test_ddup_peers_parse_max(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// ddup_check_and_add
+// ddup_insert
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool test_ddup_check_and_add_new(void) {
+static bool test_ddup_insert_new(void) {
     ddup_state_t ds;
     memset(&ds, 0, sizeof(ds));
     ds.enabled = false;
@@ -599,11 +610,11 @@ static bool test_ddup_check_and_add_new(void) {
     iotdata_mesh_dedup_init(&ring);
     ds.dedup_ring = &ring;
 
-    ASSERT(ddup_check_and_add(&ds, 0x0042, 1));
+    ASSERT(ddup_insert(&ds, 0x0042, 1));
     return true;
 }
 
-static bool test_ddup_check_and_add_duplicate(void) {
+static bool test_ddup_insert_duplicate(void) {
     ddup_state_t ds;
     memset(&ds, 0, sizeof(ds));
     ds.enabled = false;
@@ -611,12 +622,12 @@ static bool test_ddup_check_and_add_duplicate(void) {
     iotdata_mesh_dedup_init(&ring);
     ds.dedup_ring = &ring;
 
-    ASSERT(ddup_check_and_add(&ds, 0x0042, 1));
-    ASSERT(!ddup_check_and_add(&ds, 0x0042, 1));
+    ASSERT(ddup_insert(&ds, 0x0042, 1));
+    ASSERT(!ddup_insert(&ds, 0x0042, 1));
     return true;
 }
 
-static bool test_ddup_check_and_add_different_station(void) {
+static bool test_ddup_insert_different_station(void) {
     ddup_state_t ds;
     memset(&ds, 0, sizeof(ds));
     ds.enabled = false;
@@ -624,12 +635,12 @@ static bool test_ddup_check_and_add_different_station(void) {
     iotdata_mesh_dedup_init(&ring);
     ds.dedup_ring = &ring;
 
-    ASSERT(ddup_check_and_add(&ds, 0x0042, 1));
-    ASSERT(ddup_check_and_add(&ds, 0x0043, 1)); /* different station, same seq */
+    ASSERT(ddup_insert(&ds, 0x0042, 1));
+    ASSERT(ddup_insert(&ds, 0x0043, 1)); /* different station, same seq */
     return true;
 }
 
-static bool test_ddup_check_and_add_different_seq(void) {
+static bool test_ddup_insert_different_seq(void) {
     ddup_state_t ds;
     memset(&ds, 0, sizeof(ds));
     ds.enabled = false;
@@ -637,12 +648,12 @@ static bool test_ddup_check_and_add_different_seq(void) {
     iotdata_mesh_dedup_init(&ring);
     ds.dedup_ring = &ring;
 
-    ASSERT(ddup_check_and_add(&ds, 0x0042, 1));
-    ASSERT(ddup_check_and_add(&ds, 0x0042, 2)); /* same station, different seq */
+    ASSERT(ddup_insert(&ds, 0x0042, 1));
+    ASSERT(ddup_insert(&ds, 0x0042, 2)); /* same station, different seq */
     return true;
 }
 
-static bool test_ddup_check_and_add_with_pending(void) {
+static bool test_ddup_insert_with_pending(void) {
     ddup_state_t ds;
     memset(&ds, 0, sizeof(ds));
     ds.enabled = true;
@@ -651,16 +662,16 @@ static bool test_ddup_check_and_add_with_pending(void) {
     ds.dedup_ring = &ring;
     pthread_mutex_init(&ds.mutex, NULL);
 
-    ASSERT(ddup_check_and_add(&ds, 0x0042, 1));
+    ASSERT(ddup_insert(&ds, 0x0042, 1));
     ASSERT_EQ_INT(ds.pending_count, 1);
     ASSERT_EQ_INT(ds.pending[0].station_id, 0x0042u);
     ASSERT_EQ_INT(ds.pending[0].sequence, 1u);
 
     /* duplicate not added to pending */
-    ASSERT(!ddup_check_and_add(&ds, 0x0042, 1));
+    ASSERT(!ddup_insert(&ds, 0x0042, 1));
     ASSERT_EQ_INT(ds.pending_count, 1);
 
-    ASSERT(ddup_check_and_add(&ds, 0x0043, 2));
+    ASSERT(ddup_insert(&ds, 0x0043, 2));
     ASSERT_EQ_INT(ds.pending_count, 2);
 
     pthread_mutex_destroy(&ds.mutex);
@@ -677,13 +688,13 @@ static bool test_dedup_ring_overflow(void) {
 
     /* fill beyond capacity */
     for (int i = 0; i < IOTDATA_MESH_DEDUP_RING_SIZE + 10; i++)
-        ddup_check_and_add(&ds, (uint16_t)i, 1);
+        ddup_insert(&ds, (uint16_t)i, 1);
 
     /* first entries evicted -- should appear new again */
-    ASSERT(ddup_check_and_add(&ds, 0, 1));
+    ASSERT(ddup_insert(&ds, 0, 1));
 
     /* recent entries still present */
-    ASSERT(!ddup_check_and_add(&ds, (uint16_t)(IOTDATA_MESH_DEDUP_RING_SIZE + 9), 1));
+    ASSERT(!ddup_insert(&ds, (uint16_t)(IOTDATA_MESH_DEDUP_RING_SIZE + 9), 1));
     return true;
 }
 
@@ -713,8 +724,8 @@ static bool test_ddup_send_collect_with_delay(void) {
     ds.dedup_ring = &ring;
     pthread_mutex_init(&ds.mutex, NULL);
 
-    ddup_check_and_add(&ds, 0x0042, 1);
-    ddup_check_and_add(&ds, 0x0043, 2);
+    ddup_insert(&ds, 0x0042, 1);
+    ddup_insert(&ds, 0x0043, 2);
     ASSERT_EQ_INT(ds.pending_count, 2);
 
     /* collect immediately -- delay not elapsed */
@@ -776,10 +787,10 @@ static bool test_ddup_begin_disabled(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// ddup_send_to_peers batching
+// ddup_peers_send batching
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool test_ddup_send_to_peers_batching(void) {
+static bool test_ddup_peers_send_batching(void) {
     ddup_state_t ds;
     memset(&ds, 0, sizeof(ds));
     ds.enabled = true;
@@ -816,7 +827,7 @@ static bool test_ddup_send_to_peers_batching(void) {
     int send_fd = ddup_send_setup(&ds);
     ASSERT(send_fd >= 0);
 
-    ddup_send_to_peers(&ds, send_fd, entries, count);
+    ddup_peers_send(&ds, send_fd, entries, count);
 
     /* should have sent 2 batches */
     ASSERT_EQ_INT(ds.stat_send_cycles, 2u);
@@ -892,14 +903,14 @@ static bool test_ddup_peer_communication(void) {
     ASSERT(pthread_create(&tb, NULL, ddup_thread_func, &sb) == 0);
 
     /* A sees a packet */
-    ddup_check_and_add(&sa, 0x0042, 100);
+    ddup_insert(&sa, 0x0042, 100);
 
     /* wait for propagation */
     usleep(100000);
 
     /* B should now have this entry via UDP injection */
     pthread_mutex_lock(&sb.mutex);
-    bool is_new = iotdata_mesh_dedup_check_and_add(sb.dedup_ring, 0x0042, 100);
+    bool is_new = iotdata_mesh_dedup_insert(sb.dedup_ring, 0x0042, 100);
     pthread_mutex_unlock(&sb.mutex);
 
     ASSERT(!is_new);
@@ -955,19 +966,19 @@ static bool test_ddup_bidirectional_sync(void) {
     ASSERT(pthread_create(&tb, NULL, ddup_thread_func, &sb) == 0);
 
     /* A sees packet X, B sees packet Y */
-    ddup_check_and_add(&sa, 0x0042, 100);
-    ddup_check_and_add(&sb, 0x0043, 200);
+    ddup_insert(&sa, 0x0042, 100);
+    ddup_insert(&sb, 0x0043, 200);
 
     usleep(100000);
 
     /* A should have B's entry */
     pthread_mutex_lock(&sa.mutex);
-    bool a_has_b = !iotdata_mesh_dedup_check_and_add(sa.dedup_ring, 0x0043, 200);
+    bool a_has_b = !iotdata_mesh_dedup_insert(sa.dedup_ring, 0x0043, 200);
     pthread_mutex_unlock(&sa.mutex);
 
     /* B should have A's entry */
     pthread_mutex_lock(&sb.mutex);
-    bool b_has_a = !iotdata_mesh_dedup_check_and_add(sb.dedup_ring, 0x0042, 100);
+    bool b_has_a = !iotdata_mesh_dedup_insert(sb.dedup_ring, 0x0042, 100);
     pthread_mutex_unlock(&sb.mutex);
 
     ASSERT(a_has_b);
@@ -1023,14 +1034,14 @@ static bool test_ddup_three_gateway_sync(void) {
     }
 
     /* gateway 0 sees a packet */
-    ddup_check_and_add(&states[0], 0x0042, 500);
+    ddup_insert(&states[0], 0x0042, 500);
 
     usleep(150000);
 
     /* gateways 1 and 2 should have the entry */
     for (int i = 1; i < 3; i++) {
         pthread_mutex_lock(&states[i].mutex);
-        bool is_new = iotdata_mesh_dedup_check_and_add(states[i].dedup_ring, 0x0042, 500);
+        bool is_new = iotdata_mesh_dedup_insert(states[i].dedup_ring, 0x0042, 500);
         pthread_mutex_unlock(&states[i].mutex);
         ASSERT(!is_new);
     }
@@ -1048,7 +1059,7 @@ static bool test_ddup_three_gateway_sync(void) {
 // =========================================================================================================================================
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// Network + stat table tests.
+// netw + stat table tests.
 //
 // Both tables keep a hand-maintained `count` of their valid slots that the scan loops use to stop at
 // the last one. That invariant is not compiler-checkable and is updated wherever an entry is created,
@@ -1057,9 +1068,9 @@ static bool test_ddup_three_gateway_sync(void) {
 // only ever rise to the cap. The tables are large, hence the statics.
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static int netw_valid_slots(const network_t *n) {
+static int netw_valid_slots(const netw_t *n) {
     int c = 0;
-    for (int i = 0; i < NETWORK_MAX; i++)
+    for (int i = 0; i < NETW_MAX; i++)
         if (n->s[i].valid)
             c++;
     return c;
@@ -1067,70 +1078,70 @@ static int netw_valid_slots(const network_t *n) {
 #define ASSERT_COUNT_NETW(n) ASSERT((n)->count == netw_valid_slots(n))
 
 static bool test_netw_upsert_on_empty(void) {
-    static network_t net;
-    network_init(&net);
-    ASSERT(network_count(&net) == 0);
-    ASSERT(network_locate(&net, 0x111) == -1); /* lookup on an empty table */
-    const net_station_t *const e = network_upsert(&net, 0x111, 1000);
+    static netw_t net;
+    netw_init(&net);
+    ASSERT(netw_count(&net) == 0);
+    ASSERT(netw_locate(&net, 0x111) == -1); /* lookup on an empty table */
+    const netw_station_t *const e = netw_upsert(&net, 0x111, 1000);
     ASSERT(e != NULL && e->station == 0x111); /* must allocate, not refuse */
-    ASSERT_EQ_INT(network_count(&net), 1);
+    ASSERT_EQ_INT(netw_count(&net), 1);
     ASSERT_COUNT_NETW(&net);
-    ASSERT_EQ_INT(network_locate(&net, 0x111), 0);
+    ASSERT_EQ_INT(netw_locate(&net, 0x111), 0);
     return true;
 }
 
 static bool test_netw_upsert_in_place(void) {
-    static network_t net;
-    network_init(&net);
-    const net_station_t *const a = network_upsert(&net, 0x111, 1000);
-    const net_station_t *const b = network_upsert(&net, 0x111, 1001);
-    ASSERT(a == b);                        /* same entry */
-    ASSERT_EQ_INT(network_count(&net), 1); /* must NOT double-count */
+    static netw_t net;
+    netw_init(&net);
+    const netw_station_t *const a = netw_upsert(&net, 0x111, 1000);
+    const netw_station_t *const b = netw_upsert(&net, 0x111, 1001);
+    ASSERT(a == b);                     /* same entry */
+    ASSERT_EQ_INT(netw_count(&net), 1); /* must NOT double-count */
     ASSERT_EQ_INT((int)b->rx_count, 2);
     ASSERT_COUNT_NETW(&net);
     return true;
 }
 
 static bool test_netw_sequential_upserts(void) {
-    static network_t net;
-    network_init(&net);
-    (void)network_upsert(&net, 0x111, 1000);
-    (void)network_upsert(&net, 0x222, 1001); /* the free slot lies past the valid entries */
-    (void)network_upsert(&net, 0x333, 1002);
-    ASSERT_EQ_INT(network_count(&net), 3);
+    static netw_t net;
+    netw_init(&net);
+    (void)netw_upsert(&net, 0x111, 1000);
+    (void)netw_upsert(&net, 0x222, 1001); /* the free slot lies past the valid entries */
+    (void)netw_upsert(&net, 0x333, 1002);
+    ASSERT_EQ_INT(netw_count(&net), 3);
     ASSERT_COUNT_NETW(&net);
-    ASSERT_EQ_INT(network_locate(&net, 0x222), 1);
-    ASSERT_EQ_INT(network_locate(&net, 0x333), 2);
-    ASSERT_EQ_INT(network_locate(&net, 0x999), -1); /* absent, table non-empty */
+    ASSERT_EQ_INT(netw_locate(&net, 0x222), 1);
+    ASSERT_EQ_INT(netw_locate(&net, 0x333), 2);
+    ASSERT_EQ_INT(netw_locate(&net, 0x999), -1); /* absent, table non-empty */
     return true;
 }
 
 static bool test_netw_fill_and_evict_stalest(void) {
-    static network_t net;
-    network_init(&net);
-    (void)network_upsert(&net, 0x111, 1000); /* the stalest, once the table is full */
-    for (int i = 1; i < NETWORK_MAX; i++)
-        (void)network_upsert(&net, (uint16_t)(0x400 + i), 2000 + i);
-    ASSERT_EQ_INT(network_count(&net), NETWORK_MAX);
+    static netw_t net;
+    netw_init(&net);
+    (void)netw_upsert(&net, 0x111, 1000); /* the stalest, once the table is full */
+    for (int i = 1; i < NETW_MAX; i++)
+        (void)netw_upsert(&net, (uint16_t)(0x400 + i), 2000 + i);
+    ASSERT_EQ_INT(netw_count(&net), NETW_MAX);
     ASSERT_COUNT_NETW(&net);
-    (void)network_upsert(&net, 0xABC, 9000);
-    ASSERT_EQ_INT(network_count(&net), NETWORK_MAX); /* eviction reuses a slot: count saturates */
+    (void)netw_upsert(&net, 0xABC, 9000);
+    ASSERT_EQ_INT(netw_count(&net), NETW_MAX); /* eviction reuses a slot: count saturates */
     ASSERT_COUNT_NETW(&net);
-    ASSERT(network_locate(&net, 0xABC) >= 0);
-    ASSERT_EQ_INT(network_locate(&net, 0x111), -1); /* the stalest was the one evicted */
+    ASSERT(netw_locate(&net, 0xABC) >= 0);
+    ASSERT_EQ_INT(netw_locate(&net, 0x111), -1); /* the stalest was the one evicted */
     return true;
 }
 
 static bool test_netw_all_locatable(void) {
-    static network_t net;
-    network_init(&net);
-    for (int i = 0; i < NETWORK_MAX; i++)
-        (void)network_upsert(&net, (uint16_t)(0x500 + i), 1000 + i);
+    static netw_t net;
+    netw_init(&net);
+    for (int i = 0; i < NETW_MAX; i++)
+        (void)netw_upsert(&net, (uint16_t)(0x500 + i), 1000 + i);
     int found = 0; /* a scan bound that cut short would lose the later entries */
-    for (int i = 0; i < NETWORK_MAX; i++)
-        if (net.s[i].valid && network_locate(&net, net.s[i].station) == i)
+    for (int i = 0; i < NETW_MAX; i++)
+        if (net.s[i].valid && netw_locate(&net, net.s[i].station) == i)
             found++;
-    ASSERT_EQ_INT(found, NETWORK_MAX);
+    ASSERT_EQ_INT(found, NETW_MAX);
     ASSERT_COUNT_NETW(&net);
     return true;
 }
@@ -1147,14 +1158,14 @@ static int stat_valid_stations(const stat_state_t *s) {
 static int stat_valid_peers(const stat_state_t *s) {
     int c = 0;
     for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
-        if (s->mesh_peers[i].valid)
+        if (s->peers[i].valid)
             c++;
     return c;
 }
 #define ASSERT_COUNT_STAT(s) \
     do { \
         ASSERT((s)->stations_count == stat_valid_stations(s)); \
-        ASSERT((s)->mesh_peers_count == stat_valid_peers(s)); \
+        ASSERT((s)->peers_count == stat_valid_peers(s)); \
     } while (0)
 
 static bool test_stat_station_create_and_find(void) {
@@ -1206,14 +1217,14 @@ static bool test_stat_station_all_findable(void) {
 static bool test_stat_mesh_peer_create_and_update(void) {
     static stat_state_t s;
     memset(&s, 0, sizeof(s));
-    stat_on_mesh_peer(&s, 0xAAA, 1, 1, 0);
-    ASSERT_EQ_INT(s.mesh_peers_count, 1);
+    stat_on_peer(&s, 0xAAA, 1, 1, 0);
+    ASSERT_EQ_INT(s.peers_count, 1);
     ASSERT_COUNT_STAT(&s);
-    stat_on_mesh_peer(&s, 0xAAA, 2, 1, 0); /* same gateway -> update in place */
-    ASSERT_EQ_INT(s.mesh_peers_count, 1);
+    stat_on_peer(&s, 0xAAA, 2, 1, 0); /* same gateway -> update in place */
+    ASSERT_EQ_INT(s.peers_count, 1);
     ASSERT_COUNT_STAT(&s);
-    stat_on_mesh_peer(&s, 0xBBB, 1, 1, 0); /* second peer takes the next free slot */
-    ASSERT_EQ_INT(s.mesh_peers_count, 2);
+    stat_on_peer(&s, 0xBBB, 1, 1, 0); /* second peer takes the next free slot */
+    ASSERT_EQ_INT(s.peers_count, 2);
     ASSERT_COUNT_STAT(&s);
     return true;
 }
@@ -1222,11 +1233,11 @@ static bool test_stat_mesh_peer_fill_and_evict(void) {
     static stat_state_t s;
     memset(&s, 0, sizeof(s));
     for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
-        stat_on_mesh_peer(&s, (uint16_t)(0xB00 + i), 1, 1, 0);
-    ASSERT_EQ_INT(s.mesh_peers_count, STAT_MESH_PEERS_MAX);
+        stat_on_peer(&s, (uint16_t)(0xB00 + i), 1, 1, 0);
+    ASSERT_EQ_INT(s.peers_count, STAT_MESH_PEERS_MAX);
     ASSERT_COUNT_STAT(&s);
-    stat_on_mesh_peer(&s, 0xCCC, 1, 1, 0); /* full -> evict, count saturates */
-    ASSERT_EQ_INT(s.mesh_peers_count, STAT_MESH_PEERS_MAX);
+    stat_on_peer(&s, 0xCCC, 1, 1, 0); /* full -> evict, count saturates */
+    ASSERT_EQ_INT(s.peers_count, STAT_MESH_PEERS_MAX);
     ASSERT_COUNT_STAT(&s);
     return true;
 }
@@ -1242,18 +1253,18 @@ int main(void) {
     RUN_TEST(mesh_begin_disabled);
     RUN_TEST(mesh_begin_enabled);
     RUN_TEST(mesh_begin_no_packet_handler);
-    RUN_TEST(mesh_beacon_send_ok);
-    RUN_TEST(mesh_beacon_send_fail);
+    RUN_TEST(mesh_transmit_beacon_ok);
+    RUN_TEST(mesh_transmit_beacon_fail);
     RUN_TEST(mesh_beacon_generation_wraps);
-    RUN_TEST(mesh_ack_send_ok);
-    RUN_TEST(mesh_handle_forward_new);
-    RUN_TEST(mesh_handle_forward_duplicate);
-    RUN_TEST(mesh_handle_forward_no_dedup);
-    RUN_TEST(mesh_handle_forward_too_short);
-    RUN_TEST(mesh_handle_forward_disabled_no_ack);
-    RUN_TEST(mesh_handle_beacon_rx);
-    RUN_TEST(mesh_handle_route_error_rx);
-    RUN_TEST(mesh_handle_pong_rx);
+    RUN_TEST(mesh_transmit_ack_ok);
+    RUN_TEST(mesh_receive_forward_new);
+    RUN_TEST(mesh_receive_forward_duplicate);
+    RUN_TEST(mesh_receive_forward_no_dedup);
+    RUN_TEST(mesh_receive_forward_too_short);
+    RUN_TEST(mesh_receive_forward_disabled_no_ack);
+    RUN_TEST(mesh_receive_beacon_rx);
+    RUN_TEST(mesh_receive_route_error_rx);
+    RUN_TEST(mesh_receive_pong_rx);
     RUN_TEST(mesh_seq_increments);
     RUN_TEST(mesh_end_noop);
 
@@ -1267,23 +1278,23 @@ int main(void) {
     RUN_TEST(ddup_peers_parse_empty);
     RUN_TEST(ddup_peers_parse_whitespace);
     RUN_TEST(ddup_peers_parse_max);
-    RUN_TEST(ddup_check_and_add_new);
-    RUN_TEST(ddup_check_and_add_duplicate);
-    RUN_TEST(ddup_check_and_add_different_station);
-    RUN_TEST(ddup_check_and_add_different_seq);
-    RUN_TEST(ddup_check_and_add_with_pending);
+    RUN_TEST(ddup_insert_new);
+    RUN_TEST(ddup_insert_duplicate);
+    RUN_TEST(ddup_insert_different_station);
+    RUN_TEST(ddup_insert_different_seq);
+    RUN_TEST(ddup_insert_with_pending);
     RUN_TEST(dedup_ring_overflow);
     RUN_TEST(ddup_send_collect_empty);
     RUN_TEST(ddup_send_collect_with_delay);
     RUN_TEST(ddup_recv_setup_and_teardown);
     RUN_TEST(ddup_send_setup_and_teardown);
     RUN_TEST(ddup_begin_disabled);
-    RUN_TEST(ddup_send_to_peers_batching);
+    RUN_TEST(ddup_peers_send_batching);
     RUN_TEST(ddup_peer_communication);
     RUN_TEST(ddup_bidirectional_sync);
     RUN_TEST(ddup_three_gateway_sync);
 
-    printf("\n=== Network Table Tests ===\n\n");
+    printf("\n=== Netw Table Tests ===\n\n");
 
     RUN_TEST(netw_upsert_on_empty);
     RUN_TEST(netw_upsert_in_place);
