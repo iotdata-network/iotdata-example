@@ -96,7 +96,7 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
     cJSON *const root = cJSON_ParseWithLength((const char *)payload, (size_t)len);
     if (root == NULL) {
         st->stat_req_bad++;
-        PRINTF_ERROR("manage: bad JSON request (%d bytes)\n", len);
+        PRINTF_ERROR("ctrl: bad JSON request (%d bytes)\n", len);
         return;
     }
 
@@ -131,20 +131,20 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
             if (found != IOTDATA_NODE_TLV_NONE && iotdata_node_tlv_control_key(found) == IOTDATA_NODE_TLV_NONE) {
                 snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "node: '%s' cannot be requested", want);
                 (void)mqtt_send(st->topic_resp, st->_buffer_resp, (int)strlen(st->_buffer_resp));
-                PRINTF_ERROR("manage: %s\n", st->_buffer_resp);
+                PRINTF_ERROR("ctrl: %s\n", st->_buffer_resp);
                 cJSON_Delete(root);
                 return;
             }
             if (found == IOTDATA_NODE_TLV_NONE) {
                 snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "node: unknown tlv '%s'", want);
                 (void)mqtt_send(st->topic_resp, st->_buffer_resp, (int)strlen(st->_buffer_resp));
-                PRINTF_ERROR("manage: %s\n", st->_buffer_resp);
+                PRINTF_ERROR("ctrl: %s\n", st->_buffer_resp);
                 cJSON_Delete(root);
                 return;
             }
             iotdata_kvr_add_flag(&kv, iotdata_node_tlv_control_key(found));
         }
-        PRINTF_INFO("manage: node cmd='%s' target=%04X -> %zu byte control\n", cmd, (unsigned)target, kv.len);
+        PRINTF_INFO("ctrl: node cmd='%s' target=%04X -> %zu byte control\n", cmd, (unsigned)target, kv.len);
         /* staged, NOT executed here: this is the mosquitto thread, and node_on_mqtt() transmits
            and mutates node state the main loop owns */
         if (kv.len > 0 && kv.len <= CTRL_MANAGE_BUF_MAX) {
@@ -194,7 +194,7 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
                 snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: unknown cmd '%s'", cmd);
             }
             (void)mqtt_send(st->topic_resp, st->_buffer_resp, (int)strlen(st->_buffer_resp));
-            PRINTF_INFO("manage: diag local cmd='%s' target=%04X -> %s\n", cmd, (unsigned)target, st->_buffer_resp);
+            PRINTF_INFO("ctrl: diag local cmd='%s' target=%04X -> %s\n", cmd, (unsigned)target, st->_buffer_resp);
         }
         if (target == st->station_id) { /* unicast to the gateway itself — done, nothing to air */
             cJSON_Delete(root);
@@ -239,9 +239,9 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
     else if (strcmp(cmd, "diag-dump") == 0)
         n = iotdata_mesh_pack_manage_diag_dump(buf, st->station_id, seq, target);
     else
-        PRINTF_ERROR("manage: unknown cmd '%s'\n", cmd);
+        PRINTF_ERROR("ctrl: unknown cmd '%s'\n", cmd);
     if (n > 0)
-        PRINTF_INFO("manage: request cmd='%s' target=%04X station=%04X -> MANAGE (%d bytes)\n", cmd, (unsigned)target, (unsigned)station, n);
+        PRINTF_INFO("ctrl: request cmd='%s' target=%04X station=%04X -> MANAGE (%d bytes)\n", cmd, (unsigned)target, (unsigned)station, n);
     cJSON_Delete(root);
 
     if (n <= 0 || n > CTRL_MANAGE_BUF_MAX) {
@@ -282,10 +282,10 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
         } else {
             if (st->tx != NULL && st->tx(buf, n)) {
                 st->stat_tx++;
-                PRINTF_INFO("manage: tx MANAGE (%d bytes)\n", n);
+                PRINTF_INFO("ctrl: tx MANAGE (%d bytes)\n", n);
             } else {
                 st->stat_tx_err++;
-                PRINTF_ERROR("manage: tx MANAGE failed (%d bytes)\n", n);
+                PRINTF_ERROR("ctrl: tx MANAGE failed (%d bytes)\n", n);
             }
         }
     }
@@ -306,7 +306,7 @@ bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, uint16_t station_id,
     st->station_id = station_id;
     st->tx = tx;
     if (pthread_mutex_init(&st->lock, NULL) != 0) {
-        PRINTF_ERROR("manage: mutex init failed\n");
+        PRINTF_ERROR("ctrl: mutex init failed\n");
         return false;
     }
     snprintf(st->topic_req, sizeof(st->topic_req), "%s" CTRL_MANAGE_TOPIC, topic_prefix);
@@ -314,10 +314,10 @@ bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, uint16_t station_id,
 
     g_ctrl = st;
     if (!mqtt_subscribe(st->topic_req, MQTT_PUBLISH_QOS, ctrl_on_message)) {
-        PRINTF_ERROR("manage: subscribe to '%s' failed\n", st->topic_req);
+        PRINTF_ERROR("ctrl: subscribe to '%s' failed\n", st->topic_req);
         return false;
     }
-    PRINTF_INFO("manage: station=%04" PRIX16 ", request-topic='%s'\n", station_id, st->topic_req);
+    PRINTF_INFO("ctrl: station=%04" PRIX16 ", request-topic='%s'\n", station_id, st->topic_req);
     return true;
 }
 

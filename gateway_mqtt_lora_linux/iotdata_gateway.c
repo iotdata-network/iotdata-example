@@ -186,23 +186,23 @@ void __sleep_ms(const uint32_t ms) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define IOTDATA_GATEWAY_VERSION    "1.0.0"
+#define IOTDATA_GATEWAY_VERSION       "1.0.0"
 
-#define CONFIG_FILE_DEFAULT        "iotdata_gateway.cfg"
+#define CONFIG_FILE_DEFAULT           "iotdata_gateway.cfg"
 
-#define SERIAL_PORT_DEFAULT        "/dev/e22900t22u"
-#define SERIAL_RATE_DEFAULT        9600
-#define SERIAL_BITS_DEFAULT        SERIAL_8N1
+#define SERIAL_PORT_DEFAULT           "/dev/e22900t22u"
+#define SERIAL_RATE_DEFAULT           9600
+#define SERIAL_BITS_DEFAULT           SERIAL_8N1
 
-#define STAT_INTERVAL_DEFAULT      (5 * 60)
+#define STAT_INTERVAL_DEFAULT         (5 * 60)
 /* Channel RSSI is the ambient noise floor, read by a UART command round-trip to the module -- it
    is not the per-packet RSSI (that arrives appended to each frame and stays on by default).
    Nothing consumes the channel figure, so it is off unless asked for: a non-zero value is both
    "enabled" and the poll interval in seconds. */
 #define INTERVAL_RSSI_CHANNEL_DEFAULT 0
-#define INTERVAL_BEACON_DEFAULT    60 /* seconds */
+#define INTERVAL_BEACON_DEFAULT       60 /* seconds */
 
-#define GATEWAY_STATION_ID_DEFAULT 1
+#define GATEWAY_STATION_ID_DEFAULT    1
 
 #include "config_linux.h"
 
@@ -344,7 +344,7 @@ void lora_config_populate(serial_config_t *cfg_serial, e22900t22_config_t *cfg) 
     cfg->relay_enabled = E22900T22_CONFIG_RELAY_ENABLED_DEFAULT;
     cfg->listen_before_transmit = config_get_bool("lora-listen-before-transmit", E22900T22_CONFIG_LISTEN_BEFORE_TRANSMIT);
     cfg->rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT) > 0; /* off: also stops the module computing it */
-    cfg->rssi_packet = config_get_bool("lora-rssi-packet", E22900T22_CONFIG_RSSI_PACKET_DEFAULT); // XXX
+    cfg->rssi_packet = config_get_bool("lora-rssi-packet", E22900T22_CONFIG_RSSI_PACKET_DEFAULT);   // XXX
     cfg->read_timeout_command = (uint32_t)config_get_integer("lora-read-timeout-command", E22900T22_CONFIG_READ_TIMEOUT_COMMAND_DEFAULT);
     cfg->read_timeout_packet = (uint32_t)config_get_integer("lora-read-timeout-packet", E22900T22_CONFIG_READ_TIMEOUT_PACKET_DEFAULT);
     cfg->debug = config_get_bool("lora-debug", false);
@@ -367,13 +367,13 @@ void mqtt_config_populate(mqtt_config_t *cfg) {
     cfg->client = config_get_string("mqtt-client", MQTT_CLIENT_DEFAULT);
     cfg->server = config_get_string("mqtt-server", MQTT_SERVER_DEFAULT);
     cfg->tls_insecure = config_get_bool("mqtt-tls-insecure", MQTT_TLS_DEFAULT);
-    cfg->use_synchronous = MQTT_SYNCHRONOUS_DEFAULT;
+    cfg->synchronous = MQTT_SYNCHRONOUS_DEFAULT;
     cfg->reconnect_delay = (unsigned int)config_get_integer("mqtt-reconnect-delay", MQTT_RECONNECT_DELAY_DEFAULT);
     cfg->reconnect_delay_max = (unsigned int)config_get_integer("mqtt-reconnect-delay-max", MQTT_RECONNECT_DELAY_MAX_DEFAULT);
     cfg->debug = config_get_bool("mqtt-debug", false);
 
-    PRINTF_INFO("config: mqtt: client=%s, server=%s, tls-insecure=%s, synchronous=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, cfg->tls_insecure ? "on" : "off", cfg->use_synchronous ? "on" : "off",
-                cfg->reconnect_delay, cfg->reconnect_delay_max);
+    PRINTF_INFO("config: mqtt: client=%s, server=%s, tls=%s, sync=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, !cfg->tls_insecure ? "on" : "off", cfg->synchronous ? "on" : "off", cfg->reconnect_delay,
+                cfg->reconnect_delay_max);
 }
 
 void iotdata_mesh_config_populate(mesh_state_t *cfg) {

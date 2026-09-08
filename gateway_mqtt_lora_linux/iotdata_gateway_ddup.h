@@ -127,11 +127,11 @@ void ddup_peers_resolve(ddup_state_t *st) {
             peer->resolved = true;
             st->stat_peers_resolved++;
             freeaddrinfo(res);
-            PRINTF_INFO("dedup: peer[%d] %s:%" PRIu16 " resolved\n", i, peer->host, peer->port);
+            PRINTF_INFO("ddup: peer[%d] %s:%" PRIu16 " resolved\n", i, peer->host, peer->port);
         } else {
             peer->resolved = false;
             st->stat_peers_unresolved++;
-            PRINTF_ERROR("dedup: peer[%d] %s:%" PRIu16 " resolution failed: %s\n", i, peer->host, peer->port, gai_strerror(err));
+            PRINTF_ERROR("ddup: peer[%d] %s:%" PRIu16 " resolution failed: %s\n", i, peer->host, peer->port, gai_strerror(err));
         }
     }
 }
@@ -142,13 +142,13 @@ void ddup_peers_resolve(ddup_state_t *st) {
 int ddup_recv_setup(ddup_state_t *st) {
     const int recv_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (recv_fd < 0) {
-        PRINTF_ERROR("dedup: recv socket: %s\n", strerror(errno));
+        PRINTF_ERROR("ddup: recv socket: %s\n", strerror(errno));
         return -1;
     }
     int optval = 1;
     setsockopt(recv_fd, SOL_SOCKET, SO_REUSEADDR, &optval, (socklen_t)sizeof(optval));
     if (bind(recv_fd, (const struct sockaddr *)&(const struct sockaddr_in){ .sin_family = AF_INET, .sin_port = htons(st->port), .sin_addr.s_addr = htonl(INADDR_ANY) }, (socklen_t)sizeof(const struct sockaddr_in)) < 0) {
-        PRINTF_ERROR("dedup: bind port %" PRIu16 ": %s\n", st->port, strerror(errno));
+        PRINTF_ERROR("ddup: bind port %" PRIu16 ": %s\n", st->port, strerror(errno));
         close(recv_fd);
         return -1;
     }
@@ -179,7 +179,7 @@ void ddup_peers_recv(ddup_state_t *st, int recv_fd) {
                 st->stat_recv_cycles++;
                 st->stat_recv_entries += (uint32_t)entry_count;
                 if (st->debug)
-                    PRINTF_INFO("dedup: rx from gateway=%04" PRIX16 ", entries=%d\n", ddup_packet_get_gateway_id(st->_buffer_packet), entry_count);
+                    PRINTF_INFO("ddup: rx from gateway=%04" PRIX16 ", entries=%d\n", ddup_packet_get_gateway_id(st->_buffer_packet), entry_count);
             }
         }
     }
@@ -190,7 +190,7 @@ void ddup_peers_recv(ddup_state_t *st, int recv_fd) {
 int ddup_send_setup(__attribute__((unused)) ddup_state_t *st) {
     const int send_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (send_fd < 0) {
-        PRINTF_ERROR("dedup: send socket: %s\n", strerror(errno));
+        PRINTF_ERROR("ddup: send socket: %s\n", strerror(errno));
         return -1;
     }
     return send_fd;
@@ -239,7 +239,7 @@ void ddup_peers_send(ddup_state_t *st, int send_fd, iotdata_mesh_dedup_entry_t *
         send_offset += entry_count;
     }
     if (st->debug)
-        PRINTF_INFO("dedup: tx %d entries to %d peers\n", send_count, st->peers_count);
+        PRINTF_INFO("ddup: tx %d entries to %d peers\n", send_count, st->peers_count);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -295,17 +295,17 @@ bool ddup_begin(ddup_state_t *st, uint16_t gateway_id, iotdata_mesh_dedup_ring_t
     // XXX, mesh code uses the dedup ring as well.
     st->dedup_ring = dedup_ring;
     if (!st->enabled) {
-        PRINTF_INFO("dedup: disabled, not starting\n");
+        PRINTF_INFO("ddup: disabled, not starting\n");
         return true;
     }
     st->running = running;
     st->gateway_id = gateway_id;
-    PRINTF_INFO("dedup: enabled, port=%" PRIu16 ", peers=%d, gateway_id=%04" PRIX16 ", delay=%" PRIu32 "ms\n", st->port, st->peers_count, st->gateway_id, st->delay_ms);
+    PRINTF_INFO("ddup: enabled, port=%" PRIu16 ", peers=%d, gateway_id=%04" PRIX16 ", delay=%" PRIu32 "ms\n", st->port, st->peers_count, st->gateway_id, st->delay_ms);
     ddup_peers_resolve(st);
     pthread_mutex_init(&st->mutex, NULL);
     if (pthread_create(&st->thread, NULL, ddup_thread_func, st) != 0) {
         st->enabled = false;
-        PRINTF_ERROR("dedup: thread create failed: %s\n", strerror(errno));
+        PRINTF_ERROR("ddup: thread create failed: %s\n", strerror(errno));
         pthread_mutex_destroy(&st->mutex);
         return false;
     }

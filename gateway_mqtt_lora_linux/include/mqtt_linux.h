@@ -17,7 +17,7 @@
 typedef struct {
     const char *server;
     const char *client;
-    bool use_synchronous;
+    bool synchronous;
     bool tls_insecure;
     unsigned int reconnect_delay;
     unsigned int reconnect_delay_max;
@@ -228,7 +228,7 @@ bool mqtt_begin(const mqtt_config_t *cfg) {
         mosq = NULL;
         return false;
     }
-    mqtt_synchronous = cfg->use_synchronous;
+    mqtt_synchronous = cfg->synchronous;
     if (!mqtt_synchronous && (result = mosquitto_loop_start(mosq)) != MOSQ_ERR_SUCCESS) {
         PRINTF_ERROR("mqtt: error starting loop: %s\n", mosquitto_strerror(result));
         mosquitto_disconnect(mosq);

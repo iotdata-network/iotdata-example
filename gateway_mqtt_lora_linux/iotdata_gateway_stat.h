@@ -196,7 +196,7 @@ bool stat_begin(stat_state_t *s, const char *version, uint16_t gateway_id, const
     s->link.packet_rate_idx = lora_config->packet_rate;
     s->link.transmit_power_idx = lora_config->transmit_power;
 
-    PRINTF_INFO("stats: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", s->gateway_id, s->link.name, s->link.channel, s->link.frequency_khz);
+    PRINTF_INFO("stat: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", s->gateway_id, s->link.name, s->link.channel, s->link.frequency_khz);
 
     return true;
 }
@@ -678,7 +678,7 @@ void stat_publish(const stat_state_t *s, const mesh_state_t *mesh, const ddup_st
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void stat_display(stat_state_t *s, const mesh_state_t *mesh, const ddup_state_t *dedup) {
-    PRINTF_INFO("%s\n", stat_build_stat_string(s->_buffer_stat, sizeof(s->_buffer_stat), s, mesh, dedup));
+    PRINTF_INFO("stat: %s\n", stat_build_stat_string(s->_buffer_stat, sizeof(s->_buffer_stat), s, mesh, dedup));
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
