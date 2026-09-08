@@ -4,9 +4,9 @@
 
 #define NODE_KV_MAX     200 /* a kvr payload we build; a TLV caps at 255 anyway */
 #define NODE_PACKET_MAX 240
-#define NODE_TYPE_COUNT 8 /* types are 0x00..0x07; index by type for per-type state */
-#define NODE_JSON_MAX   1024
+#define NODE_TYPE_MAX   15 /* types are 0x00..0x0F; index by type for per-type state */
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef bool (*node_tx_handler_t)(const uint8_t *packet, const int length);
@@ -16,18 +16,18 @@ typedef struct {
     uint16_t sequence;   /* our packet sequence for reports we originate */
 
     /* CONFIG: reporting cadence, indexed by TLV type. 0 = do not send periodically. */
-    uint16_t period[NODE_TYPE_COUNT];
-    time_t period_last[NODE_TYPE_COUNT];
+    uint16_t period[NODE_TYPE_MAX];
+    time_t period_last[NODE_TYPE_MAX];
     uint16_t startup; /* IOTDATA_NODE_STARTUP_* bitmask, emitted once when we come up */
     bool startup_done;
 
     /* what we report ON: borrowed, not owned */
     const char *version;
     const stat_state_t *stat;
-    blackbox_handle_t *blackbox;
+    bbox_state_t *bbox;
 
     /* how we answer */
-    node_tx_handler_t tx; /* radio; may be NULL */
+    node_tx_handler_t tx; /* radio */
     char topic_resp[128]; /* mqtt */
 
     /* down frames we are holding for nodes that were not listening when we sent them */
@@ -83,9 +83,7 @@ static int node_build_variant(__attribute__((unused)) const node_state_t *st, ui
 static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t size) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
-    const time_t now = time(NULL);
-    const uint32_t uptime = (st->stat != NULL && st->stat->start_time > 0) ? (uint32_t)(now - st->stat->start_time) : 0;
-    iotdata_kvr_add_u32(&kv, IOTDATA_NODE_STATUS_UPTIME, uptime);
+    iotdata_kvr_add_u32(&kv, IOTDATA_NODE_STATUS_UPTIME, st->stat->start_time > 0 ? (uint32_t)(time(NULL) - st->stat->start_time) : 0);
     iotdata_kvr_add_u8(&kv, IOTDATA_NODE_STATUS_REASON, IOTDATA_NODE_REASON_UNKNOWN);
     return kv.overflow ? -1 : (int)kv.len;
 }
@@ -119,13 +117,12 @@ static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t s
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
     iotdata_kvr_add_u8(&kv, IOTDATA_NODE_DIAGNOSTICS_TYPE, IOTDATA_NODE_DIAG_BLACKBOX);
-    if (st->blackbox != NULL)
-        while (blackbox_pull(st->blackbox, cursor, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
-            const size_t n = strlen(st->_buffer_blackbox_rec);
-            if (kv.len + 2u + n > size)
-                break;
-            iotdata_kvr_add(&kv, IOTDATA_NODE_DIAGNOSTICS_DATA, st->_buffer_blackbox_rec, (uint8_t)n);
-        }
+    while (blackbox_pull(&st->bbox->handle, cursor, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
+        const size_t n = strlen(st->_buffer_blackbox_rec);
+        if (kv.len + 2u + n > size)
+            break;
+        iotdata_kvr_add(&kv, IOTDATA_NODE_DIAGNOSTICS_DATA, st->_buffer_blackbox_rec, (uint8_t)n);
+    }
     return kv.overflow ? -1 : (int)kv.len;
 }
 
@@ -156,8 +153,8 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
     size_t cur = 0;
     uint8_t key, vlen;
     const uint8_t *val;
-    char namebuf[16];
     while (iotdata_kvr_next(kvbuf, kvlen, &cur, &key, &val, &vlen)) {
+        char namebuf[4 + 1]; // XXX
         const char *name = iotdata_node_tlv_key_name(type, key);
         if (name == NULL)
             name = snprintf_inline(namebuf, sizeof(namebuf), "0x%02X", key);
@@ -191,8 +188,8 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
 static void node_publish_from(node_state_t *st, const uint16_t station, const uint8_t type, const uint8_t *kvbuf, const size_t kvlen) {
     cJSON *root = cJSON_CreateObject();
     if (root) {
-        char idbuf[8];
-        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%04" PRIX16, station));
+        char buf[4 + 1];
+        cJSON_AddStringToObject(root, "station", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, station));
         cJSON_AddStringToObject(root, "tlv", iotdata_node_tlv_name(type) ? iotdata_node_tlv_name(type) : "?");
         cJSON *data = cJSON_AddObjectToObject(root, "data");
         if (data != NULL)
@@ -207,28 +204,19 @@ static void node_publish_from(node_state_t *st, const uint16_t station, const ui
     }
 }
 
-static bool node_report(node_state_t *st, const uint8_t type, const bool on_radio) {
+static bool node_report(node_state_t *st, const uint8_t type) {
     const int kvlen = node_build(st, type, st->_buffer_kv, sizeof(st->_buffer_kv));
     if (kvlen < 0) /* not 0: an empty payload is a legitimate report */
         return false;
     st->stat_reports++;
     node_publish_from(st, st->station_id, type, st->_buffer_kv, (uint8_t)kvlen);
-    if (on_radio && st->tx != NULL) { /* also answer on the wire the request arrived on */
-        if (iotdata_encode_begin(&st->_iotdata_enc, st->_buffer_packet, sizeof(st->_buffer_packet), 0, st->station_id, st->sequence) == IOTDATA_OK &&
-            iotdata_encode_tlv(&st->_iotdata_enc, type, st->_buffer_kv, (uint8_t)kvlen) == IOTDATA_OK) {
-            size_t len = 0;
-            st->sequence = iotdata_sequence_next(st->sequence);
-            if (iotdata_encode_end(&st->_iotdata_enc, &len) == IOTDATA_OK)
-                (void)st->tx(st->_buffer_packet, (int)len);
-        }
-    }
     return true;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const size_t kvlen, const bool on_radio) {
+static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const size_t kvlen) {
     size_t cur = 0;
     uint8_t key, vlen;
     const uint8_t *val;
@@ -236,7 +224,7 @@ static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const s
         const uint8_t want = iotdata_node_tlv_control_type(key);
         if (want != IOTDATA_NODE_TLV_NONE) { /* a request: send the corresponding report */
             st->stat_requests++;
-            if (!node_report(st, want, on_radio))
+            if (!node_report(st, want))
                 PRINTF_INFO("node: request for %s -- nothing to report\n", iotdata_node_tlv_name(want) ? iotdata_node_tlv_name(want) : "?");
         } else {
             switch (key) {
@@ -262,8 +250,6 @@ static bool node_addressed_to_us(const node_state_t *st, const uint16_t station)
 }
 
 static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t kvlen, const uint16_t target) {
-    if (st->tx == NULL)
-        return false;
     size_t len = 0;
     if (iotdata_encode_begin(&st->_iotdata_enc, st->_buffer_packet, sizeof(st->_buffer_packet), 0, target, IOTDATA_SEQUENCE_DOWN) != IOTDATA_OK)
         return false;
@@ -288,7 +274,7 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
     if (iotdata_node_receive_find(&st->_iotdata_dec, &rx) && iotdata_down_holds(&st->down, station)) {
         size_t held_len = 0;
         const uint8_t *const held = iotdata_down_deliver(&st->down, station, &held_len);
-        if (held != NULL && st->tx != NULL && iotdata_node_receive_accepts(&rx, IOTDATA_NODE_TLV_CONTROL)) {
+        if (held != NULL && iotdata_node_receive_accepts(&rx, IOTDATA_NODE_TLV_CONTROL)) {
             PRINTF_INFO("node: %04" PRIX16 " is listening -> delivering %zu byte(s) held\n", station, held_len);
             (void)st->tx(held, (int)held_len);
         }
@@ -311,7 +297,7 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
 static void node_on_mqtt(node_state_t *const st, const uint8_t *kvbuf, const size_t kvlen, const uint16_t target) {
     if (node_addressed_to_us(st, target)) {
         st->stat_rx++;
-        node_process_control(st, kvbuf, kvlen, false);
+        node_process_control(st, kvbuf, kvlen);
     }
     if (target != st->station_id)
         (void)node_send_down(st, kvbuf, kvlen, target);
@@ -333,27 +319,29 @@ static void node_tick(node_state_t *const st) {
         };
         for (size_t i = 0; i < sizeof(once) / sizeof(once[0]); i++)
             if (st->startup & once[i].bit)
-                (void)node_report(st, once[i].type, false);
+                (void)node_report(st, once[i].type);
     }
-    for (uint8_t type = 1; type < NODE_TYPE_COUNT; type++) {
+    for (uint8_t type = 1; type < (uint8_t)(sizeof(st->period) / sizeof(st->period[0])); type++) {
         if (st->period[type] == 0)
             continue;
         if (st->period_last[type] == 0)
             st->period_last[type] = now; /* prime: first report after one full interval */
         else if ((uint32_t)(now - st->period_last[type]) >= st->period[type]) {
             st->period_last[type] = now;
-            (void)node_report(st, type, false);
+            (void)node_report(st, type);
         }
     }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool node_begin(node_state_t *st, const uint16_t station_id, const char *version, const stat_state_t *stat, blackbox_handle_t *blackbox, node_tx_handler_t tx, const char *topic_prefix) {
+static bool node_begin(node_state_t *st, const uint16_t station_id, const char *version, const stat_state_t *stat, bbox_state_t *bbox, node_tx_handler_t tx, const char *topic_prefix) {
+    assert(version && stat && bbox && tx && topic_prefix);
     st->station_id = station_id;
     st->version = version;
     st->stat = stat;
-    st->blackbox = blackbox;
+    st->bbox = bbox;
     st->tx = tx;
     iotdata_down_init(&st->down);
     snprintf(st->topic_resp, sizeof(st->topic_resp), "%s/node/resp", topic_prefix ? topic_prefix : "iotdata");

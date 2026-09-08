@@ -2,6 +2,9 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 typedef struct {
     const char *mqtt_topic_prefix;
     bool capture_rssi_packet;
@@ -95,66 +98,65 @@ void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, in
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int packet_length, __attribute__((unused)) uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, uint8_t packet_rssi) {
+    const time_t now = time(NULL);
     const uint8_t ctrl_type = iotdata_mesh_peek_ctrl_type(packet_buffer, packet_length);
     if (st->state_mesh->debug)
         PRINTF_INFO("exec: mesh rx %s from station=%04" PRIX16 ", sequence=%" PRIu16 " (%d bytes)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id, sequence, packet_length);
-    // Track the sender's whole transmission stream (sender_seq is shared across all mesh frame
-    // types), so tx.gaps = frames of any type we missed = relay->gateway link loss.
-    netw_note_transmit(&st->network, station_id, sequence, time(NULL));
+    netw_note_transmit(&st->network, station_id, sequence, now);
     switch (ctrl_type) {
     case IOTDATA_MESH_CTRL_FORWARD: {
-        // Peek the inner header ourselves so we can record the mesh reception for BOTH new and
-        // duplicate forwards (mesh_receive_forward returns false on a duplicate and only hands back
-        // `inner` on a new one). This is a cheap header parse, not a second dedup.
         iotdata_mesh_forward_t fw;
-        if (iotdata_mesh_unpack_forward(packet_buffer, packet_length, &fw)) {
+        if (mesh_receive_forward_r(st->state_mesh, packet_buffer, packet_length, &fw)) {
+            const bool is_new = (st->state_mesh->dedup_handler == NULL || st->state_mesh->dedup_handler(st->state_mesh->dedup_handler_ctx, fw.origin_station, fw.origin_sequence));
+            if (is_new)
+                st->state_mesh->stat_forwards_unwrapped++;
+            else {
+                st->state_mesh->stat_duplicates++;
+                if (st->state_mesh->debug)
+                    PRINTF_INFO("exec: mesh FORWARD duplicate suppressed origin={station=%04" PRIX16 ", sequence=%" PRIu16 "}, inner-length=%d\n", fw.origin_station, fw.origin_sequence, fw.inner_len);
+            }
+            if (st->state_mesh->enabled)
+                mesh_transmit_ack(st->state_mesh, fw.origin_station, fw.origin_sequence);
+            netw_note_forward(&st->network, fw.sender_station, now); /* the relay's forwarding load */
             uint8_t inner_variant = 0;
             uint16_t inner_station = 0, inner_sequence = 0;
             const bool inner_ok = (iotdata_peek(fw.inner_packet, (size_t)fw.inner_len, &inner_variant, &inner_station, &inner_sequence) == IOTDATA_OK);
-            const uint8_t *inner;
-            int inner_len;
-            // mesh_receive_forward is the single dedup + ACK point for forwards; its return is new-vs-dup.
-            const bool is_new = mesh_receive_forward(st->state_mesh, packet_buffer, packet_length, &inner, &inner_len);
-            netw_note_forward(&st->network, fw.sender_station, time(NULL)); /* the relay's forwarding load */
-            if (inner_ok)                                                   /* count the reception (new or duplicate) against the ORIGIN sensor; no rssi (that hop is relay->gateway) */
-                netw_note_receive(&st->network, fw.origin_station, inner_variant, fw.origin_sequence, NETW_PATH_MESH, is_new, 0, fw.sender_station, time(NULL));
+            if (inner_ok) /* no rssi: that hop is relay->gateway, not sensor->gateway */
+                netw_note_receive(&st->network, fw.origin_station, inner_variant, fw.origin_sequence, NETW_PATH_MESH, is_new, 0, fw.sender_station, now);
             if (is_new) {
-                if (!inner_ok) {
+                if (inner_ok)
+                    process_sensor_packet(st, fw.inner_packet, fw.inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi);
+                else {
                     PRINTF_ERROR("exec: mesh FORWARD inner packet peek failed (len=%d)\n", fw.inner_len);
                     stat_on_link_rx_drop(st->state_stat);
-                } else
-                    // rssi_packet on a relayed packet is the RELAY->gateway hop, not sensor->gateway —
-                    // read it alongside "via":"mesh" (and the differing station id) for which link it measures.
-                    process_sensor_packet(st, inner, inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi);
+                }
             }
-        } else {
-            /* the handler below never runs on this path, so the frame is accounted for here */
-            mesh_stat_frame(st->state_mesh, IOTDATA_MESH_CTRL_FORWARD, packet_length, false);
+        } else
             stat_on_link_rx_drop(st->state_stat);
-        }
         break;
     }
     case IOTDATA_MESH_CTRL_BEACON: {
-        mesh_receive_beacon(st->state_mesh, packet_buffer, packet_length);
         iotdata_mesh_beacon_t b;
-        if (iotdata_mesh_unpack_beacon(packet_buffer, packet_length, &b)) {
+        if (mesh_receive_beacon_r(st->state_mesh, packet_buffer, packet_length, &b)) {
             stat_on_peer(st->state_stat, b.gateway_id, b.generation, b.cost, b.flags);
-            netw_note_beacon(&st->network, station_id, b.flags, b.cost, b.generation, b.gateway_id, (st->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, time(NULL));
+            netw_note_beacon(&st->network, station_id, b.flags, b.cost, b.generation, b.gateway_id, (st->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, now);
         }
         break;
     }
     case IOTDATA_MESH_CTRL_ACK:
-        mesh_receive_ack(st->state_mesh, packet_buffer, packet_length);
+        (void)mesh_receive_ack(st->state_mesh, packet_buffer, packet_length);
         break;
     case IOTDATA_MESH_CTRL_ROUTE_ERROR:
-        mesh_receive_route_error(st->state_mesh, packet_buffer, packet_length);
+        (void)mesh_receive_route_error(st->state_mesh, packet_buffer, packet_length);
         break;
-    case IOTDATA_MESH_CTRL_NEIGHBOUR_RPT:
-        mesh_receive_neighbour_report(st->state_mesh, packet_buffer, packet_length);        /* mesh-layer log */
-        netw_note_neighbour_report(&st->network, packet_buffer, packet_length, time(NULL)); /* relay hears[] + both-ends RSSI */
+    case IOTDATA_MESH_CTRL_NEIGHBOUR_RPT: {
+        iotdata_mesh_neighbour_report_t r;
+        if (mesh_receive_neighbour_report_r(st->state_mesh, packet_buffer, packet_length, &r)) /* mesh-layer log */
+            netw_note_neighbour_report(&st->network, packet_buffer, packet_length, &r, now);   /* relay hears[] + both-ends RSSI */
         break;
+    }
     case IOTDATA_MESH_CTRL_PONG:
-        mesh_receive_pong(st->state_mesh, packet_buffer, packet_length);
+        (void)mesh_receive_pong(st->state_mesh, packet_buffer, packet_length);
         break;
     case IOTDATA_MESH_CTRL_PING:
     case IOTDATA_MESH_CTRL_MANAGE:
@@ -175,18 +177,18 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *ctrl_st, volatile bool *running) {
+bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *state_ctrl, volatile bool *running) {
+    assert(st && state_node && state_mesh && state_ddup && state_stat && state_ctrl && running);
 
     st->state_node = state_node;
     st->state_mesh = state_mesh;
     st->state_ddup = state_ddup;
     st->state_stat = state_stat;
 
-    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu32 "s, stats-publish=%" PRIu32 "s, rssi=%" PRIu32 "s [packets=%c, channel=%c], topic-prefix=%s", (uint32_t)st->stat_display_interval, (uint32_t)st->stat_publish_interval,
-                (uint32_t)st->interval_rssi_channel, st->capture_rssi_packet ? 'y' : 'n', st->capture_rssi_channel ? 'y' : 'n', st->mqtt_topic_prefix);
-    if (st->state_mesh->enabled)
-        printf(", mesh=on, beacon=%" PRIu32 "s", (uint32_t)st->state_mesh->beacon_interval);
-    printf(")\n");
+    char buf[16];
+    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu32 "s, stats-publish=%" PRIu32 "s, rssi=%" PRIu32 "s [packets=%c, channel=%c], topic-prefix=%s) :: mesh=%c%s\n", (uint32_t)st->stat_display_interval,
+                (uint32_t)st->stat_publish_interval, (uint32_t)st->interval_rssi_channel, st->capture_rssi_packet ? 'y' : 'n', st->capture_rssi_channel ? 'y' : 'n', st->mqtt_topic_prefix, st->state_mesh->enabled ? 'y' : 'n',
+                st->state_mesh->enabled ? snprintf_inline(buf, sizeof(buf), ", beacon=%" PRIu32 "s", (uint32_t)st->state_mesh->beacon_interval) : "");
 
     for (int i = 0; i < IOTDATA_VARIANT_MAPS_COUNT; i++) {
         const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)i);
@@ -194,9 +196,6 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
     }
     if (st->state_mesh->enabled)
         PRINTF_INFO("exec: variant[15] = mesh control (gateway station=%04" PRIX16 ")\n", st->state_mesh->station_id);
-
-    if (st->state_mesh->enabled)
-        mesh_transmit_beacon(st->state_mesh);
 
     while (*running) {
 
@@ -219,11 +218,12 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
                 PRINTF_ERROR("exec: packet too short for iotdata header (size=%d)\n", packet_length);
                 stat_on_link_rx_drop(st->state_stat);
             } else if (variant_id == IOTDATA_MESH_VARIANT) {
-                if (!st->state_mesh->enabled) {
+                if (st->state_mesh->enabled)
+                    process_mesh_packet(st, st->_buffer_packet, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, packet_rssi);
+                else {
                     stat_on_link_rx_mesh_unexpected(st->state_stat, station_id);
                     PRINTF_INFO("exec: mesh packet unexpected from station=%04" PRIX16 " while not enabled\n", station_id);
-                } else
-                    process_mesh_packet(st, st->_buffer_packet, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, packet_rssi);
+                }
             } else {
                 // Dedup direct receptions against the SAME ring the forward path uses, so a sensor
                 // heard both directly and via a relay publishes once — whichever path adds {station,
@@ -239,7 +239,7 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
         }
 
         // rssi update
-        if (*running && st->capture_rssi_channel && intervalable(st->interval_rssi_channel, &st->interval_rssi_channel_last)) {
+        if (*running && st->capture_rssi_channel && intervalable_and_initial(st->interval_rssi_channel, &st->interval_rssi_channel_last)) {
             if (device_channel_rssi_read(&channel_rssi))
                 stat_on_link_rssi_channel(st->state_stat, channel_rssi);
             else
@@ -247,12 +247,12 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
         }
 
         // mesh beacons
-        if (*running && st->state_mesh->enabled && intervalable(st->state_mesh->beacon_interval, &st->state_mesh->beacon_last))
+        if (*running && st->state_mesh->enabled && intervalable_and_initial(st->state_mesh->beacon_interval, &st->state_mesh->beacon_last))
             mesh_transmit_beacon(st->state_mesh);
 
         // control
         if (*running) {
-            ctrl_tick(ctrl_st, state_node);
+            ctrl_tick(state_ctrl, state_node);
             node_tick(state_node);
         }
 

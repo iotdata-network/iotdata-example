@@ -5,26 +5,8 @@
 #include <cjson/cJSON.h>
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-
-/* Time-weighted EMA: alpha = 1 - exp(-dt / tau). First sample initialises. */
-#define EMA_TIMED_TAU_SECS_DEFAULT 300.0f
-void ema_update_timed(uint8_t value, uint8_t *value_ema, uint32_t *value_cnt, time_t *value_last_time, time_t now, float tau_secs) {
-    if ((*value_cnt)++ == 0 || *value_last_time == 0) {
-        *value_ema = value;
-        *value_last_time = now;
-    } else {
-        const float alpha = 1.0f - expf(-((float)(now - *value_last_time)) / tau_secs);
-        *value_ema = (uint8_t)((alpha * (float)value + (1.0f - alpha) * (float)(*value_ema)) + 0.5f);
-        *value_last_time = now;
-    }
-}
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* These bound the largest allocation in the gateway by a wide margin: a stat_ring_t is
-   STAT_RING_SIZE timestamps, and there is one per station plus one per variant, so stat_state_t is
-   ~95% of .bss. Overridable because a constrained host wants them far smaller -- 128 stations x a
-   256-deep ring is a fleet-sized budget on a machine with memory to spare. */
 #ifndef STAT_MAX_STATIONS
 #define STAT_MAX_STATIONS 128
 #endif
@@ -40,12 +22,15 @@ void ema_update_timed(uint8_t value, uint8_t *value_ema, uint32_t *value_cnt, ti
 #ifndef STAT_STRING_MAX
 #define STAT_STRING_MAX 2048 /* the assembled one-line stat summary */
 #endif
+#ifndef STAT_EMA_TIMED_TAU_SECS_DEFAULT
+#define STAT_EMA_TIMED_TAU_SECS_DEFAULT 300.0f
+#endif
 #define STAT_MQTT_TOPIC_DEFAULT "iotdata/stats"
-
 #define STAT_WINDOW_COUNT       8
 static const time_t stat_windows_secs[STAT_WINDOW_COUNT] = { 5 * 60, 15 * 60, 60 * 60, 3 * 3600, 12 * 3600, 24 * 3600, 3 * 86400, 7 * 86400 };
 static const char *const stat_windows_names[STAT_WINDOW_COUNT] = { "5m", "15m", "1h", "3h", "12h", "24h", "3d", "7d" };
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
@@ -53,27 +38,6 @@ typedef struct {
     uint16_t head, fill;
     uint32_t total;
 } stat_ring_t;
-
-static inline void stat_ring_add(stat_ring_t *r, time_t now) {
-    r->time[r->head] = now;
-    r->head = (uint16_t)((r->head + 1U) % STAT_RING_SIZE);
-    if (r->fill < STAT_RING_SIZE)
-        r->fill++;
-    r->total++;
-}
-
-static inline void stat_ring_count_windows(const stat_ring_t *r, time_t now, uint32_t counts[STAT_WINDOW_COUNT]) {
-    for (int i = 0; i < STAT_WINDOW_COUNT; i++)
-        counts[i] = 0;
-    for (uint16_t i = 0; i < r->fill; i++) {
-        const time_t age = now - r->time[((unsigned)r->head + (unsigned)STAT_RING_SIZE - 1U - (unsigned)i) % (unsigned)STAT_RING_SIZE];
-        for (int w = 0; w < STAT_WINDOW_COUNT; w++)
-            if (age <= stat_windows_secs[w])
-                counts[w]++;
-    }
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
     bool valid;
@@ -148,7 +112,7 @@ typedef struct {
 
 typedef struct {
     bool valid;
-    uint16_t gateway_id;
+    uint16_t station_id;
     uint16_t generation;
     uint8_t cost;
     uint8_t flags;
@@ -167,7 +131,7 @@ typedef struct {
 typedef struct {
     char mqtt_topic[STAT_TOPIC_STR_MAX];
     const char *version;
-    uint16_t gateway_id;
+    uint16_t station_id;
     time_t start_time;
     stat_link_t link;
     stat_station_t stations[STAT_MAX_STATIONS];
@@ -175,75 +139,65 @@ typedef struct {
     stat_variant_t variants[IOTDATA_VARIANT_MAPS_COUNT];
     stat_peer_t peers[STAT_MESH_PEERS_MAX];
     int peers_count;
+    char _buffer_topic[STAT_TOPIC_STR_MAX + 8];
     char _buffer_stat[STAT_STRING_MAX];
     stat_delta_t _delta_last; /* previous counter values, for the "since last line" deltas */
 } stat_state_t;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool stat_begin(stat_state_t *s, const char *version, uint16_t gateway_id, const e22900t22_config_t *lora_config) {
-
-    s->version = version;
-    s->gateway_id = gateway_id;
-    s->start_time = time(NULL);
-    s->link.name = "e22-900t22";
-    s->link.type = "lora";
-    s->link.address = lora_config->address;
-    s->link.network = lora_config->network;
-    s->link.channel = lora_config->channel;
-    s->link.frequency_khz = 850125U + (uint32_t)lora_config->channel * 1000U;
-    s->link.packet_size_idx = lora_config->packet_size;
-    s->link.packet_rate_idx = lora_config->packet_rate;
-    s->link.transmit_power_idx = lora_config->transmit_power;
-
-    PRINTF_INFO("stat: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", s->gateway_id, s->link.name, s->link.channel, s->link.frequency_khz);
-
-    return true;
+static inline void stat_ring_add(stat_ring_t *r, time_t now) {
+    r->time[r->head] = now;
+    r->head = (uint16_t)((r->head + 1U) % (sizeof(r->time) / sizeof(r->time[0])));
+    if (r->fill < (sizeof(r->time) / sizeof(r->time[0])))
+        r->fill++;
+    r->total++;
 }
 
-void stat_end(stat_state_t *s) {
-    (void)s;
+static inline void stat_ring_count(const stat_ring_t *r, time_t now, uint32_t counts[]) {
+    for (int i = 0; i < (int)(sizeof(stat_windows_secs) / sizeof(stat_windows_secs[0])); i++)
+        counts[i] = 0;
+    for (uint16_t i = 0; i < r->fill; i++) {
+        const time_t age = now - r->time[((unsigned)r->head + (unsigned)(sizeof(r->time) / sizeof(r->time[0])) - 1U - (unsigned)i) % (unsigned)(sizeof(r->time) / sizeof(r->time[0]))];
+        for (int w = 0; w < (int)(sizeof(stat_windows_secs) / sizeof(stat_windows_secs[0])); w++)
+            if (age <= stat_windows_secs[w])
+                counts[w]++;
+    }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* The station/peer tables are scanned per received packet, so the scans below stop at the last valid
-   entry: `c` counts valid entries passed, and the search can end once every one has been seen. For a
-   find-or-create that means `c == count` AND a free slot already in hand — the hole lies at or after
-   the last valid entry, so the test cannot move into the loop condition. Entries are never
-   invalidated (a full table evicts by overwrite), so there is no removal case. `i < MAX` stays in
-   every loop: it keeps a count desync a wasted scan rather than a walk off the end of the array. */
-
-static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint16_t station_id) {
-    int free_slot = -1;
-    for (int i = 0, c = 0; i < STAT_MAX_STATIONS; i++) { /* UPSERT */
-        if (s->stations[i].valid) {
+static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint16_t station_id, const time_t now) {
+    int slot_free = -1, slot_oldest = -1;
+    for (int i = 0, c = 0; i < (int)(sizeof(s->stations) / sizeof(s->stations[0])) && !(c == s->stations_count && slot_free >= 0); i++) { /* UPSERT */
+        stat_station_t *const e = &s->stations[i];
+        if (e->valid) {
             c++;
-            if (s->stations[i].station_id == station_id)
-                return &s->stations[i];
-        } else if (free_slot < 0)
-            free_slot = i;
-        if (c == s->stations_count && free_slot >= 0)
-            break; /* every valid entry seen (no match ahead) and a free slot in hand */
+            if (e->station_id == station_id) {
+                e->last_seen = now;
+                return e;
+            } else if (s->stations_count == (int)(sizeof(s->stations) / sizeof(s->stations[0])) && (slot_oldest < 0 || e->last_seen < s->stations[slot_oldest].last_seen))
+                slot_oldest = i;
+        } else if (slot_free < 0)
+            slot_free = i;
     }
     int slot;
-    if (free_slot >= 0) {
-        slot = free_slot;
+    if (slot_free >= 0) {
+        slot = slot_free;
         s->stations_count++;
-    } else { /* table full -> evict the stalest (every slot is valid) */
-        slot = 0;
-        for (int i = 1; i < STAT_MAX_STATIONS; i++)
-            if (s->stations[i].last_seen < s->stations[slot].last_seen)
-                slot = i;
-    }
-    stat_station_t *st = &s->stations[slot];
-    memset(st, 0, sizeof(*st));
-    st->valid = true;
-    st->station_id = station_id;
-    st->first_seen = time(NULL);
-    return st;
+    } else
+        slot = (slot_oldest >= 0) ? slot_oldest : 0;
+    stat_station_t *e = &s->stations[slot];
+    memset(e, 0, sizeof(*e));
+    e->valid = true;
+    e->station_id = station_id;
+    e->first_seen = now;
+    return e;
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void stat_on_link_rx_packet(stat_state_t *s, uint16_t length) {
@@ -264,18 +218,17 @@ void stat_on_link_rx_drop(stat_state_t *s) {
 }
 void stat_on_link_rx_mesh_unexpected(stat_state_t *s, uint16_t station_id) {
     s->link.rx_mesh_unexpected++;
-    stat_station_t *st = stat_station_find_or_create(s, station_id);
-    st->last_seen = time(NULL);
+    stat_station_t *st = stat_station_find_or_create(s, station_id, time(NULL));
     st->stat_mesh_unexpected++;
 }
 void stat_on_link_rssi_packet(stat_state_t *s, uint8_t raw) {
-    ema_update_timed(raw, &s->link.rssi_packet_ema, &s->link.rssi_packet_cnt, &s->link.rssi_packet_last_time, time(NULL), EMA_TIMED_TAU_SECS_DEFAULT);
+    ema_update_timed(raw, &s->link.rssi_packet_ema, &s->link.rssi_packet_cnt, &s->link.rssi_packet_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
 }
 void stat_on_link_rssi_packet_error(stat_state_t *s) {
     s->link.rssi_packet_err++;
 }
 void stat_on_link_rssi_channel(stat_state_t *s, uint8_t raw) {
-    ema_update_timed(raw, &s->link.rssi_channel_ema, &s->link.rssi_channel_cnt, &s->link.rssi_channel_last_time, time(NULL), EMA_TIMED_TAU_SECS_DEFAULT);
+    ema_update_timed(raw, &s->link.rssi_channel_ema, &s->link.rssi_channel_cnt, &s->link.rssi_channel_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
 }
 void stat_on_link_rssi_channel_error(stat_state_t *s) {
     s->link.rssi_channel_err++;
@@ -286,10 +239,10 @@ void stat_on_link_rssi_channel_error(stat_state_t *s) {
 void stat_get_totals(const stat_state_t *s, stat_totals_t *out) {
     out->rx_ok = 0;
     out->rx_drop = s->link.rx_drops;
-    for (int v = 0; v < IOTDATA_VARIANT_MAPS_COUNT; v++) {
-        const uint32_t pc = s->variants[v].packet_count, pe = s->variants[v].process_errors, de = s->variants[v].decode_errors;
-        out->rx_ok += (pc >= pe) ? (pc - pe) : 0;
-        out->rx_drop += de + pe;
+    for (int v = 0; v < (int)(sizeof(s->variants) / sizeof(s->variants[0])); v++) {
+        const stat_variant_t *const e = &s->variants[v];
+        out->rx_ok += (e->packet_count >= e->process_errors) ? (e->packet_count - e->process_errors) : 0;
+        out->rx_drop += e->decode_errors + e->process_errors;
     }
 }
 
@@ -297,8 +250,7 @@ void stat_get_totals(const stat_state_t *s, stat_totals_t *out) {
 
 void stat_on_packet_decoded(stat_state_t *s, uint16_t station_id, uint16_t sequence, uint8_t variant_id, uint16_t length, const iotdata_decoder_t *dec) {
     const time_t now = time(NULL);
-    stat_station_t *st = stat_station_find_or_create(s, station_id);
-    st->last_seen = now;
+    stat_station_t *st = stat_station_find_or_create(s, station_id, now);
     st->packet_count++;
     st->bytes_rx += (uint64_t)length;
     if (st->last_sequence_valid) {
@@ -308,13 +260,14 @@ void stat_on_packet_decoded(stat_state_t *s, uint16_t station_id, uint16_t seque
     }
     st->last_sequence = sequence;
     st->last_sequence_valid = true;
-    if (variant_id < IOTDATA_VARIANT_MAPS_COUNT) {
+    if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0]))) {
         st->variant_count[variant_id]++;
         st->variant_last[variant_id] = now;
-        s->variants[variant_id].packet_count++;
-        s->variants[variant_id].bytes_rx += (uint64_t)length;
-        s->variants[variant_id].last_seen = now;
-        stat_ring_add(&s->variants[variant_id].ring, now);
+        stat_variant_t *const e = &s->variants[variant_id];
+        e->packet_count++;
+        e->bytes_rx += (uint64_t)length;
+        e->last_seen = now;
+        stat_ring_add(&e->ring, now);
     }
     stat_ring_add(&st->ring, now);
 #if defined(IOTDATA_ENABLE_BATTERY)
@@ -336,70 +289,69 @@ void stat_on_packet_decoded(stat_state_t *s, uint16_t station_id, uint16_t seque
 }
 
 void stat_on_packet_decode_error(stat_state_t *s, uint16_t station_id, uint8_t variant_id) {
-    stat_station_t *st = stat_station_find_or_create(s, station_id);
-    st->last_seen = time(NULL);
+    stat_station_t *st = stat_station_find_or_create(s, station_id, time(NULL));
     st->decode_errors++;
-    if (variant_id < IOTDATA_VARIANT_MAPS_COUNT)
-        s->variants[variant_id].decode_errors++;
+    if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0]))) {
+        stat_variant_t *const e = &s->variants[variant_id];
+        e->decode_errors++;
+    }
 }
 
 void stat_on_packet_process_error(stat_state_t *s, uint16_t station_id, uint8_t variant_id) {
-    stat_station_t *st = stat_station_find_or_create(s, station_id);
-    st->last_seen = time(NULL);
+    stat_station_t *st = stat_station_find_or_create(s, station_id, time(NULL));
     st->process_errors++;
-    if (variant_id < IOTDATA_VARIANT_MAPS_COUNT)
-        s->variants[variant_id].process_errors++;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-void stat_on_peer(stat_state_t *s, uint16_t gateway_id, uint16_t generation, uint8_t cost, uint8_t flags) {
-    const time_t now = time(NULL);
-    int slot = -1;
-    for (int i = 0, c = 0; i < STAT_MESH_PEERS_MAX && c < s->peers_count && slot < 0; i++) /* LOOKUP */
-        if (s->peers[i].valid) {
-            c++;
-            if (s->peers[i].gateway_id == gateway_id)
-                slot = i;
-        }
-    if (slot < 0) {
-        if (s->peers_count < STAT_MESH_PEERS_MAX) { /* a free slot exists -> take the first */
-            for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
-                if (!s->peers[i].valid) {
-                    slot = i;
-                    break;
-                }
-            s->peers_count++;
-        } else { /* full -> evict the stalest (every slot is valid) */
-            slot = 0;
-            for (int i = 1; i < STAT_MESH_PEERS_MAX; i++)
-                if (s->peers[i].last_seen < s->peers[slot].last_seen)
-                    slot = i;
-        }
+    if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0]))) {
+        stat_variant_t *const e = &s->variants[variant_id];
+        e->process_errors++;
     }
-    s->peers[slot].valid = true;
-    s->peers[slot].gateway_id = gateway_id;
-    s->peers[slot].generation = generation;
-    s->peers[slot].cost = cost;
-    s->peers[slot].flags = flags;
-    s->peers[slot].last_seen = now;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static cJSON *stat_json_windows(const stat_ring_t *r, time_t now) {
+void stat_on_peer(stat_state_t *s, uint16_t station_id, uint16_t generation, uint8_t cost, uint8_t flags) {
+    int slot = -1, slot_free = -1, slot_oldest = -1;
+    for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && !(c == s->peers_count && slot_free >= 0); i++) { /* UPSERT: match, free slot and stalest in one pass */
+        const stat_peer_t *const e = &s->peers[i];
+        if (e->valid) {
+            c++;
+            if (e->station_id == station_id) {
+                slot = i;
+                break;
+            } else if (s->peers_count == (int)(sizeof(s->peers) / sizeof(s->peers[0])) && (slot_oldest < 0 || e->last_seen < s->peers[slot_oldest].last_seen))
+                slot_oldest = i;
+        } else if (slot_free < 0)
+            slot_free = i;
+    }
+    if (slot < 0) {
+        if (slot_free >= 0) {
+            slot = slot_free;
+            s->peers_count++;
+        } else
+            slot = (slot_oldest >= 0) ? slot_oldest : 0; /* eviction reuses a valid slot: count unchanged */
+    }
+    stat_peer_t *const e = &s->peers[slot];
+    e->valid = true;
+    e->station_id = station_id;
+    e->generation = generation;
+    e->cost = cost;
+    e->flags = flags;
+    e->last_seen = time(NULL);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static cJSON *stat_json_windows(const stat_ring_t *const r, const time_t now) {
     uint32_t counts[STAT_WINDOW_COUNT];
-    stat_ring_count_windows(r, now, counts);
+    stat_ring_count(r, now, counts);
     cJSON *o = cJSON_CreateObject();
-    for (int i = 0; i < STAT_WINDOW_COUNT; i++)
+    for (int i = 0; i < (int)(sizeof(counts) / sizeof(counts[0])); i++)
         cJSON_AddNumberToObject(o, stat_windows_names[i], (double)counts[i]);
     return o;
 }
 
-cJSON *stat_build_links_json(const stat_state_t *s, const mesh_state_t *mesh) {
-    const time_t now = time(NULL);
-    cJSON *root = cJSON_CreateObject();
-    cJSON *links = cJSON_AddArrayToObject(root, "links");
+cJSON *stat_build_links_json(const stat_state_t *const s, const time_t now, const mesh_state_t *const mesh) {
+    cJSON *root = cJSON_CreateObject(), *links = cJSON_AddArrayToObject(root, "links");
     {
         cJSON *link = cJSON_CreateObject();
         cJSON_AddStringToObject(link, "name", s->link.name ? s->link.name : "");
@@ -439,17 +391,16 @@ cJSON *stat_build_links_json(const stat_state_t *s, const mesh_state_t *mesh) {
     return root;
 }
 
-cJSON *stat_build_stations_json(const stat_state_t *s, const mesh_state_t *mesh, const ddup_state_t *dedup) {
-    const time_t now = time(NULL);
+cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
     cJSON *root = cJSON_CreateObject();
-    char buf[16];
     cJSON_AddNumberToObject(root, "count", (double)s->stations_count);
     cJSON *arr = cJSON_AddArrayToObject(root, "stations");
-    for (int i = 0, c = 0; i < STAT_MAX_STATIONS && c < s->stations_count; i++) /* LOOKUP */
-        if (s->stations[i].valid) {
+    for (int i = 0, c = 0; i < (int)(sizeof(s->stations) / sizeof(s->stations[0])) && c < s->stations_count; i++) { /* LOOKUP */
+        const stat_station_t *st = &s->stations[i];
+        if (st->valid) {
             c++;
-            const stat_station_t *st = &s->stations[i];
             cJSON *o = cJSON_CreateObject();
+            char buf[4 + 1];
             cJSON_AddStringToObject(o, "id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, st->station_id));
             cJSON_AddNumberToObject(o, "first_seen", (double)st->first_seen);
             cJSON_AddNumberToObject(o, "last_seen", (double)st->last_seen);
@@ -470,7 +421,7 @@ cJSON *stat_build_stations_json(const stat_state_t *s, const mesh_state_t *mesh,
                 cJSON_AddBoolToObject(bat, "charging", st->last_battery_charging);
             }
             cJSON *vs = cJSON_AddObjectToObject(o, "variants");
-            for (int v = 0; v < IOTDATA_VARIANT_MAPS_COUNT; v++)
+            for (int v = 0; v < (int)(sizeof(st->variant_count) / sizeof(st->variant_count[0])); v++)
                 if (st->variant_count[v] > 0) {
                     const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)v);
                     cJSON *vo = cJSON_AddObjectToObject(vs, vdef ? vdef->name : "?");
@@ -480,25 +431,27 @@ cJSON *stat_build_stations_json(const stat_state_t *s, const mesh_state_t *mesh,
             cJSON_AddItemToObject(o, "windows", stat_json_windows(&st->ring, now));
             cJSON_AddItemToArray(arr, o);
         }
+    }
     if (mesh) {
         cJSON *m = cJSON_AddObjectToObject(root, "mesh");
         cJSON_AddBoolToObject(m, "enabled", mesh->enabled);
+        char buf[4 + 1];
         cJSON_AddStringToObject(m, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, mesh->station_id));
         cJSON_AddNumberToObject(m, "beacons_tx", (double)mesh->stat_beacons_tx);
         /* per frame type: only types actually seen are emitted, so the object stays small on a
            quiet link but gains a key the first time a new type appears */
         cJSON *const frames = cJSON_AddObjectToObject(m, "frames");
         if (frames != NULL)
-            for (unsigned t = 0; t < MESH_CTRL_COUNT; t++) {
+            for (unsigned t = 0; t < (int)(sizeof(mesh->ctrl) / sizeof(mesh->ctrl[0])); t++) {
                 const mesh_ctrl_stat_t *const c = &mesh->ctrl[t];
-                if (c->rx == 0 && c->err == 0)
-                    continue;
-                cJSON *const ft = cJSON_AddObjectToObject(frames, iotdata_mesh_ctrl_name((uint8_t)t));
-                if (ft == NULL)
-                    continue;
-                cJSON_AddNumberToObject(ft, "rx", (double)c->rx);
-                cJSON_AddNumberToObject(ft, "err", (double)c->err);
-                cJSON_AddNumberToObject(ft, "bytes", (double)c->bytes);
+                if (c->rx > 0 || c->err > 0) {
+                    cJSON *const ft = cJSON_AddObjectToObject(frames, iotdata_mesh_ctrl_name((uint8_t)t));
+                    if (ft != NULL) {
+                        cJSON_AddNumberToObject(ft, "rx", (double)c->rx);
+                        cJSON_AddNumberToObject(ft, "err", (double)c->err);
+                        cJSON_AddNumberToObject(ft, "bytes", (double)c->bytes);
+                    }
+                }
             }
         cJSON_AddNumberToObject(m, "rx", (double)mesh_stat_total(mesh, false));
         cJSON_AddNumberToObject(m, "rx_errors", (double)mesh_stat_total(mesh, true));
@@ -510,60 +463,62 @@ cJSON *stat_build_stations_json(const stat_state_t *s, const mesh_state_t *mesh,
         cJSON_AddNumberToObject(m, "tx_errors", (double)mesh->stat_errors_tx);
         cJSON_AddNumberToObject(m, "tx_bytes", (double)mesh->stat_bytes_tx);
         cJSON *peers = cJSON_AddArrayToObject(m, "peers");
-        for (int i = 0, c = 0; i < STAT_MESH_PEERS_MAX && c < s->peers_count; i++) /* LOOKUP */
-            if (s->peers[i].valid) {
+        for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && c < s->peers_count; i++) { /* LOOKUP */
+            const stat_peer_t *const e = &s->peers[i];
+            if (e->valid) {
                 c++;
                 cJSON *p = cJSON_CreateObject();
-                cJSON_AddStringToObject(p, "gateway_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, s->peers[i].gateway_id));
-                cJSON_AddNumberToObject(p, "generation", (double)s->peers[i].generation);
-                cJSON_AddNumberToObject(p, "cost", (double)s->peers[i].cost);
-                cJSON_AddNumberToObject(p, "flags", (double)s->peers[i].flags);
-                cJSON_AddNumberToObject(p, "last_seen", (double)s->peers[i].last_seen);
-                cJSON_AddNumberToObject(p, "age_secs", (double)(now - s->peers[i].last_seen));
+                cJSON_AddStringToObject(p, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, e->station_id));
+                cJSON_AddNumberToObject(p, "generation", (double)e->generation);
+                cJSON_AddNumberToObject(p, "cost", (double)e->cost);
+                cJSON_AddNumberToObject(p, "flags", (double)e->flags);
+                cJSON_AddNumberToObject(p, "last_seen", (double)e->last_seen);
+                cJSON_AddNumberToObject(p, "age_secs", (double)(now - e->last_seen));
                 cJSON_AddItemToArray(peers, p);
             }
+        }
     }
-    if (dedup) {
-        cJSON *d = cJSON_AddObjectToObject(root, "dedup");
-        cJSON_AddBoolToObject(d, "enabled", dedup->enabled);
-        cJSON_AddNumberToObject(d, "peers", (double)dedup->peers_count);
-        cJSON_AddNumberToObject(d, "peers_resolved", (double)dedup->stat_peers_resolved);
-        cJSON_AddNumberToObject(d, "peers_unresolved", (double)dedup->stat_peers_unresolved);
-        cJSON_AddNumberToObject(d, "send_cycles", (double)dedup->stat_send_cycles);
-        cJSON_AddNumberToObject(d, "send_entries", (double)dedup->stat_send_entries);
-        cJSON_AddNumberToObject(d, "send_errors", (double)dedup->stat_send_errors);
-        cJSON_AddNumberToObject(d, "recv_cycles", (double)dedup->stat_recv_cycles);
-        cJSON_AddNumberToObject(d, "recv_entries", (double)dedup->stat_recv_entries);
-        cJSON_AddNumberToObject(d, "recv_errors", (double)dedup->stat_recv_errors);
-        cJSON_AddNumberToObject(d, "injected", (double)dedup->stat_injected);
-        cJSON_AddNumberToObject(d, "pending_overflow", (double)dedup->stat_pending_overflow);
+    if (ddup) {
+        cJSON *d = cJSON_AddObjectToObject(root, "ddup");
+        cJSON_AddBoolToObject(d, "enabled", ddup->enabled);
+        cJSON_AddNumberToObject(d, "peers", (double)ddup->peers_count);
+        cJSON_AddNumberToObject(d, "peers_resolved", (double)ddup->stat_peers_resolved);
+        cJSON_AddNumberToObject(d, "peers_unresolved", (double)ddup->stat_peers_unresolved);
+        cJSON_AddNumberToObject(d, "send_cycles", (double)ddup->stat_send_cycles);
+        cJSON_AddNumberToObject(d, "send_entries", (double)ddup->stat_send_entries);
+        cJSON_AddNumberToObject(d, "send_errors", (double)ddup->stat_send_errors);
+        cJSON_AddNumberToObject(d, "recv_cycles", (double)ddup->stat_recv_cycles);
+        cJSON_AddNumberToObject(d, "recv_entries", (double)ddup->stat_recv_entries);
+        cJSON_AddNumberToObject(d, "recv_errors", (double)ddup->stat_recv_errors);
+        cJSON_AddNumberToObject(d, "injected", (double)ddup->stat_injected);
+        cJSON_AddNumberToObject(d, "pending_overflow", (double)ddup->stat_pending_overflow);
     }
     return root;
 }
 
-cJSON *stat_build_variants_json(const stat_state_t *s) {
-    const time_t now = time(NULL);
-    cJSON *root = cJSON_CreateObject();
-    cJSON *arr = cJSON_AddArrayToObject(root, "variants");
-    for (int v = 0; v < IOTDATA_VARIANT_MAPS_COUNT; v++)
-        if (s->variants[v].packet_count > 0 || s->variants[v].decode_errors > 0 || s->variants[v].process_errors > 0) {
+cJSON *stat_build_variants_json(const stat_state_t *const s, const time_t now) {
+    cJSON *root = cJSON_CreateObject(), *arr = cJSON_AddArrayToObject(root, "variants");
+    for (int v = 0; v < (int)(sizeof(s->variants) / sizeof(s->variants[0])); v++) {
+        const stat_variant_t *const e = &s->variants[v];
+        if (e->packet_count > 0 || e->decode_errors > 0 || e->process_errors > 0) {
             const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)v);
             cJSON *o = cJSON_CreateObject();
             cJSON_AddNumberToObject(o, "id", (double)v);
-            cJSON_AddStringToObject(o, "name", vdef ? vdef->name : "?");
-            cJSON_AddNumberToObject(o, "packets", (double)s->variants[v].packet_count);
-            cJSON_AddNumberToObject(o, "bytes", (double)s->variants[v].bytes_rx);
-            cJSON_AddNumberToObject(o, "decode_errors", (double)s->variants[v].decode_errors);
-            cJSON_AddNumberToObject(o, "process_errors", (double)s->variants[v].process_errors);
-            cJSON_AddNumberToObject(o, "last_seen", (double)s->variants[v].last_seen);
-            cJSON_AddNumberToObject(o, "age_secs", (double)(s->variants[v].last_seen ? (now - s->variants[v].last_seen) : 0));
-            cJSON_AddItemToObject(o, "windows", stat_json_windows(&s->variants[v].ring, now));
+            cJSON_AddStringToObject(o, "name", vdef ? vdef->name : "");
+            cJSON_AddNumberToObject(o, "packets", (double)e->packet_count);
+            cJSON_AddNumberToObject(o, "bytes", (double)e->bytes_rx);
+            cJSON_AddNumberToObject(o, "decode_errors", (double)e->decode_errors);
+            cJSON_AddNumberToObject(o, "process_errors", (double)e->process_errors);
+            cJSON_AddNumberToObject(o, "last_seen", (double)e->last_seen);
+            cJSON_AddNumberToObject(o, "age_secs", (double)(e->last_seen ? (now - e->last_seen) : 0));
+            cJSON_AddItemToObject(o, "windows", stat_json_windows(&e->ring, now));
             cJSON_AddItemToArray(arr, o);
         }
+    }
     return root;
 }
 
-cJSON *stat_build_mqtt_json(void) {
+cJSON *stat_build_mqtt_json(__attribute__((unused)) const stat_state_t *const s, __attribute__((unused)) const time_t now) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "connected_state", mqtt_is_connected());
     cJSON_AddNumberToObject(root, "connected_time", (double)mqtt_stat_last_connect_time);
@@ -576,27 +531,24 @@ cJSON *stat_build_mqtt_json(void) {
     return root;
 }
 
-cJSON *stat_build_stat_json(const stat_state_t *s, const mesh_state_t *mesh, const ddup_state_t *dedup) {
+cJSON *stat_build_stat_json(const stat_state_t *const s, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
     const time_t now = time(NULL);
     cJSON *root = cJSON_CreateObject();
-    char buf[16];
-    cJSON_AddStringToObject(root, "gateway_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, s->gateway_id));
+    char buf[4 + 1];
+    cJSON_AddStringToObject(root, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, s->station_id));
     cJSON_AddStringToObject(root, "version", s->version ? s->version : "");
     cJSON_AddNumberToObject(root, "time", (double)now);
     cJSON_AddNumberToObject(root, "uptime_secs", (double)(now - s->start_time));
-    cJSON_AddItemToObject(root, "links", stat_build_links_json(s, mesh));
-    cJSON_AddItemToObject(root, "stations", stat_build_stations_json(s, mesh, dedup));
-    cJSON_AddItemToObject(root, "variants", stat_build_variants_json(s));
-    cJSON_AddItemToObject(root, "mqtt", stat_build_mqtt_json());
+    cJSON_AddItemToObject(root, "links", stat_build_links_json(s, now, mesh));
+    cJSON_AddItemToObject(root, "stations", stat_build_stations_json(s, now, mesh, ddup));
+    cJSON_AddItemToObject(root, "variants", stat_build_variants_json(s, now));
+    cJSON_AddItemToObject(root, "mqtt", stat_build_mqtt_json(s, now));
     return root;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* Formats into a CALLER-supplied buffer and returns it. It used to build into a local and hand back
-   a malloc'd copy, which bought nothing: the only caller printed it and freed it immediately. */
-/* NOT const: the delta snapshot it keeps now lives in the state, so this updates it. */
-const char *stat_build_stat_string(char *const buf, const size_t size, stat_state_t *const s, const mesh_state_t *mesh, const ddup_state_t *dedup) {
+const char *stat_build_stat_string(char *const buf, const size_t size, stat_state_t *const s, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
     size_t off = 0;
     int n;
 #define STAT_APPEND(...) \
@@ -632,7 +584,7 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
     }
     if (mesh && mesh->enabled) {
         const uint32_t ctrl_rx = mesh_stat_total(mesh, false), ctrl_err = mesh_stat_total(mesh, true);
-        STAT_APPEND(", mesh{fwd=%" PRIu32 ", unwrap=%" PRIu32 ", dedup=%" PRIu32 ", beacons=%" PRIu32 ", acks=%" PRIu32 ", ctrl=%" PRIu32 ", err=%" PRIu32 "}", mesh->ctrl[IOTDATA_MESH_CTRL_FORWARD].rx - last->forwards_rx,
+        STAT_APPEND(", mesh{fwd=%" PRIu32 ", unwrap=%" PRIu32 ", ddup=%" PRIu32 ", beacons=%" PRIu32 ", acks=%" PRIu32 ", ctrl=%" PRIu32 ", err=%" PRIu32 "}", mesh->ctrl[IOTDATA_MESH_CTRL_FORWARD].rx - last->forwards_rx,
                     mesh->stat_forwards_unwrapped - last->forwards_unwrapped, mesh->stat_duplicates - last->duplicates, mesh->stat_beacons_tx - last->beacons_tx, mesh->stat_acks_tx - last->acks_tx, ctrl_rx - last->ctrl_rx,
                     ctrl_err - last->ctrl_err);
         last->forwards_rx = mesh->ctrl[IOTDATA_MESH_CTRL_FORWARD].rx;
@@ -643,14 +595,14 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
         last->acks_tx = mesh->stat_acks_tx;
         last->ctrl_rx = ctrl_rx;
     }
-    if (dedup && dedup->enabled) {
-        STAT_APPEND(", dedup{sends=%" PRIu32 "/%" PRIu32 ", recvs=%" PRIu32 "/%" PRIu32 ", injected=%" PRIu32 "}", dedup->stat_send_cycles - last->send_cycles, dedup->stat_send_entries - last->send_entries,
-                    dedup->stat_recv_cycles - last->recv_cycles, dedup->stat_recv_entries - last->recv_entries, dedup->stat_injected - last->injected);
-        last->send_cycles = dedup->stat_send_cycles;
-        last->send_entries = dedup->stat_send_entries;
-        last->recv_cycles = dedup->stat_recv_cycles;
-        last->recv_entries = dedup->stat_recv_entries;
-        last->injected = dedup->stat_injected;
+    if (ddup && ddup->enabled) {
+        STAT_APPEND(", ddup{sends=%" PRIu32 "/%" PRIu32 ", recvs=%" PRIu32 "/%" PRIu32 ", injected=%" PRIu32 "}", ddup->stat_send_cycles - last->send_cycles, ddup->stat_send_entries - last->send_entries,
+                    ddup->stat_recv_cycles - last->recv_cycles, ddup->stat_recv_entries - last->recv_entries, ddup->stat_injected - last->injected);
+        last->send_cycles = ddup->stat_send_cycles;
+        last->send_entries = ddup->stat_send_entries;
+        last->recv_cycles = ddup->stat_recv_cycles;
+        last->recv_entries = ddup->stat_recv_entries;
+        last->injected = ddup->stat_injected;
     }
     STAT_APPEND(", mqtt{%s, disconnects=%" PRIu32 "}", mqtt_is_connected() ? "up" : "down", mqtt_stat_disconnects);
 #undef STAT_APPEND
@@ -660,16 +612,15 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void stat_publish(const stat_state_t *s, const mesh_state_t *mesh, const ddup_state_t *dedup) {
+void stat_publish(stat_state_t *const s, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
     if (!mqtt_is_connected())
         return;
-    cJSON *root = stat_build_stat_json(s, mesh, dedup);
+    cJSON *root = stat_build_stat_json(s, mesh, ddup);
     if (root) {
         char *json = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
         if (json) {
-            char topic[STAT_TOPIC_STR_MAX + 8];
-            (void)mqtt_send(snprintf_inline(topic, sizeof(topic), "%s/%04" PRIX16, s->mqtt_topic, s->gateway_id), json, (int)strlen(json));
+            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s/%04" PRIX16, s->mqtt_topic, s->station_id), json, (int)strlen(json));
             free(json);
         }
     }
@@ -677,8 +628,37 @@ void stat_publish(const stat_state_t *s, const mesh_state_t *mesh, const ddup_st
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void stat_display(stat_state_t *s, const mesh_state_t *mesh, const ddup_state_t *dedup) {
-    PRINTF_INFO("stat: %s\n", stat_build_stat_string(s->_buffer_stat, sizeof(s->_buffer_stat), s, mesh, dedup));
+void stat_display(stat_state_t *const s, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
+    PRINTF_INFO("stat: %s\n", stat_build_stat_string(s->_buffer_stat, sizeof(s->_buffer_stat), s, mesh, ddup));
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, uint16_t station_id, const char *const version, const e22900t22_config_t *const lora_config) {
+    assert(topic_prefix && version && lora_config);
+
+    s->version = version;
+    s->station_id = station_id;
+    s->start_time = time(NULL);
+    s->link.name = "e22-900t22";
+    s->link.type = "lora";
+    s->link.address = lora_config->address;
+    s->link.network = lora_config->network;
+    s->link.channel = lora_config->channel;
+    s->link.frequency_khz = 850125U + (uint32_t)lora_config->channel * 1000U;
+    s->link.packet_size_idx = lora_config->packet_size;
+    s->link.packet_rate_idx = lora_config->packet_rate;
+    s->link.transmit_power_idx = lora_config->transmit_power;
+
+    PRINTF_INFO("stat: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", s->station_id, s->link.name, s->link.channel, s->link.frequency_khz);
+
+    return true;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+void stat_end(__attribute__((unused)) stat_state_t *s) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

@@ -5,7 +5,20 @@
 #ifndef NETW_MAX
 #define NETW_MAX 48
 #endif
+#ifndef NETW_VIA_MAX
+#define NETW_VIA_MAX 8 /* distinct relays tracked per sensor (report shows the top 5) */
+#endif
+#ifndef NETW_HEARS_MAX
+#define NETW_HEARS_MAX 16 /* stations we record a relay hearing (from its NEIGHBOUR_REPORT) */
+#endif
+#ifndef NETW_SEQ_MAX_GAP
+#define NETW_SEQ_MAX_GAP 256 /* a forward jump beyond this is treated as a sensor reset/resync, not loss */
+#endif
+#ifndef NETW_STALE_SEC
+#define NETW_STALE_SEC 3600 /* a sensor unheard this long is hidden from the snapshot + summary (record kept) */
+#endif
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef enum { NETW_KIND_UNKNOWN = 0, NETW_KIND_GATEWAY, NETW_KIND_RELAY, NETW_KIND_SENSOR } netw_kind_t;
@@ -22,18 +35,10 @@ typedef struct {
     bool seq_valid;
 } netw_pathstat_t;
 
-#ifndef NETW_VIA_MAX
-#define NETW_VIA_MAX 8 /* distinct relays tracked per sensor (report shows the top 5) */
-#endif
-
 typedef struct {
     uint16_t relay;
     uint32_t count; /* forwards this relay carried for the sensor */
 } netw_via_t;
-
-#ifndef NETW_HEARS_MAX
-#define NETW_HEARS_MAX 16 /* stations we record a relay hearing (from its NEIGHBOUR_REPORT) */
-#endif
 
 typedef struct {
     uint16_t station;
@@ -83,6 +88,7 @@ typedef struct {
 } netw_t;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 const char *netw_kind_name(netw_kind_t k) {
     switch (k) {
@@ -107,7 +113,7 @@ int netw_count(const netw_t *n) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 int netw_locate(const netw_t *n, uint16_t station) {
-    for (int i = 0, c = 0; i < NETW_MAX && c < n->count; i++) { /* LOOKUP */
+    for (int i = 0, c = 0; i < (int)(sizeof(n->s) / sizeof(n->s[0])) && c < n->count; i++) { /* LOOKUP */
         const netw_station_t *const e = &n->s[i];
         if (e->valid) {
             c++;
@@ -121,30 +127,24 @@ int netw_locate(const netw_t *n, uint16_t station) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 netw_station_t *netw_upsert(netw_t *n, uint16_t station, time_t now) {
-    int slot = -1, empty = -1, oldest = -1;
-    for (int i = 0, c = 0; i < NETW_MAX; i++) { /* UPSERT */
+    int slot = -1, slot_empty = -1, slot_oldest = -1;
+    for (int i = 0, c = 0; i < (int)(sizeof(n->s) / sizeof(n->s[0])) && !(c == n->count && slot_empty >= 0); i++) { /* UPSERT */
         const netw_station_t *const e = &n->s[i];
         if (!e->valid) {
-            if (empty < 0)
-                empty = i; /* first free slot; keep scanning for an existing entry */
+            if (slot_empty < 0)
+                slot_empty = i; /* first free slot; keep scanning for an existing entry */
         } else {
             c++;
             if (e->station == station) {
                 slot = i; /* existing entry -> update in place */
                 break;
-            }
-            if (n->count == NETW_MAX && (oldest < 0 || e->last_seen < n->s[oldest].last_seen))
-                oldest = i; /* stalest occupied slot; only tracked when full — else a free slot is guaranteed */
+            } else if (n->count == (sizeof(n->s) / sizeof(n->s[0])) && (slot_oldest < 0 || e->last_seen < n->s[slot_oldest].last_seen))
+                slot_oldest = i; /* stalest occupied slot; only tracked when full — else a free slot is guaranteed */
         }
-        /* Stop only once every valid entry has been seen (no match can lie ahead) AND a free slot is
-           in hand — the hole lies at or after the last valid entry, so this cannot move into the loop
-           condition. A full table never sets `empty`, so it correctly scans on to find `oldest`. */
-        if (c == n->count && empty >= 0)
-            break;
     }
     if (slot < 0) { /* new station: take a free slot if any, else evict the stalest */
-        slot = (empty >= 0) ? empty : oldest;
-        if (empty >= 0) /* free slot -> one more; eviction reuses a valid slot (count unchanged) */
+        slot = (slot_empty >= 0) ? slot_empty : slot_oldest;
+        if (slot_empty >= 0) /* free slot -> one more; eviction reuses a valid slot (count unchanged) */
             n->count++;
         netw_station_t *const e = &n->s[slot];
         memset(e, 0, sizeof(*e));
@@ -159,10 +159,6 @@ netw_station_t *netw_upsert(netw_t *n, uint16_t station, time_t now) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-
-#ifndef NETW_SEQ_MAX_GAP
-#define NETW_SEQ_MAX_GAP 256 /* a forward jump beyond this is treated as a sensor reset/resync, not loss */
-#endif
 
 // Advance a path's sequence tracker, counting how many sequence numbers were skipped. A large
 // forward jump, or any backward step (16-bit wrap / reorder / sensor reboot), resyncs without
@@ -193,7 +189,7 @@ void netw_note_receive(netw_t *n, uint16_t station, uint8_t variant, uint16_t se
         int k = 0;
         while (k < e->via_count && e->via[k].relay != via_relay)
             k++;
-        if (k == e->via_count && e->via_count < NETW_VIA_MAX) {
+        if (k == e->via_count && e->via_count < (int)(sizeof(e->via) / sizeof(e->via[0]))) {
             netw_via_t *const v = &e->via[k];
             v->relay = via_relay;
             v->count = 0;
@@ -249,36 +245,43 @@ void netw_note_forward(netw_t *n, uint16_t relay_station, time_t now) {
 // fold each heard station's relay-end RSSI into the both-ends view (keeping the strongest). The
 // heard list is collected locally FIRST, so the reporting relay's own entry can be written last --
 // after any netw_upsert evictions the per-neighbour loop may trigger -- with no dangling pointer.
-void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, time_t now) {
-    iotdata_mesh_neighbour_report_t r;
-    if (iotdata_mesh_unpack_neighbour_report(buf, len, &r)) {
-        netw_heard_t heard[NETW_HEARS_MAX];
-        int hc = 0;
-        for (int k = 0; k < (int)r.num_neighbours; k++) {
-            iotdata_mesh_nbr_entry_t ent;
-            if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &ent))
-                break;
-            const int rssi = iotdata_mesh_rssi_from_q4(ent.rssi_q4);
-            if (hc < NETW_HEARS_MAX)
-                heard[hc++] = (netw_heard_t){ .station = ent.station, .cost = ent.cost, .rssi = rssi };
-            netw_station_t *s = netw_upsert(n, ent.station, now); /* used immediately, not held */
-            if (s->kind == NETW_KIND_UNKNOWN)
-                s->kind = (ent.cost == IOTDATA_MESH_NBR_COST_SENSOR) ? NETW_KIND_SENSOR : (ent.cost == 0 ? NETW_KIND_GATEWAY : NETW_KIND_RELAY);
-            if (s->relay_rssi == 0 || rssi > s->relay_rssi) {
-                s->relay_rssi = rssi;
-                s->relay_rssi_from = r.sender_station;
-            }
+void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, const iotdata_mesh_neighbour_report_t *const r, time_t now) {
+    /* Two passes over the report, deliberately. The neighbour upserts must all happen BEFORE the
+       sender's entry is resolved: a full table evicts the stalest entry, and while the sender is
+       the freshest thing in it (last_seen == now), that only protects it while some other entry is
+       strictly staler. With every entry tied at the same `now`, the eviction scan falls back to the
+       lowest valid index -- which could be the sender. Resolving `rel` after the loop sidesteps the
+       question entirely, and lets the entries be written straight into rel->hears[] rather than
+       staged in an on-stack array first. */
+    for (int k = 0; k < (int)r->num_neighbours; k++) {
+        iotdata_mesh_nbr_entry_t ent;
+        if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &ent))
+            break;
+        const int rssi = iotdata_mesh_rssi_from_q4(ent.rssi_q4);
+        netw_station_t *const s = netw_upsert(n, ent.station, now); /* used immediately, not held */
+        if (s->kind == NETW_KIND_UNKNOWN)
+            s->kind = (ent.cost == IOTDATA_MESH_NBR_COST_SENSOR) ? NETW_KIND_SENSOR : (ent.cost == 0 ? NETW_KIND_GATEWAY : NETW_KIND_RELAY);
+        if (s->relay_rssi == 0 || rssi > s->relay_rssi) {
+            s->relay_rssi = rssi;
+            s->relay_rssi_from = r->sender_station;
         }
-        netw_station_t *rel = netw_upsert(n, r.sender_station, now); /* written last: no eviction risk */
-        if (rel->kind == NETW_KIND_UNKNOWN)
-            rel->kind = (r.my_cost == 0) ? NETW_KIND_GATEWAY : NETW_KIND_RELAY;
-        if (r.my_cost != IOTDATA_MESH_NBR_COST_SENSOR)
-            rel->cost = r.my_cost;
-        rel->gateway = r.gateway_id;
-        for (int k = 0; k < hc; k++)
-            rel->hears[k] = heard[k];
-        rel->hears_count = hc;
     }
+
+    netw_station_t *const rel = netw_upsert(n, r->sender_station, now); /* resolved last: no eviction can move it */
+    if (rel->kind == NETW_KIND_UNKNOWN)
+        rel->kind = (r->my_cost == 0) ? NETW_KIND_GATEWAY : NETW_KIND_RELAY;
+    if (r->my_cost != IOTDATA_MESH_NBR_COST_SENSOR)
+        rel->cost = r->my_cost;
+    rel->gateway = r->gateway_id;
+
+    int hc = 0;
+    for (int k = 0; k < (int)r->num_neighbours && hc < (int)(sizeof(rel->hears) / sizeof(rel->hears[0])); k++) {
+        iotdata_mesh_nbr_entry_t ent;
+        if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &ent))
+            break;
+        rel->hears[hc++] = (netw_heard_t){ .station = ent.station, .cost = ent.cost, .rssi = iotdata_mesh_rssi_from_q4(ent.rssi_q4) };
+    }
+    rel->hears_count = hc;
 }
 
 // Lifetime-average rate (events/minute) since first heard. Stable for slow, fixed-interval
@@ -294,7 +297,7 @@ static inline const char *netw_via_format(const netw_station_t *e, char *out, si
     if (outlen > 0) {
         out[0] = '\0';
         if (e->via_count > 0) {
-            bool used[NETW_VIA_MAX] = { false };
+            bool used[sizeof(e->via) / sizeof(e->via[0])] = { false };
             int pos = snprintf(out, outlen, "[");
             if (pos < 0)
                 pos = 0;
@@ -348,9 +351,6 @@ static inline double netw_loss_pct(uint32_t gaps, uint32_t rx) {
     return total ? ((double)gaps * 100.0 / (double)total) : 0.0;
 }
 
-#ifndef NETW_STALE_SEC
-#define NETW_STALE_SEC 3600 /* a sensor unheard this long is hidden from the snapshot + summary (record kept) */
-#endif
 static inline bool netw_is_stale(const netw_station_t *e, time_t now) {
     return (now - e->last_seen) > NETW_STALE_SEC;
 }
@@ -359,7 +359,7 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
     const time_t now = time(NULL);
     int n_relay = 0, n_sensor = 0, n_gw = 0, n_stale = 0;
     uint32_t loss = 0, rx_total = 0;
-    for (int i = 0, c = 0; i < NETW_MAX && c < n->count; i++) { /* LOOKUP */
+    for (int i = 0, c = 0; i < (int)(sizeof(n->s) / sizeof(n->s[0])) && c < n->count; i++) { /* LOOKUP */
         const netw_station_t *e = &n->s[i];
         if (e->valid) {
             c++;
@@ -379,23 +379,23 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
     char stale[32];
     PRINTF_INFO("netw: gw=%04" PRIX16 " | %d relay(s), %d sensor(s)%s%s | end-to-end loss=%" PRIu32 " seq (%.1f%%):\n", gateway_id, n_relay, n_sensor, n_gw ? " (+peer gw)" : "",
                 n_stale > 0 ? snprintf_inline(stale, sizeof(stale), ", %d stale hidden", n_stale) : "", loss, netw_loss_pct(loss, rx_total));
-    for (int i = 0, c = 0; i < NETW_MAX && c < n->count; i++) { /* LOOKUP — mesh nodes: gateways + relays */
+    for (int i = 0, c = 0; i < (int)(sizeof(n->s) / sizeof(n->s[0])) && c < n->count; i++) { /* LOOKUP — mesh nodes: gateways + relays */
         const netw_station_t *e = &n->s[i];
         if (e->valid)
             c++;
         if (e->valid && (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY)) {
-            PRINTF_INFO("     %04" PRIX16 " %-4s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%u gen=%u gw=%04" PRIX16 "%s\n", e->station, netw_kind_name(e->kind),
+            PRINTF_INFO("      %04" PRIX16 " %-4s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%u gen=%u gw=%04" PRIX16 "%s\n", e->station, netw_kind_name(e->kind),
                         e->rssi, (long)(now - e->last_seen), e->tx.rx, e->tx.gaps, netw_rate_per_min(e->tx.rx, e->first_seen, now), e->beacon_rx, e->fwd_sent, netw_rate_per_min(e->fwd_sent, e->first_seen, now), e->accepting ? 'Y' : 'N',
                         (unsigned)e->cost, (unsigned)e->generation, e->gateway, netw_hears_format(e, n->_buffer_hears, sizeof(n->_buffer_hears)));
         }
     }
-    for (int i = 0, c = 0; i < NETW_MAX && c < n->count; i++) { /* LOOKUP — sensors (and anything unclassified) */
+    for (int i = 0, c = 0; i < (int)(sizeof(n->s) / sizeof(n->s[0])) && c < n->count; i++) { /* LOOKUP — sensors (and anything unclassified) */
         const netw_station_t *e = &n->s[i];
         if (e->valid)
             c++;
         if (e->valid && !(e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) && !netw_is_stale(e, now)) {
             char via[80], rly[40];
-            PRINTF_INFO("     %04" PRIX16 " %-4s rssi=%ddBm%s age=%lds var=%u uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ")%s\n",
+            PRINTF_INFO("      %04" PRIX16 " %-4s rssi=%ddBm%s age=%lds var=%u uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ")%s\n",
                         e->station, netw_kind_name(e->kind), e->rssi, e->relay_rssi != 0 ? snprintf_inline(rly, sizeof(rly), " relay=%ddBm(%04" PRIX16 ")", e->relay_rssi, e->relay_rssi_from) : "", (long)(now - e->last_seen),
                         (unsigned)e->variant, e->uniq.rx, e->uniq.gaps, netw_loss_pct(e->uniq.gaps, e->uniq.rx), netw_rate_per_min(e->uniq.rx, e->first_seen, now), e->direct.rx, e->direct.dup, e->direct.gaps, e->mesh.rx, e->mesh.dup,
                         e->mesh.gaps, netw_via_format(e, via, sizeof(via)));
@@ -406,7 +406,7 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void netw_init(netw_t *n) {
+void netw_begin(netw_t *n) {
     memset(n, 0, sizeof(*n));
 }
 

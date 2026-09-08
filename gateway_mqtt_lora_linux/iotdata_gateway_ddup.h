@@ -2,27 +2,35 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define DDUP_PORT_DEFAULT     9876
-
+#ifndef DDUP_PORT_DEFAULT
+#define DDUP_PORT_DEFAULT 9876
+#endif
+#ifndef DDUP_DELAY_MS_DEFAULT
 #define DDUP_DELAY_MS_DEFAULT 20
-
-#define DDUP_PEERS_MAX        16
-#define DDUP_PENDING_MAX      256
-#define DDUP_BATCH_MAX        32
-
-#define DDUP_PKT_HEADER_SIZE  3
-#define DDUP_PKT_SIZE         (DDUP_PKT_HEADER_SIZE + DDUP_BATCH_MAX * 4) /* 131 bytes */
+#endif
+#ifndef DDUP_PEERS_MAX
+#define DDUP_PEERS_MAX 16
+#endif
+#ifndef DDUP_PENDING_MAX
+#define DDUP_PENDING_MAX 256
+#endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define DDUP_MIN(a, b)        ((a) < (b) ? (a) : (b))
+#define DDUP_PKT_IDENTIFIER_SIZE 4 // station_id - uint16_t
+#define DDUP_PKT_BATCH_SIZE      32
+#define DDUP_PKT_HEADER_SIZE     3
+#define DDUP_PKT_SIZE            (DDUP_PKT_HEADER_SIZE + (DDUP_PKT_BATCH_SIZE * DDUP_PKT_IDENTIFIER_SIZE)) /* 131 bytes */
+
+#define DDUP_MIN(a, b)           ((a) < (b) ? (a) : (b))
 
 typedef uint8_t ddup_packet_t[DDUP_PKT_SIZE];
 
 #define ddup_packet_get_length(pkt)                      (size_t)(3 + (size_t)pkt[2] * 4)
 
 #define ddup_packet_get_gateway_id(pkt)                  (((uint16_t)pkt[0] << 8) | (uint16_t)pkt[1])
-#define ddup_packet_get_entry_count(pkt)                 (DDUP_MIN(pkt[2], DDUP_BATCH_MAX))
+#define ddup_packet_get_entry_count(pkt)                 (DDUP_MIN(pkt[2], DDUP_PKT_BATCH_SIZE))
 #define ddup_packet_get_entry_station(pkt, entry_index)  (((uint16_t)pkt[(3 + entry_index * 4) + 0] << 8) | (uint16_t)pkt[(3 + entry_index * 4) + 1])
 #define ddup_packet_get_entry_sequence(pkt, entry_index) (((uint16_t)pkt[(3 + entry_index * 4) + 2] << 8) | (uint16_t)pkt[(3 + entry_index * 4) + 3])
 
@@ -67,7 +75,7 @@ typedef struct {
     int pending_count;
     struct timespec pending_first;
     uint16_t gateway_id;
-    iotdata_mesh_dedup_ring_t *dedup_ring;
+    iotdata_mesh_dedup_ring_t *ddup_ring;
     volatile bool *running;
     bool debug;
     char _buffer_config[1024];
@@ -94,7 +102,7 @@ void ddup_peers_parse(ddup_state_t *st, const char *peers_str) {
     strncpy(st->_buffer_config, peers_str, sizeof(st->_buffer_config) - 1);
     st->_buffer_config[sizeof(st->_buffer_config) - 1] = '\0';
     char *save = NULL, *tok = strtok_r(st->_buffer_config, ",", &save);
-    while (tok && st->peers_count < DDUP_PEERS_MAX) {
+    while (tok && st->peers_count < (int)(sizeof(st->peers) / sizeof(st->peers[0]))) {
         ddup_peer_t *const peer = &st->peers[st->peers_count];
         while (*tok == ' ')
             tok++;
@@ -172,7 +180,7 @@ void ddup_peers_recv(ddup_state_t *st, int recv_fd) {
             else {
                 pthread_mutex_lock(&st->mutex);
                 for (int entry_index = 0; entry_index < entry_count; entry_index++) {
-                    iotdata_mesh_dedup_insert(st->dedup_ring, ddup_packet_get_entry_station(st->_buffer_packet, entry_index), ddup_packet_get_entry_sequence(st->_buffer_packet, entry_index));
+                    iotdata_mesh_dedup_insert(st->ddup_ring, ddup_packet_get_entry_station(st->_buffer_packet, entry_index), ddup_packet_get_entry_sequence(st->_buffer_packet, entry_index));
                     st->stat_injected++;
                 }
                 pthread_mutex_unlock(&st->mutex);
@@ -220,7 +228,7 @@ int ddup_send_collect(ddup_state_t *st, iotdata_mesh_dedup_entry_t *send_entries
 void ddup_peers_send(ddup_state_t *st, int send_fd, iotdata_mesh_dedup_entry_t *send_entries, int send_count) {
     int send_offset = 0;
     while (send_offset < send_count) {
-        const int entry_count = DDUP_MIN(send_count - send_offset, DDUP_BATCH_MAX);
+        const int entry_count = DDUP_MIN(send_count - send_offset, DDUP_PKT_BATCH_SIZE);
         ddup_packet_set_gateway_id(st->_buffer_packet, st->gateway_id);
         ddup_packet_set_entry_count(st->_buffer_packet, entry_count);
         for (int entry_index = 0; entry_index < entry_count; entry_index++) {
@@ -252,7 +260,7 @@ void *ddup_thread_func(void *arg) {
     if ((send_fd = ddup_send_setup(st)) < 0)
         goto ddup_end_send;
     iotdata_mesh_dedup_entry_t send_entries[DDUP_PENDING_MAX]; // multiple
-    while (*st->running) {
+    while (st->running && *st->running) {
         ddup_peers_recv(st, recv_fd);
         if (st->peers_count > 0) {
             const int send_count = ddup_send_collect(st, send_entries);
@@ -272,11 +280,11 @@ ddup_end_all:
 
 bool ddup_insert(ddup_state_t *st, uint16_t station_id, uint16_t sequence) {
     if (!st->enabled)
-        return iotdata_mesh_dedup_insert(st->dedup_ring, station_id, sequence);
+        return iotdata_mesh_dedup_insert(st->ddup_ring, station_id, sequence);
     pthread_mutex_lock(&st->mutex);
-    const bool is_new = iotdata_mesh_dedup_insert(st->dedup_ring, station_id, sequence);
+    const bool is_new = iotdata_mesh_dedup_insert(st->ddup_ring, station_id, sequence);
     if (is_new) {
-        if (st->pending_count < DDUP_PENDING_MAX) {
+        if (st->pending_count < (int)(sizeof(st->pending) / sizeof(st->pending[0]))) {
             st->pending[st->pending_count].station_id = station_id;
             st->pending[st->pending_count].sequence = sequence;
             if (st->pending_count++ == 0)
@@ -291,9 +299,10 @@ bool ddup_insert(ddup_state_t *st, uint16_t station_id, uint16_t sequence) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool ddup_begin(ddup_state_t *st, uint16_t gateway_id, iotdata_mesh_dedup_ring_t *dedup_ring, volatile bool *running) {
+bool ddup_begin(ddup_state_t *st, uint16_t gateway_id, iotdata_mesh_dedup_ring_t *ddup_ring, volatile bool *running) {
+    assert(st && ddup_ring);
     // XXX, mesh code uses the dedup ring as well.
-    st->dedup_ring = dedup_ring;
+    st->ddup_ring = ddup_ring;
     if (!st->enabled) {
         PRINTF_INFO("ddup: disabled, not starting\n");
         return true;

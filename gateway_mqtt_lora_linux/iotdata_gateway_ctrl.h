@@ -6,6 +6,7 @@
 #include <pthread.h>
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 #define MQTT_CLIENT_DEFAULT              "iotdata_gateway"
 #define MQTT_SERVER_DEFAULT              "mqtt://localhost"
@@ -15,12 +16,14 @@
 #define MQTT_RECONNECT_DELAY_DEFAULT     5
 #define MQTT_RECONNECT_DELAY_MAX_DEFAULT 60
 
+#define CTRL_MANAGE_BUF_MAX              64 /* MANAGE frames are small (STATUS is  8 bytes) */
+#define CTRL_MQTT_TOPIC_DEFAULT          "/manage/req"
+#define BBOX_MQTT_TOPIC_DEFAULT          "/blackbox/resp"
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef bool (*ctrl_tx_handler_t)(const uint8_t *packet, const int length);
-
-#define CTRL_MANAGE_BUF_MAX 64 /* MANAGE frames are small (STATUS is 8 bytes) */
-#define CTRL_MANAGE_TOPIC   "/manage/req"
 
 typedef struct {
     uint16_t station_id; /* gateway station id — the MANAGE sender */
@@ -37,7 +40,7 @@ typedef struct {
     uint8_t pending_buf[CTRL_MANAGE_BUF_MAX];
     int pending_len;
     uint16_t pending_target; /* node only: who the CONTROL is addressed to */
-    blackbox_handle_t *blackbox;
+    bbox_state_t *bbox;
     char topic_resp[128];
     char _buffer_resp[244];
     char _buffer_blackbox_rec[BLACKBOX_LINE_MAX];
@@ -50,6 +53,7 @@ typedef struct {
    through this file-scope pointer, set in ctrl_begin. */
 static ctrl_state_t *g_ctrl = NULL;
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static uint16_t ctrl_parse_target(const cJSON *jt) {
@@ -111,7 +115,7 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
        diagnostics). We build the same kvr CONTROL payload a remote manager would send, so the
        MQTT and (later) radio paths run through identical code. */
     if (strncmp(cmd, "node", 4) == 0 && (cmd[4] == '\0' || cmd[4] == '-')) {
-        uint8_t kvbuf[32];
+        uint8_t kvbuf[32]; // XXX
         iotdata_kvr_t kv;
         iotdata_kvr_init(&kv, kvbuf, sizeof(kvbuf));
         if (cmd[4] == '\0') { /* everything that can be asked for -- so not CONTENT, not RECEIVE */
@@ -147,7 +151,7 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
         PRINTF_INFO("ctrl: node cmd='%s' target=%04X -> %zu byte control\n", cmd, (unsigned)target, kv.len);
         /* staged, NOT executed here: this is the mosquitto thread, and node_on_mqtt() transmits
            and mutates node state the main loop owns */
-        if (kv.len > 0 && kv.len <= CTRL_MANAGE_BUF_MAX) {
+        if (kv.len > 0 && kv.len <= sizeof(st->pending_buf)) {
             pthread_mutex_lock(&st->lock);
             if (st->pending)
                 st->stat_overrun++;
@@ -166,26 +170,23 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
     if (strncmp(cmd, "diag", 4) == 0) {
         const bool local = (target == IOTDATA_MESH_MANAGE_TARGET_ALL || target == st->station_id);
         if (local) {
-            blackbox_handle_t *const bb = st->blackbox;
-            if (bb == NULL) {
-                snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: not configured");
-            } else if (strcmp(cmd, "diag") == 0) {
+            if (strcmp(cmd, "diag") == 0) {
                 blackbox_status_t s;
-                blackbox_status(bb, &s);
+                blackbox_status(&st->bbox->handle, &s);
                 blackbox_status_str(&s, BLACKBOX_STATUS_ALL, st->_buffer_resp, sizeof(st->_buffer_resp));
             } else if (strcmp(cmd, "diag-enable") == 0) {
-                blackbox_enable(bb, true);
+                blackbox_enable(&st->bbox->handle, true);
                 snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: enabled");
             } else if (strcmp(cmd, "diag-disable") == 0) {
-                blackbox_enable(bb, false);
+                blackbox_enable(&st->bbox->handle, false);
                 snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: disabled");
             } else if (strcmp(cmd, "diag-clear") == 0) {
-                blackbox_clear(bb);
+                blackbox_clear(&st->bbox->handle);
                 snprintf(st->_buffer_resp, sizeof(st->_buffer_resp), "diag: cleared");
             } else if (strcmp(cmd, "diag-dump") == 0) {
                 size_t cur = 0;
                 int nl = 0;
-                while (blackbox_pull(bb, &cur, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
+                while (blackbox_pull(&st->bbox->handle, &cur, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
                     (void)mqtt_send(st->topic_resp, st->_buffer_blackbox_rec, (int)strlen(st->_buffer_blackbox_rec));
                     nl++;
                 }
@@ -204,9 +205,7 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
     }
 
     const uint16_t seq = st->seq++;
-
-    /* NB: `cmd` points into the cJSON tree, so every use of it must precede cJSON_Delete. */
-    uint8_t buf[CTRL_MANAGE_BUF_MAX];
+    uint8_t buf[CTRL_MANAGE_BUF_MAX]; // XXX
     int n = 0;
     if (strcmp(cmd, "status") == 0)
         n = iotdata_mesh_pack_manage_status(buf, st->station_id, seq, target);
@@ -243,12 +242,10 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
     if (n > 0)
         PRINTF_INFO("ctrl: request cmd='%s' target=%04X station=%04X -> MANAGE (%d bytes)\n", cmd, (unsigned)target, (unsigned)station, n);
     cJSON_Delete(root);
-
-    if (n <= 0 || n > CTRL_MANAGE_BUF_MAX) {
+    if (n <= 0 || n > (int)sizeof(buf)) {
         st->stat_req_bad++; /* unknown command (n==0) or a pack failure */
         return;
     }
-
     pthread_mutex_lock(&st->lock);
     if (st->pending)
         st->stat_overrun++; /* previous frame not yet sent — overwrite with the newest */
@@ -264,7 +261,7 @@ static void ctrl_on_message(const char *topic __attribute__((unused)), const uns
 
 void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
 
-    uint8_t buf[CTRL_MANAGE_BUF_MAX];
+    uint8_t buf[CTRL_MANAGE_BUF_MAX]; // XXX
     int n = 0, kind = CTRL_PENDING_MANAGE;
     uint16_t target = 0;
     pthread_mutex_lock(&st->lock);
@@ -280,7 +277,7 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
         if (kind == CTRL_PENDING_NODE) { /* runs here, on the main loop, where the node state lives */
             node_on_mqtt(ns, buf, (size_t)n, target);
         } else {
-            if (st->tx != NULL && st->tx(buf, n)) {
+            if (st->tx(buf, n)) {
                 st->stat_tx++;
                 PRINTF_INFO("ctrl: tx MANAGE (%d bytes)\n", n);
             } else {
@@ -290,27 +287,28 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
         }
     }
 
-    if (st->blackbox != NULL) {
-        const time_t now = time(NULL);
-        if (st->blackbox_tick_last != 0 && st->blackbox_tick_last != now)
-            blackbox_tick(st->blackbox, (uint32_t)(now - st->blackbox_tick_last) * 1000u);
-        st->blackbox_tick_last = now;
-    }
+    const time_t now = time(NULL);
+    if (st->blackbox_tick_last != 0 && st->blackbox_tick_last != now)
+        blackbox_tick(&st->bbox->handle, (uint32_t)(now - st->blackbox_tick_last) * 1000u);
+    st->blackbox_tick_last = now;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, uint16_t station_id, ctrl_tx_handler_t tx) {
+bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, uint16_t station_id, bbox_state_t *bbox, ctrl_tx_handler_t tx) {
+    assert(st && bbox && tx);
 
     memset(st, 0, sizeof(*st));
     st->station_id = station_id;
+    st->bbox = bbox;
     st->tx = tx;
     if (pthread_mutex_init(&st->lock, NULL) != 0) {
         PRINTF_ERROR("ctrl: mutex init failed\n");
         return false;
     }
-    snprintf(st->topic_req, sizeof(st->topic_req), "%s" CTRL_MANAGE_TOPIC, topic_prefix);
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s/blackbox/resp", topic_prefix);
+    snprintf(st->topic_req, sizeof(st->topic_req), "%s" CTRL_MQTT_TOPIC_DEFAULT, topic_prefix);
+    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" BBOX_MQTT_TOPIC_DEFAULT, topic_prefix);
 
     g_ctrl = st;
     if (!mqtt_subscribe(st->topic_req, MQTT_PUBLISH_QOS, ctrl_on_message)) {

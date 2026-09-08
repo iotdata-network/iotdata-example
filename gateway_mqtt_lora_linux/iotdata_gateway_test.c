@@ -11,8 +11,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 #include <unistd.h>
+#include <assert.h>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -40,30 +42,43 @@ void __sleep_ms(const uint32_t ms) { /* defined after the header declares it, as
     (void)ms;
 }
 
-/* mirrored from iotdata_gateway.c, which this harness does not include: the stat/ddup headers
-   below call it */
-__attribute__((format(printf, 3, 4))) static inline const char *snprintf_inline(char *buf, size_t size, const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    (void)vsnprintf(buf, size, fmt, args);
-    va_end(args);
-    return buf;
-}
-
 #define MQTT_CONNECT_TIMEOUT 60
 #define MQTT_PUBLISH_QOS     0
 #define MQTT_PUBLISH_RETAIN  false
 #include "mqtt_linux.h"
 
+#include "iotdata_gateway_util.h"
+
 #include "iotdata_config.h"
 #include "iotdata_variant.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
+#include "iotdata_down.h"
+#include "iotdata_node.h"
+
+#define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
+#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#include "iotdata_blackbox.h"
+
+typedef struct {
+    blackbox_handle_t handle;
+    blackbox_config_t config;
+    char pool[IOTDATA_BLACKBOX_POOL_SZ];
+    char path[512];
+} bbox_state_t;
 
 #include "iotdata_gateway_mesh.h"
 #include "iotdata_gateway_ddup.h"
 #include "iotdata_gateway_stat.h"
 #include "iotdata_gateway_netw.h"
+/* node/ctrl/exec are pulled in for the process_mesh_packet tests; the harness exercises only part
+   of them, so their lifecycle entry points are legitimately unused here. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include "iotdata_gateway_node.h"
+#include "iotdata_gateway_ctrl.h"
+#include "iotdata_gateway_exec.h"
+#pragma GCC diagnostic pop
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -259,6 +274,9 @@ static bool test_mesh_transmit_ack_ok(void) {
 // mesh_receive_forward
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+/* mesh_receive_forward_r only READS the frame -- unpack and accounting. The dedup decision and the
+   ACK that follows it belong to the caller, so they are covered by the process_mesh_packet tests
+   below rather than here. */
 static bool test_mesh_receive_forward_new(void) {
     reset_test_helpers();
     mesh_state_t ms;
@@ -266,74 +284,20 @@ static bool test_mesh_receive_forward_new(void) {
     ms.enabled = true;
     ms.station_id = 0x0001;
     ms.packet_handler = test_packet_handler;
-    ms.dedup_handler = test_dedup_handler;
-    dedup_handler_result = true;
-
-    /* build forward: sender=0x005, seq=50, ttl=3, inner = fake 8-byte iotdata packet */
-    uint8_t inner[8] = { 0x10, 0x42, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD };
-    uint8_t fwd_buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 8];
-    iotdata_mesh_pack_forward(fwd_buf, 0x0005, 50, 3, inner, 8);
-
-    const uint8_t *inner_out;
-    int inner_len;
-    ASSERT(mesh_receive_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
-
-    ASSERT_EQ_INT(ms.ctrl[IOTDATA_MESH_CTRL_FORWARD].rx, 1u);
-    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
-    ASSERT_EQ_INT(inner_len, 8);
-    ASSERT_EQ_INT(dedup_handler_calls, 1);
-    /* ACK should have been sent */
-    ASSERT_EQ_INT(packet_handler_calls, 1);
-    ASSERT_EQ_INT(ms.stat_acks_tx, 1u);
-    return true;
-}
-
-static bool test_mesh_receive_forward_duplicate(void) {
-    reset_test_helpers();
-    mesh_state_t ms;
-    memset(&ms, 0, sizeof(ms));
-    ms.enabled = true;
-    ms.station_id = 0x0001;
-    ms.packet_handler = test_packet_handler;
-    ms.dedup_handler = test_dedup_handler;
-    dedup_handler_result = false; /* duplicate */
 
     uint8_t inner[8] = { 0x10, 0x42, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD };
     uint8_t fwd_buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 8];
     iotdata_mesh_pack_forward(fwd_buf, 0x0005, 50, 3, inner, 8);
 
-    const uint8_t *inner_out;
-    int inner_len;
-    ASSERT(!mesh_receive_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
-
+    iotdata_mesh_forward_t fw;
+    ASSERT(mesh_receive_forward_r(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &fw));
     ASSERT_EQ_INT(ms.ctrl[IOTDATA_MESH_CTRL_FORWARD].rx, 1u);
-    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 0u);
-    ASSERT_EQ_INT(ms.stat_duplicates, 1u);
-    /* ACK still sent even for duplicates */
-    ASSERT_EQ_INT(packet_handler_calls, 1);
-    ASSERT_EQ_INT(ms.stat_acks_tx, 1u);
-    return true;
-}
-
-static bool test_mesh_receive_forward_no_dedup(void) {
-    reset_test_helpers();
-    mesh_state_t ms;
-    memset(&ms, 0, sizeof(ms));
-    ms.enabled = true;
-    ms.station_id = 0x0001;
-    ms.packet_handler = test_packet_handler;
-    ms.dedup_handler = NULL;
-
-    uint8_t inner[8] = { 0x10, 0x42, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD };
-    uint8_t fwd_buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 8];
-    iotdata_mesh_pack_forward(fwd_buf, 0x0005, 50, 3, inner, 8);
-
-    const uint8_t *inner_out;
-    int inner_len;
-    ASSERT(mesh_receive_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
-
-    ASSERT_EQ_INT(ms.ctrl[IOTDATA_MESH_CTRL_FORWARD].rx, 1u);
-    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
+    ASSERT_EQ_INT(fw.inner_len, 8);
+    ASSERT_EQ_INT(fw.sender_station, 0x0005);
+    /* it must NOT have transmitted, and must NOT have consulted dedup */
+    ASSERT_EQ_INT(packet_handler_calls, 0);
+    ASSERT_EQ_INT(ms.stat_acks_tx, 0u);
+    ASSERT_EQ_INT(dedup_handler_calls, 0);
     return true;
 }
 
@@ -346,33 +310,105 @@ static bool test_mesh_receive_forward_too_short(void) {
     ms.packet_handler = test_packet_handler;
 
     uint8_t short_buf[4] = { 0xF0, 0x05, 0x00, 0x32 };
-    const uint8_t *inner_out;
-    int inner_len;
-    ASSERT(!mesh_receive_forward(&ms, short_buf, 4, &inner_out, &inner_len));
+    iotdata_mesh_forward_t fw;
+    ASSERT(!mesh_receive_forward_r(&ms, short_buf, 4, &fw));
+    ASSERT_EQ_INT(ms.ctrl[IOTDATA_MESH_CTRL_FORWARD].err, 1u);
     return true;
 }
 
-static bool test_mesh_receive_forward_disabled_no_ack(void) {
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// process_mesh_packet FORWARD: dedup + ACK policy, which moved out of the receive handler.
+//
+// The inner packet is deliberately too short to peek, so process_sensor_packet is never reached
+// and nothing is published -- leaving the dedup/ACK decision as the only thing under test.
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static void fwd_test_state(process_state_t *ps, mesh_state_t *ms, stat_state_t *ss, bool enabled, bool dedup_says_new) {
+    memset(ps, 0, sizeof(*ps));
+    memset(ms, 0, sizeof(*ms));
+    memset(ss, 0, sizeof(*ss));
+    ms->enabled = enabled;
+    ms->station_id = 0x0001;
+    ms->packet_handler = test_packet_handler;
+    ms->dedup_handler = test_dedup_handler;
+    dedup_handler_result = dedup_says_new;
+    netw_begin(&ps->network);
+    ps->state_mesh = ms;
+    ps->state_stat = ss;
+    ps->mqtt_topic_prefix = "test";
+}
+
+/* two bytes of inner: unpackable as a FORWARD, not peekable as an iotdata packet */
+#define FWD_TEST_BUILD(buf) \
+    uint8_t buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 4]; \
+    do { \
+        const uint8_t _inner[4] = { 0xC0, 0x42, 0x00, 0x01 }; \
+        iotdata_mesh_pack_forward(buf, 0x0005, 50, 3, _inner, 4); \
+    } while (0)
+
+static bool test_process_forward_new_acks(void) {
     reset_test_helpers();
+    static process_state_t ps;
     mesh_state_t ms;
-    memset(&ms, 0, sizeof(ms));
-    ms.enabled = false; /* mesh disabled -- no ACKs */
-    ms.station_id = 0x0001;
-    ms.packet_handler = test_packet_handler;
-    ms.dedup_handler = test_dedup_handler;
-    dedup_handler_result = true;
+    static stat_state_t ss; /* ~300KB: never on the stack */
+    fwd_test_state(&ps, &ms, &ss, true, true /* new */);
+    FWD_TEST_BUILD(fwd_buf);
 
-    uint8_t inner[8] = { 0x10, 0x42, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD };
-    uint8_t fwd_buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 8];
-    iotdata_mesh_pack_forward(fwd_buf, 0x0005, 50, 3, inner, 8);
+    process_mesh_packet(&ps, fwd_buf, (int)sizeof(fwd_buf), 15, 0x0005, 50, "test", 0);
+    ASSERT_EQ_INT(ms.ctrl[IOTDATA_MESH_CTRL_FORWARD].rx, 1u);
+    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
+    ASSERT_EQ_INT(ms.stat_duplicates, 0u);
+    ASSERT_EQ_INT(dedup_handler_calls, 1);
+    ASSERT_EQ_INT(ms.stat_acks_tx, 1u); /* ACKed */
+    return true;
+}
 
-    const uint8_t *inner_out;
-    int inner_len;
-    ASSERT(mesh_receive_forward(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &inner_out, &inner_len));
+static bool test_process_forward_duplicate_still_acks(void) {
+    reset_test_helpers();
+    static process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss; /* ~300KB: never on the stack */
+    fwd_test_state(&ps, &ms, &ss, true, false /* duplicate */);
+    FWD_TEST_BUILD(fwd_buf);
 
-    /* no ACK when disabled */
+    process_mesh_packet(&ps, fwd_buf, (int)sizeof(fwd_buf), 15, 0x0005, 50, "test", 0);
+
+    ASSERT_EQ_INT(ms.stat_duplicates, 1u);
+    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 0u);
+    /* still ACKed: a duplicate means our earlier ACK went missing and the forwarder is retrying */
+    ASSERT_EQ_INT(ms.stat_acks_tx, 1u);
+    return true;
+}
+
+static bool test_process_forward_no_dedup_handler(void) {
+    reset_test_helpers();
+    static process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss; /* ~300KB: never on the stack */
+    fwd_test_state(&ps, &ms, &ss, true, true);
+    ms.dedup_handler = NULL; /* no dedup configured -> everything is new */
+    FWD_TEST_BUILD(fwd_buf);
+
+    process_mesh_packet(&ps, fwd_buf, (int)sizeof(fwd_buf), 15, 0x0005, 50, "test", 0);
+
+    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
+    ASSERT_EQ_INT(ms.stat_duplicates, 0u);
+    return true;
+}
+
+static bool test_process_forward_disabled_no_ack(void) {
+    reset_test_helpers();
+    static process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss; /* ~300KB: never on the stack */
+    fwd_test_state(&ps, &ms, &ss, false /* mesh disabled */, true);
+    FWD_TEST_BUILD(fwd_buf);
+
+    process_mesh_packet(&ps, fwd_buf, (int)sizeof(fwd_buf), 15, 0x0005, 50, "test", 0);
+
+    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u); /* still accounted for */
+    ASSERT_EQ_INT(ms.stat_acks_tx, 0u);            /* but silent */
     ASSERT_EQ_INT(packet_handler_calls, 0);
-    ASSERT_EQ_INT(ms.stat_acks_tx, 0u);
     return true;
 }
 
@@ -394,9 +430,12 @@ static bool test_mesh_receive_beacon_rx(void) {
         .flags = IOTDATA_MESH_FLAG_ACCEPTING,
         .generation = 100,
     };
-    iotdata_mesh_pack_beacon(buf, &b);
+    const int len = iotdata_mesh_pack_beacon(buf, sizeof(buf), &b);
+    ASSERT_EQ_INT(len, IOTDATA_MESH_BEACON_SIZE);
 
-    mesh_receive_beacon(&ms, buf, IOTDATA_MESH_BEACON_SIZE);
+    iotdata_mesh_beacon_t got;
+    ASSERT(mesh_receive_beacon_r(&ms, buf, IOTDATA_MESH_BEACON_SIZE, &got));
+    ASSERT_EQ_INT(got.gateway_id, b.gateway_id);
     /* no crash = pass */
     return true;
 }
@@ -514,8 +553,8 @@ static bool test_ddup_packet_length(void) {
 static bool test_ddup_packet_entry_count_clamped(void) {
     ddup_packet_t pkt;
     memset(pkt, 0, sizeof(pkt));
-    pkt[2] = 100; /* raw count exceeds DDUP_BATCH_MAX */
-    ASSERT_EQ_INT(ddup_packet_get_entry_count(pkt), DDUP_BATCH_MAX);
+    pkt[2] = 100; /* raw count exceeds DDUP_PKT_BATCH_SIZE */
+    ASSERT_EQ_INT(ddup_packet_get_entry_count(pkt), DDUP_PKT_BATCH_SIZE);
     return true;
 }
 
@@ -608,7 +647,7 @@ static bool test_ddup_insert_new(void) {
     ds.enabled = false;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
-    ds.dedup_ring = &ring;
+    ds.ddup_ring = &ring;
 
     ASSERT(ddup_insert(&ds, 0x0042, 1));
     return true;
@@ -620,7 +659,7 @@ static bool test_ddup_insert_duplicate(void) {
     ds.enabled = false;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
-    ds.dedup_ring = &ring;
+    ds.ddup_ring = &ring;
 
     ASSERT(ddup_insert(&ds, 0x0042, 1));
     ASSERT(!ddup_insert(&ds, 0x0042, 1));
@@ -633,7 +672,7 @@ static bool test_ddup_insert_different_station(void) {
     ds.enabled = false;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
-    ds.dedup_ring = &ring;
+    ds.ddup_ring = &ring;
 
     ASSERT(ddup_insert(&ds, 0x0042, 1));
     ASSERT(ddup_insert(&ds, 0x0043, 1)); /* different station, same seq */
@@ -646,7 +685,7 @@ static bool test_ddup_insert_different_seq(void) {
     ds.enabled = false;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
-    ds.dedup_ring = &ring;
+    ds.ddup_ring = &ring;
 
     ASSERT(ddup_insert(&ds, 0x0042, 1));
     ASSERT(ddup_insert(&ds, 0x0042, 2)); /* same station, different seq */
@@ -659,7 +698,7 @@ static bool test_ddup_insert_with_pending(void) {
     ds.enabled = true;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
-    ds.dedup_ring = &ring;
+    ds.ddup_ring = &ring;
     pthread_mutex_init(&ds.mutex, NULL);
 
     ASSERT(ddup_insert(&ds, 0x0042, 1));
@@ -684,7 +723,7 @@ static bool test_dedup_ring_overflow(void) {
     ds.enabled = false;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
-    ds.dedup_ring = &ring;
+    ds.ddup_ring = &ring;
 
     /* fill beyond capacity */
     for (int i = 0; i < IOTDATA_MESH_DEDUP_RING_SIZE + 10; i++)
@@ -721,7 +760,7 @@ static bool test_ddup_send_collect_with_delay(void) {
     ds.delay_ms = 10;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
-    ds.dedup_ring = &ring;
+    ds.ddup_ring = &ring;
     pthread_mutex_init(&ds.mutex, NULL);
 
     ddup_insert(&ds, 0x0042, 1);
@@ -798,7 +837,7 @@ static bool test_ddup_peers_send_batching(void) {
     ds.gateway_id = 0x0001;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
-    ds.dedup_ring = &ring;
+    ds.ddup_ring = &ring;
 
     ddup_peers_parse(&ds, "127.0.0.1:19011");
     ddup_peers_resolve(&ds);
@@ -816,9 +855,9 @@ static bool test_ddup_peers_send_batching(void) {
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     ASSERT(bind(recv_fd, (struct sockaddr *)&bind_addr, (socklen_t)sizeof(bind_addr)) == 0);
 
-    /* create entries exceeding DDUP_BATCH_MAX */
-    int count = DDUP_BATCH_MAX + 10;
-    iotdata_mesh_dedup_entry_t entries[DDUP_BATCH_MAX + 10];
+    /* create entries exceeding DDUP_PKT_BATCH_SIZE */
+    int count = DDUP_PKT_BATCH_SIZE + 10;
+    iotdata_mesh_dedup_entry_t entries[DDUP_PKT_BATCH_SIZE + 10];
     for (int i = 0; i < count; i++) {
         entries[i].station_id = (uint16_t)(i + 1);
         entries[i].sequence = (uint16_t)(i * 10);
@@ -841,7 +880,7 @@ static bool test_ddup_peers_send_batching(void) {
     ssize_t n = recv(recv_fd, pkt, sizeof(pkt), 0);
     ASSERT(n > 0);
     ASSERT_EQ_INT(ddup_packet_get_gateway_id(pkt), 0x0001u);
-    ASSERT_EQ_INT(ddup_packet_get_entry_count(pkt), DDUP_BATCH_MAX);
+    ASSERT_EQ_INT(ddup_packet_get_entry_count(pkt), DDUP_PKT_BATCH_SIZE);
 
     /* second batch */
     ASSERT(poll(&pfd, 1, 100) > 0);
@@ -872,7 +911,7 @@ static bool test_ddup_peer_communication(void) {
     sa.running = &test_running;
     iotdata_mesh_dedup_ring_t ring_a;
     iotdata_mesh_dedup_init(&ring_a);
-    sa.dedup_ring = &ring_a;
+    sa.ddup_ring = &ring_a;
     ddup_peers_parse(&sa, "127.0.0.1:19002");
     ddup_peers_resolve(&sa);
     ASSERT_EQ_INT(sa.peers_count, 1);
@@ -888,7 +927,7 @@ static bool test_ddup_peer_communication(void) {
     sb.running = &test_running;
     iotdata_mesh_dedup_ring_t ring_b;
     iotdata_mesh_dedup_init(&ring_b);
-    sb.dedup_ring = &ring_b;
+    sb.ddup_ring = &ring_b;
     ddup_peers_parse(&sb, "127.0.0.1:19001");
     ddup_peers_resolve(&sb);
     ASSERT_EQ_INT(sb.peers_count, 1);
@@ -910,7 +949,7 @@ static bool test_ddup_peer_communication(void) {
 
     /* B should now have this entry via UDP injection */
     pthread_mutex_lock(&sb.mutex);
-    bool is_new = iotdata_mesh_dedup_insert(sb.dedup_ring, 0x0042, 100);
+    bool is_new = iotdata_mesh_dedup_insert(sb.ddup_ring, 0x0042, 100);
     pthread_mutex_unlock(&sb.mutex);
 
     ASSERT(!is_new);
@@ -941,7 +980,7 @@ static bool test_ddup_bidirectional_sync(void) {
     sa.running = &test_running;
     iotdata_mesh_dedup_ring_t ring_a;
     iotdata_mesh_dedup_init(&ring_a);
-    sa.dedup_ring = &ring_a;
+    sa.ddup_ring = &ring_a;
     ddup_peers_parse(&sa, "127.0.0.1:19004");
     ddup_peers_resolve(&sa);
 
@@ -954,7 +993,7 @@ static bool test_ddup_bidirectional_sync(void) {
     sb.running = &test_running;
     iotdata_mesh_dedup_ring_t ring_b;
     iotdata_mesh_dedup_init(&ring_b);
-    sb.dedup_ring = &ring_b;
+    sb.ddup_ring = &ring_b;
     ddup_peers_parse(&sb, "127.0.0.1:19003");
     ddup_peers_resolve(&sb);
 
@@ -973,12 +1012,12 @@ static bool test_ddup_bidirectional_sync(void) {
 
     /* A should have B's entry */
     pthread_mutex_lock(&sa.mutex);
-    bool a_has_b = !iotdata_mesh_dedup_insert(sa.dedup_ring, 0x0043, 200);
+    bool a_has_b = !iotdata_mesh_dedup_insert(sa.ddup_ring, 0x0043, 200);
     pthread_mutex_unlock(&sa.mutex);
 
     /* B should have A's entry */
     pthread_mutex_lock(&sb.mutex);
-    bool b_has_a = !iotdata_mesh_dedup_insert(sb.dedup_ring, 0x0042, 100);
+    bool b_has_a = !iotdata_mesh_dedup_insert(sb.ddup_ring, 0x0042, 100);
     pthread_mutex_unlock(&sb.mutex);
 
     ASSERT(a_has_b);
@@ -1013,7 +1052,7 @@ static bool test_ddup_three_gateway_sync(void) {
         states[i].gateway_id = (uint16_t)(i + 1);
         states[i].running = &test_running;
         iotdata_mesh_dedup_init(&rings[i]);
-        states[i].dedup_ring = &rings[i];
+        states[i].ddup_ring = &rings[i];
 
         /* peer with the other two */
         char peers[128];
@@ -1041,7 +1080,7 @@ static bool test_ddup_three_gateway_sync(void) {
     /* gateways 1 and 2 should have the entry */
     for (int i = 1; i < 3; i++) {
         pthread_mutex_lock(&states[i].mutex);
-        bool is_new = iotdata_mesh_dedup_insert(states[i].dedup_ring, 0x0042, 500);
+        bool is_new = iotdata_mesh_dedup_insert(states[i].ddup_ring, 0x0042, 500);
         pthread_mutex_unlock(&states[i].mutex);
         ASSERT(!is_new);
     }
@@ -1079,7 +1118,7 @@ static int netw_valid_slots(const netw_t *n) {
 
 static bool test_netw_upsert_on_empty(void) {
     static netw_t net;
-    netw_init(&net);
+    netw_begin(&net);
     ASSERT(netw_count(&net) == 0);
     ASSERT(netw_locate(&net, 0x111) == -1); /* lookup on an empty table */
     const netw_station_t *const e = netw_upsert(&net, 0x111, 1000);
@@ -1092,7 +1131,7 @@ static bool test_netw_upsert_on_empty(void) {
 
 static bool test_netw_upsert_in_place(void) {
     static netw_t net;
-    netw_init(&net);
+    netw_begin(&net);
     const netw_station_t *const a = netw_upsert(&net, 0x111, 1000);
     const netw_station_t *const b = netw_upsert(&net, 0x111, 1001);
     ASSERT(a == b);                     /* same entry */
@@ -1104,7 +1143,7 @@ static bool test_netw_upsert_in_place(void) {
 
 static bool test_netw_sequential_upserts(void) {
     static netw_t net;
-    netw_init(&net);
+    netw_begin(&net);
     (void)netw_upsert(&net, 0x111, 1000);
     (void)netw_upsert(&net, 0x222, 1001); /* the free slot lies past the valid entries */
     (void)netw_upsert(&net, 0x333, 1002);
@@ -1118,7 +1157,7 @@ static bool test_netw_sequential_upserts(void) {
 
 static bool test_netw_fill_and_evict_stalest(void) {
     static netw_t net;
-    netw_init(&net);
+    netw_begin(&net);
     (void)netw_upsert(&net, 0x111, 1000); /* the stalest, once the table is full */
     for (int i = 1; i < NETW_MAX; i++)
         (void)netw_upsert(&net, (uint16_t)(0x400 + i), 2000 + i);
@@ -1134,7 +1173,7 @@ static bool test_netw_fill_and_evict_stalest(void) {
 
 static bool test_netw_all_locatable(void) {
     static netw_t net;
-    netw_init(&net);
+    netw_begin(&net);
     for (int i = 0; i < NETW_MAX; i++)
         (void)netw_upsert(&net, (uint16_t)(0x500 + i), 1000 + i);
     int found = 0; /* a scan bound that cut short would lose the later entries */
@@ -1147,6 +1186,21 @@ static bool test_netw_all_locatable(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+
+/* find_or_create() creates on miss, so it can never answer "is this present?" -- scan instead */
+static bool stat_station_present(const stat_state_t *s, uint16_t station_id) {
+    for (int i = 0; i < (int)(sizeof(s->stations) / sizeof(s->stations[0])); i++)
+        if (s->stations[i].valid && s->stations[i].station_id == station_id)
+            return true;
+    return false;
+}
+
+static bool stat_peer_present(const stat_state_t *s, uint16_t station_id) {
+    for (int i = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])); i++)
+        if (s->peers[i].valid && s->peers[i].station_id == station_id)
+            return true;
+    return false;
+}
 
 static int stat_valid_stations(const stat_state_t *s) {
     int c = 0;
@@ -1171,16 +1225,16 @@ static int stat_valid_peers(const stat_state_t *s) {
 static bool test_stat_station_create_and_find(void) {
     static stat_state_t s;
     memset(&s, 0, sizeof(s));
-    stat_station_t *const a = stat_station_find_or_create(&s, 0x111);
+    stat_station_t *const a = stat_station_find_or_create(&s, 0x111, time(NULL));
     ASSERT(a != NULL && a->station_id == 0x111); /* create on an EMPTY table */
     ASSERT_EQ_INT(s.stations_count, 1);
-    ASSERT(stat_station_find_or_create(&s, 0x111) == a); /* find, not re-create */
-    ASSERT_EQ_INT(s.stations_count, 1);                  /* must NOT double-count */
-    (void)stat_station_find_or_create(&s, 0x222);        /* free slot lies past the valid entries */
-    (void)stat_station_find_or_create(&s, 0x333);
+    ASSERT(stat_station_find_or_create(&s, 0x111, time(NULL)) == a); /* find, not re-create */
+    ASSERT_EQ_INT(s.stations_count, 1);                              /* must NOT double-count */
+    (void)stat_station_find_or_create(&s, 0x222, time(NULL));        /* free slot lies past the valid entries */
+    (void)stat_station_find_or_create(&s, 0x333, time(NULL));
     ASSERT_EQ_INT(s.stations_count, 3);
     ASSERT_COUNT_STAT(&s);
-    ASSERT(stat_station_find_or_create(&s, 0x222)->station_id == 0x222); /* still findable */
+    ASSERT(stat_station_find_or_create(&s, 0x222, time(NULL))->station_id == 0x222); /* still findable */
     ASSERT_EQ_INT(s.stations_count, 3);
     return true;
 }
@@ -1188,14 +1242,21 @@ static bool test_stat_station_create_and_find(void) {
 static bool test_stat_station_fill_and_evict(void) {
     static stat_state_t s;
     memset(&s, 0, sizeof(s));
-    for (int i = 0; i < STAT_MAX_STATIONS; i++)
-        (void)stat_station_find_or_create(&s, (uint16_t)(0x400 + i));
+    for (int i = 0; i < STAT_MAX_STATIONS; i++) {
+        stat_station_t *const e = stat_station_find_or_create(&s, (uint16_t)(0x400 + i), time(NULL));
+        e->last_seen = 9000 - i; /* DEscending: the stalest is the LAST slot, not the first, so an
+                                    "always evict index 0" bug cannot pass by coincidence */
+    }
     ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);
     ASSERT_COUNT_STAT(&s);
-    (void)stat_station_find_or_create(&s, 0xABC);       /* full -> evicts the stalest */
-    ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS); /* count saturates */
+
+    (void)stat_station_find_or_create(&s, 0xABC, time(NULL)); /* full -> evicts the stalest */
+    ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);       /* count saturates */
     ASSERT_COUNT_STAT(&s);
-    ASSERT(stat_station_find_or_create(&s, 0xABC)->station_id == 0xABC);
+    ASSERT(stat_station_present(&s, 0xABC));
+    ASSERT(!stat_station_present(&s, 0x400 + STAT_MAX_STATIONS - 1)); /* the stalest went */
+    ASSERT(stat_station_present(&s, 0x400));                          /* the freshest stayed */
+    ASSERT(stat_station_present(&s, 0x400 + STAT_MAX_STATIONS - 2));  /* and only one went */
     return true;
 }
 
@@ -1203,10 +1264,10 @@ static bool test_stat_station_all_findable(void) {
     static stat_state_t s;
     memset(&s, 0, sizeof(s));
     for (int i = 0; i < STAT_MAX_STATIONS; i++)
-        (void)stat_station_find_or_create(&s, (uint16_t)(0x600 + i));
+        (void)stat_station_find_or_create(&s, (uint16_t)(0x600 + i), time(NULL));
     int found = 0; /* a scan bound that cut short would re-create instead of finding */
     for (int i = 0; i < STAT_MAX_STATIONS; i++)
-        if (s.stations[i].valid && stat_station_find_or_create(&s, s.stations[i].station_id) == &s.stations[i])
+        if (s.stations[i].valid && stat_station_find_or_create(&s, s.stations[i].station_id, time(NULL)) == &s.stations[i])
             found++;
     ASSERT_EQ_INT(found, STAT_MAX_STATIONS);
     ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);
@@ -1236,7 +1297,21 @@ static bool test_stat_mesh_peer_fill_and_evict(void) {
         stat_on_peer(&s, (uint16_t)(0xB00 + i), 1, 1, 0);
     ASSERT_EQ_INT(s.peers_count, STAT_MESH_PEERS_MAX);
     ASSERT_COUNT_STAT(&s);
-    stat_on_peer(&s, 0xCCC, 1, 1, 0); /* full -> evict, count saturates */
+    /* stat_on_peer stamps last_seen with time(NULL), so every entry ties within the same second.
+       Restamp DESCENDING so the stalest is the LAST slot: an "always evict index 0" bug then
+       cannot pass by coincidence. Fill order means peers[i] is 0xB00+i. */
+    for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
+        s.peers[i].last_seen = 9000 - i;
+
+    stat_on_peer(&s, 0xCCC, 1, 1, 0); /* full -> evict the stalest, count saturates */
+    ASSERT_EQ_INT(s.peers_count, STAT_MESH_PEERS_MAX);
+    ASSERT_COUNT_STAT(&s);
+    ASSERT(stat_peer_present(&s, 0xCCC));
+    ASSERT(!stat_peer_present(&s, 0xB00 + STAT_MESH_PEERS_MAX - 1)); /* the stalest went */
+    ASSERT(stat_peer_present(&s, 0xB00));                            /* the freshest stayed */
+    ASSERT(stat_peer_present(&s, 0xB00 + STAT_MESH_PEERS_MAX - 2));  /* and only one went */
+
+    stat_on_peer(&s, 0xB00, 7, 2, 3); /* existing -> update in place, no growth */
     ASSERT_EQ_INT(s.peers_count, STAT_MESH_PEERS_MAX);
     ASSERT_COUNT_STAT(&s);
     return true;
@@ -1258,10 +1333,11 @@ int main(void) {
     RUN_TEST(mesh_beacon_generation_wraps);
     RUN_TEST(mesh_transmit_ack_ok);
     RUN_TEST(mesh_receive_forward_new);
-    RUN_TEST(mesh_receive_forward_duplicate);
-    RUN_TEST(mesh_receive_forward_no_dedup);
     RUN_TEST(mesh_receive_forward_too_short);
-    RUN_TEST(mesh_receive_forward_disabled_no_ack);
+    RUN_TEST(process_forward_new_acks);
+    RUN_TEST(process_forward_duplicate_still_acks);
+    RUN_TEST(process_forward_no_dedup_handler);
+    RUN_TEST(process_forward_disabled_no_ack);
     RUN_TEST(mesh_receive_beacon_rx);
     RUN_TEST(mesh_receive_route_error_rx);
     RUN_TEST(mesh_receive_pong_rx);
