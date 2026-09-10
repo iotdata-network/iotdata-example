@@ -9,7 +9,7 @@
 // (iotdata_gateway_mqtt.h) turns it into a mesh MANAGE frame on air, addressed to one
 // node or broadcast to all. The node executes the command — e.g. STATUS makes it dump
 // its status line to its own USB console (the response is NOT on MQTT, so watch the
-// relay console via esp32-deploy to see it).
+// relay console via esp32-tool to see it).
 //
 // Extend COMMANDS as the management vocabulary grows (reboot, drop-parent, set-param,
 // report/uplink-diagnostics, ...). Each command builds the JSON request; a matching

@@ -106,7 +106,7 @@ static e22900t22_config_t e22_config = {
 #define LORA_DRAIN_TIMEOUT_MS 1000 /* UART TX FIFO drain before the pins go quiet */
 #define LORA_SETTLE_MS        20   /* let the module pull AUX low on the packet it just received */
 
-static void lora_gpio_init(void) {
+static inline void lora_gpio_init(void) {
     /* Release the M0/M1 hold applied before deep sleep (see lora_hold); a no-op on a cold boot. */
     gpio_deep_sleep_hold_dis();
     (void)gpio_hold_dis(PIN_E22_M0);
@@ -126,7 +126,7 @@ static void lora_gpio_init(void) {
  * cached state was lost) and false on an ordinary deep sleep wake, where going
  * straight to transfer mode saves a second or so of UART command traffic.
  */
-static bool lora_begin(const bool configure) {
+static inline bool lora_begin(const bool configure) {
 
     lora_gpio_init();
     if (!serial_connect()) {
@@ -153,7 +153,7 @@ static bool lora_begin(const bool configure) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool lora_transmit(const uint8_t *const packet, const size_t length) {
+static inline bool lora_transmit(const uint8_t *const packet, const size_t length) {
 
     char hex[(PACKET_MAX * 2) + 1] = { '\0' };
     for (size_t i = 0, o = 0; i < length && o < (sizeof(hex) - 1); i++)
@@ -177,7 +177,7 @@ static bool lora_transmit(const uint8_t *const packet, const size_t length) {
  * gone out on air. If not, drive M0/M1 directly rather than asking a module we
  * never established contact with.
  */
-static void lora_end(const bool active) {
+static inline void lora_end(const bool active) {
 
     if (active) {
         (void)uart_wait_tx_done(E22_UART, pdMS_TO_TICKS(LORA_DRAIN_TIMEOUT_MS));
@@ -195,7 +195,7 @@ static void lora_end(const bool active) {
  * sleep mode just selected; hold M0/M1 so it stays there (~2uA) for as long as
  * we do. The hold is released on the next wake, at the top of lora_gpio_init.
  */
-static void lora_hold(void) {
+static inline void lora_hold(void) {
     (void)gpio_hold_en(PIN_E22_M0);
     (void)gpio_hold_en(PIN_E22_M1);
     gpio_deep_sleep_hold_en();
