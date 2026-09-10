@@ -17,7 +17,7 @@ CFLAGS_DEFINES += -DIOTDATA_CONFIG='"$(abspath $(IOTDATA_CONFIG))"'
 endif
 CFLAGS_COMMON=$(IOTDATA_CFLAGS_COMMON)
 CFLAGS_OPT=$(IOTDATA_CFLAGS_OPT)
-CFLAGS_INCLUDES=-Iinclude -I$(IOTDATA_SRC_EXAMPLE)/include -I$(IOTDATA_SRC_LIBRARY) -I$(IOTDATA_SRC_DEPEND_E22XXXTXX) -I$(IOTDATA_SRC_COMMON)/include -I$(IOTDATA_SRC_DEPEND_BLACKBOX)
+CFLAGS_INCLUDES=-Iinclude -I$(IOTDATA_SRC_EXAMPLE)/include -I$(IOTDATA_SRC_LIBRARY) -I$(IOTDATA_SRC_COMMON)/include/device -I$(IOTDATA_SRC_COMMON)/include -I$(IOTDATA_SRC_DEPEND_BLACKBOX)
 CFLAGS=$(CFLAGS_COMMON) $(CFLAGS_OPT) $(CFLAGS_DEFINES) $(CFLAGS_INCLUDES)
 LDFLAGS=$(IOTDATA_LDFLAGS_COMMON)
 LIBS=$(IOTDATA_LIBS_COMMON) -lmosquitto -lpthread
@@ -28,9 +28,11 @@ TARGET=iotdata_gateway
 MAIN=iotdata_gateway.c
 SOURCES_TARGET=\
     iotdata_gateway_ddup.h iotdata_gateway_exec.h iotdata_gateway_mesh.h iotdata_gateway_ctrl.h iotdata_gateway_netw.h iotdata_gateway_node.h iotdata_gateway_stat.h \
-    include/config_linux.h include/serial_linux.h include/mqtt_linux.h
+    include/config_linux.h include/mqtt_linux.h
 SOURCES_DEPEND=\
-    $(IOTDATA_SRC_DEPEND_E22XXXTXX)/e22xxxtxx.h \
+    $(IOTDATA_SRC_COMMON)/include/device/d_platform_linux.h \
+    $(IOTDATA_SRC_COMMON)/include/device/d_common.h \
+    $(IOTDATA_SRC_COMMON)/include/device/d_interface_e22900t22.h \
     $(IOTDATA_SRC_COMMON)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
     $(IOTDATA_SRC_COMMON)/include/iotdata_blackbox.h $(IOTDATA_SRC_DEPEND_BLACKBOX)/blackbox.h \
     $(IOTDATA_SRC_LIBRARY_SOURCES)

@@ -34,13 +34,26 @@ static void test_e22_printf_stub(const char *format, ...) {
 #define PRINTF_ERROR test_e22_printf_stub
 #define PRINTF_INFO  test_e22_printf_stub
 #define PRINTF_WARN  test_e22_printf_stub
-#undef E22900T22_SUPPORT_MODULE_DIP
-#define E22900T22_SUPPORT_MODULE_USB
-#include "serial_linux.h"
-#include "e22xxxtxx.h"
-void __sleep_ms(const uint32_t ms) { /* defined after the header declares it, as in iotdata_gateway.c */
-    (void)ms;
+/* Same stack as the gateway: the common E22 driver on the Linux platform shim. Only needed here
+   for the types the headers under test use (lora_config_t, LORA_PACKET_SIZE_MAX). */
+#define EMU_LINUX
+#include "d_platform_linux.h"
+#include "d_common.h"
+#define PIN_DEVICE_UART_TX  GPIO_NUM_NC
+#define PIN_DEVICE_UART_RX  GPIO_NUM_NC
+#define PIN_DEVICE_LORA_AUX GPIO_NUM_NC
+#define PIN_DEVICE_LORA_M0  GPIO_NUM_NC
+#define PIN_DEVICE_LORA_M1  GPIO_NUM_NC
+#include "d_interface_e22900t22.h"
+
+static inline int get_rssi_dbm(const uint8_t rssi) {
+    return -(256 - (int)rssi);
 }
+static inline uint8_t rssi_raw_from_dbm(const int dbm) {
+    return (uint8_t)(dbm + 256);
+}
+/* __sleep_ms was the depend core's delay callback; the common driver uses hw_delay_ms_yieldable
+   from d_common.h, which the platform shim backs with nanosleep. */
 
 #define MQTT_CONNECT_TIMEOUT 60
 #define MQTT_PUBLISH_QOS     0
@@ -287,7 +300,7 @@ static bool test_mesh_receive_forward_new(void) {
 
     uint8_t inner[8] = { 0x10, 0x42, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD };
     uint8_t fwd_buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 8];
-    iotdata_mesh_pack_forward(fwd_buf, sizeof (fwd_buf), 0x0005, 50, 3, inner, 8);
+    iotdata_mesh_pack_forward(fwd_buf, sizeof(fwd_buf), 0x0005, 50, 3, inner, 8);
 
     iotdata_mesh_forward_t fw;
     ASSERT(mesh_receive_forward_r(&ms, fwd_buf, IOTDATA_MESH_FORWARD_HDR_SIZE + 8, &fw));
@@ -343,7 +356,7 @@ static void fwd_test_state(process_state_t *ps, mesh_state_t *ms, stat_state_t *
     uint8_t buf[IOTDATA_MESH_FORWARD_HDR_SIZE + 4]; \
     do { \
         const uint8_t _inner[4] = { 0xC0, 0x42, 0x00, 0x01 }; \
-        iotdata_mesh_pack_forward(buf, sizeof (buf), 0x0005, 50, 3, _inner, 4); \
+        iotdata_mesh_pack_forward(buf, sizeof(buf), 0x0005, 50, 3, _inner, 4); \
     } while (0)
 
 static bool test_process_forward_new_acks(void) {
@@ -828,6 +841,60 @@ static bool test_ddup_begin_disabled(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // ddup_peers_send batching
 // -----------------------------------------------------------------------------------------------------------------------------------------
+
+/*
+ * A sensor heard BOTH directly and relayed must publish once.
+ *
+ * Regression test. The direct path (ddup_check_sensor_packet) used to additionally require
+ * state_ddup->enabled, which defaults to false -- so a direct reception was never recorded in the
+ * dedup ring, the FORWARD path's lookup missed, and the same reading went to MQTT twice ("via
+ * direct" then "via mesh"). The local ring must work with cross-gateway ddup DISABLED, which is
+ * the normal single-gateway configuration; ddup_insert() consults `enabled` only to decide whether
+ * to also broadcast the entry to peers.
+ *
+ * Both orderings are checked: whichever path sees {station, sequence} first wins and the other is
+ * suppressed.
+ */
+static bool test_ddup_direct_and_mesh_dedup_with_ddup_disabled(void) {
+    iotdata_mesh_dedup_ring_t ring;
+    iotdata_mesh_dedup_init(&ring);
+
+    ddup_state_t ds;
+    memset(&ds, 0, sizeof(ds));
+    ds.enabled = false; /* the default, and the whole point of the test */
+    ds.ddup_ring = &ring;
+    pthread_mutex_init(&ds.mutex, NULL);
+
+    mesh_state_t ms;
+    memset(&ms, 0, sizeof(ms));
+    ms.enabled = true;
+    ms.dedup_handler = ddup_insert_handler;
+
+    process_state_t ps;
+    memset(&ps, 0, sizeof(ps));
+    ps.state_mesh = &ms;
+    ps.state_ddup = &ds;
+    ms.dedup_handler_ctx = &ps;
+
+    /* direct first, then the relay's forward of the same origin */
+    ASSERT(ddup_check_sensor_packet(&ps, 0x06ED, 3));           /* published */
+    ASSERT(!ms.dedup_handler(ms.dedup_handler_ctx, 0x06ED, 3)); /* suppressed */
+
+    /* and the other way round: forward first, then a direct copy */
+    ASSERT(ms.dedup_handler(ms.dedup_handler_ctx, 0x0537, 12)); /* published */
+    ASSERT(!ddup_check_sensor_packet(&ps, 0x0537, 12));         /* suppressed */
+
+    /* a different sequence from the same station is not a duplicate */
+    ASSERT(ddup_check_sensor_packet(&ps, 0x06ED, 4));
+
+    /* One, not two: only ddup_check_sensor_packet (the direct path) counts its own duplicate. The
+       forward path's stat_duplicates++ sits in the exec loop around the dedup handler, not in the
+       handler itself, and this test drives the handler directly. */
+    ASSERT_EQ_INT(ms.stat_duplicates, 1);
+
+    pthread_mutex_destroy(&ds.mutex);
+    return true;
+}
 
 static bool test_ddup_peers_send_batching(void) {
     ddup_state_t ds;
@@ -1367,6 +1434,7 @@ int main(void) {
     RUN_TEST(ddup_begin_disabled);
     RUN_TEST(ddup_peers_send_batching);
     RUN_TEST(ddup_peer_communication);
+    RUN_TEST(ddup_direct_and_mesh_dedup_with_ddup_disabled);
     RUN_TEST(ddup_bidirectional_sync);
     RUN_TEST(ddup_three_gateway_sync);
 

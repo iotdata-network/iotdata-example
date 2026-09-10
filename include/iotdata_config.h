@@ -69,4 +69,14 @@
 
 // ---------------------------------------------------------------------------------------------------------------------------
 
+#ifndef IOTDATA_CONFIG_BLACKBOX
+// Blackbox diagnostics:
+//  0 = off (compiled out entirely)
+//  1 = RAM only    — store in RTC_NOINIT ring; survives deep sleep and watchdog/panic resets, but not a power cycle.
+//  2 = RAM + flash — the ring is backed into the `diag` partition (partitions.csv), so records outlive a power loss.
+#define IOTDATA_CONFIG_BLACKBOX 2
+#endif
+
+// ---------------------------------------------------------------------------------------------------------------------------
+
 #endif /* IOTDATA_EXAMPLE_CONFIG_H */

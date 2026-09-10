@@ -17,28 +17,30 @@
 include ../iotdata-common/make/config.mk
 
 NATIVE   = simulator gateway_mqtt_lora_linux
-EMBEDDED = simulator_sensor_lora_esp32
+EMBEDDED = simulator_sensor_lora_esp32 sensor_bme280_lora_esp32
 
 .DEFAULT_GOAL := all
 .PHONY: all native embedded everything clean config help $(NATIVE) $(EMBEDDED)
 
-all: native ## Build the native (gcc) examples — the default
+all: native
 
-native: $(NATIVE) ## Build simulator + gateway_mqtt_lora_linux (gcc)
+native: $(NATIVE)
 
-embedded: $(EMBEDDED) ## Build the esp32 example (needs ESP-IDF / idf.py)
+embedded: $(EMBEDDED)
 
-everything: native embedded ## Build every example (native + esp32)
+everything: native embedded
 
-# build one example by recursing into its own Makefile
 $(NATIVE) $(EMBEDDED):
 	$(MAKE) -C $@
 
-clean: ## Clean native artifacts + the esp32 build/ dir
-	@for d in $(NATIVE); do $(MAKE) -C $$d clean; done
-	rm -rf $(EMBEDDED)/build
+clean:
+	@for d in $(NATIVE); do $(MAKE) -C $$d clean done
+	@for d in $(EMBEDDED); do $(MAKE) -C $$d clean; done
 
-config: ## Show the resolved source paths (from config.mk)
+format:
+	@for d in $(NATIVE) $(EMBEDDED); do $(MAKE) -C $$d format; done
+
+config:
 	@echo "IOTDATA_APEX                  = $(IOTDATA_APEX)"
 	@echo "IOTDATA_SRC                   = $(IOTDATA_SRC)"
 	@echo "IOTDATA_SRC_LIBRARY           = $(IOTDATA_SRC_LIBRARY)"
@@ -48,7 +50,7 @@ config: ## Show the resolved source paths (from config.mk)
 	@echo "IOTDATA_SRC_EXAMPLE_SIMULATOR = $(IOTDATA_SRC_EXAMPLE_SIMULATOR)"
 	@echo "IOTDATA_VARIANT               = $(IOTDATA_VARIANT)"
 
-help: ## Show this help
+help:
 	@echo "iotdata-example — worked examples (plain 'make' builds the native ones)"
 	@echo
 	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  make %-11s %s\n",$$1,$$2}' $(MAKEFILE_LIST)

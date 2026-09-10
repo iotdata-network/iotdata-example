@@ -24,7 +24,7 @@ typedef struct {
     stat_state_t *state_stat;
     char _buffer_mqtt_topic[256], _buffer_mqtt_message[1024];
     iotdata_decode_to_json_scratch_t _iotdata_scratch;
-    uint8_t _buffer_packet[E22900T22_PACKET_MAXSIZE + 1]; /* +1 for RSSI byte */
+    uint8_t _buffer_packet[LORA_PACKET_SIZE_MAX + 1]; /* +1 for RSSI byte */
     bool debug;
     bool debug_data;
 } process_state_t;
@@ -38,8 +38,19 @@ bool ddup_insert_handler(void *ctx, uint16_t station_id, uint16_t sequence) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+/*
+ * Gated on mesh only, NOT on ddup being enabled.
+ *
+ * ddup_insert() always does the local dedup-ring insert and consults `enabled` solely to decide
+ * whether to also queue the entry for cross-gateway broadcast -- so calling it with ddup off is
+ * both safe and necessary. Requiring state_ddup->enabled here meant that with the default
+ * ddup-enable=false a DIRECT reception was never recorded, while the FORWARD path (which calls the
+ * same dedup handler unconditionally) then looked the origin up, missed, and published the same
+ * reading a second time. Observed: one sensor heard directly and via a relay, published twice to
+ * the same topic, "via direct" then "via mesh".
+ */
 bool ddup_check_sensor_packet(process_state_t *st, uint16_t station_id, uint16_t sequence) {
-    if (st->state_mesh->enabled && st->state_ddup->enabled)
+    if (st->state_mesh->enabled)
         if (!ddup_insert(st->state_ddup, station_id, sequence)) {
             st->state_mesh->stat_duplicates++;
             if (st->debug || st->state_mesh->debug)
@@ -199,10 +210,21 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
 
     while (*running) {
 
+/* First-byte wait in the receive poll; the driver then delimits the frame with a short inter-byte
+   gap. Was the lora-read-timeout-packet config key. */
+#ifndef LORA_READ_TIMEOUT_MS
+#define LORA_READ_TIMEOUT_MS 5000
+#endif
+
         // packet processing
         int packet_length;
         uint8_t packet_rssi = 0, channel_rssi = 0;
-        if (device_packet_read(st->_buffer_packet, sizeof(st->_buffer_packet), &packet_length, &packet_rssi) && running) {
+        /* lora_read strips the trailing RSSI byte and reports it in dBm; the stat layer stores the
+           raw byte, so convert back. A 0 dBm reading means "none reported", as before. */
+        int packet_rssi_dbm = 0;
+        const bool got = lora_read(st->_buffer_packet, sizeof(st->_buffer_packet), &packet_length, &packet_rssi_dbm, LORA_READ_TIMEOUT_MS) == ESP_OK && packet_length > 0;
+        packet_rssi = packet_rssi_dbm != 0 ? rssi_raw_from_dbm(packet_rssi_dbm) : 0;
+        if (got && running) {
             stat_on_link_rx_packet(st->state_stat, (uint16_t)packet_length);
             if (st->debug_data)
                 debug_hexdump("data: ", st->_buffer_packet, (size_t)packet_length);
@@ -240,8 +262,9 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
 
         // rssi update
         if (*running && st->capture_rssi_channel && intervalable_and_initial(st->interval_rssi_channel, &st->interval_rssi_channel_last)) {
-            if (device_channel_rssi_read(&channel_rssi))
-                stat_on_link_rssi_channel(st->state_stat, channel_rssi);
+            int channel_rssi_dbm = 0;
+            if (lora_read_channel_rssi(&channel_rssi_dbm) == ESP_OK)
+                stat_on_link_rssi_channel(st->state_stat, (channel_rssi = rssi_raw_from_dbm(channel_rssi_dbm)));
             else
                 stat_on_link_rssi_channel_error(st->state_stat);
         }

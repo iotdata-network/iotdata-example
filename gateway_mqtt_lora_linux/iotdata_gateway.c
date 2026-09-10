@@ -73,6 +73,7 @@
 
 #define STAT_INTERVAL_DEFAULT         (5 * 60)
 #define INTERVAL_RSSI_CHANNEL_DEFAULT 0
+
 #define INTERVAL_BEACON_DEFAULT       60 /* seconds */
 
 #define GATEWAY_STATION_ID_DEFAULT    1
@@ -106,13 +107,41 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#include "serial_linux.h"
-/* PRINTF_DEBUG / PRINTF_INFO / PRINTF_ERROR are defined above, under the includes. */
-#undef E22900T22_SUPPORT_MODULE_DIP
-#define E22900T22_SUPPORT_MODULE_USB
-#include "e22xxxtxx.h"
-void __sleep_ms(const uint32_t ms) {
-    usleep((useconds_t)ms * 1000);
+#include "d_platform_linux.h"
+#include "d_common.h"
+
+/* No pins on a USB dongle. The driver takes these by name and ignores them when module == USB. */
+#define PIN_DEVICE_UART_TX  GPIO_NUM_NC
+#define PIN_DEVICE_UART_RX  GPIO_NUM_NC
+#define PIN_DEVICE_LORA_AUX GPIO_NUM_NC
+#define PIN_DEVICE_LORA_M0  GPIO_NUM_NC
+#define PIN_DEVICE_LORA_M1  GPIO_NUM_NC
+
+#include "d_interface_e22900t22.h"
+
+/*
+ * raw RSSI byte -> dBm. Was get_rssi_dbm() in the depend core; kept here because the stat layer
+ * stores the raw byte and converts on output, and the conversion is a pure offset so there is no
+ * reason to disturb that. Carried over verbatim, comment included, because it is hard-won:
+ *
+ *   Both the DIP and USB datasheets specify the *channel RSSI register* formula (DIP: -(256-rssi),
+ *   USB: -RSSI/2) but are silent on the per-packet RSSI byte. Empirically the USB packet RSSI is
+ *   -(256-rssi), matching the DIP: same SX1262 silicon, so the byte is encoded identically. The
+ *   USB "-RSSI/2" is treated as a datasheet error and -(256-rssi) is used wholesale for both
+ *   modules / both cases (verified against reciprocity: co-located gateway<->relay links agree).
+ */
+static inline int get_rssi_dbm(const uint8_t rssi) {
+    return -(256 - (int)rssi);
+}
+
+/* dBm back to the raw byte, for handing the driver's output to the stat layer unchanged. */
+static inline uint8_t rssi_raw_from_dbm(const int dbm) {
+    return (uint8_t)(dbm + 256);
+}
+
+/* The transmit hook the node/mesh/ctrl layers take: bool(const uint8_t *, int). */
+static bool lora_packet_write(const uint8_t *const packet, const int length) {
+    return length > 0 && lora_write(packet, (size_t)length) == ESP_OK;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -275,38 +304,81 @@ const config_option_help_t config_options_help [] = {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void lora_config_populate(serial_config_t *cfg_serial, e22900t22_config_t *cfg) {
-    memset(cfg_serial, 0, sizeof(*cfg_serial));
+/*
+ * The `lora-packet-{size,rate}` and `lora-transmit-power` config keys are REGISTER INDICES, which
+ * is the right unit for them: both ends of a link must land on the same index, not the same
+ * nominal rate. The driver takes real units, so they are converted here.
+ *
+ * Air rate indices 2..7 mean the same on the U and D modules; 0 and 1 do NOT (they are 0.3/1.2kbps
+ * on D and both 2.4kbps on U). Index 2 is 2.4kbps on both and is the portable choice, so 0 and 1
+ * are folded to it here rather than silently meaning something different from the sensors.
+ */
+static uint16_t _lora_rate_bps_from_index(const int idx) {
+    switch (idx) {
+    case 3:
+        return 4800;
+    case 4:
+        return 9600;
+    case 5:
+        return 19200;
+    case 6:
+        return 38400;
+    case 7:
+        return 62500;
+    default:
+        return 2400; /* 0, 1, 2 -- see above */
+    }
+}
+static uint8_t _lora_size_bytes_from_index(const int idx) {
+    switch (idx) {
+    case 1:
+        return 128;
+    case 2:
+        return 64;
+    case 3:
+        return 32;
+    default:
+        return 240;
+    }
+}
+static uint8_t _lora_power_dbm_from_index(const int idx) {
+    switch (idx) {
+    case 1:
+        return 17;
+    case 2:
+        return 13;
+    case 3:
+        return 10;
+    default:
+        return 22;
+    }
+}
+
+void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
-    cfg_serial->port = config_get_string("lora-port", SERIAL_PORT_DEFAULT);
-    cfg_serial->rate = config_get_integer("lora-rate", SERIAL_RATE_DEFAULT);
-    cfg_serial->bits = config_get_bits("lora-bits", SERIAL_BITS_DEFAULT);
+    *cfg_port = config_get_string("lora-port", SERIAL_PORT_DEFAULT);
 
-    cfg->address = (uint16_t)config_get_integer("lora-address", IOTDATA_CONFIG_LORA_ADDRESS);
-    cfg->network = (uint8_t)config_get_integer("lora-network", IOTDATA_CONFIG_LORA_NETWORK);
+    cfg->module = LORA_MODULE_USB; /* this gateway is the USB dongle: no GPIO, software mode switch */
+    cfg->e22_address = (uint16_t)config_get_integer("lora-address", IOTDATA_CONFIG_LORA_ADDRESS);
+    cfg->e22_network = (uint8_t)config_get_integer("lora-network", IOTDATA_CONFIG_LORA_NETWORK);
     cfg->channel = (uint8_t)config_get_integer("lora-channel", IOTDATA_CONFIG_LORA_CHANNEL);
-    cfg->crypt = (uint16_t)config_get_integer("lora-crypt", E22900T22_CONFIG_CRYPT_DEFAULT);
-    cfg->packet_size = (uint8_t)config_get_integer("lora-packet-size", E22900T22_CONFIG_PACKET_SIZE_DEFAULT);          // index
-    cfg->packet_rate = (uint8_t)config_get_integer("lora-packet-rate", E22900T22_CONFIG_PACKET_RATE_DEFAULT);          // index
-    cfg->transmit_power = (uint8_t)config_get_integer("lora-transmit-power", E22900T22_CONFIG_TRANSMIT_POWER_DEFAULT); // index
-    cfg->transmission_method = (uint8_t)config_get_integer("lora-transmission-method", E22900T22_CONFIG_TRANSMISSION_METHOD_DEFAULT);
-    cfg->relay_enabled = E22900T22_CONFIG_RELAY_ENABLED_DEFAULT;
-    cfg->listen_before_transmit = config_get_bool("lora-listen-before-transmit", E22900T22_CONFIG_LISTEN_BEFORE_TRANSMIT);
-    cfg->rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT) > 0; /* off: also stops the module computing it */
-    cfg->rssi_packet = config_get_bool("lora-rssi-packet", E22900T22_CONFIG_RSSI_PACKET_DEFAULT);   // XXX
-    cfg->read_timeout_command = (uint32_t)config_get_integer("lora-read-timeout-command", E22900T22_CONFIG_READ_TIMEOUT_COMMAND_DEFAULT);
-    cfg->read_timeout_packet = (uint32_t)config_get_integer("lora-read-timeout-packet", E22900T22_CONFIG_READ_TIMEOUT_PACKET_DEFAULT);
-    cfg->debug = config_get_bool("lora-debug", false);
-    _log_enabled = cfg->debug;
+    cfg->crypt = (uint16_t)config_get_integer("lora-crypt", 0x0000);
+    cfg->packet_size = _lora_size_bytes_from_index(config_get_integer("lora-packet-size", 0));
+    cfg->air_data_rate = _lora_rate_bps_from_index(config_get_integer("lora-packet-rate", 2));
+    cfg->transmit_power = _lora_power_dbm_from_index(config_get_integer("lora-transmit-power", 0));
+    cfg->listen_before_transmit = config_get_bool("lora-listen-before-transmit", true);
+    /* Same key, same default as the read interval below: off also stops the module computing it. */
+    cfg->rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT) > 0;
+    cfg->rssi_packet = config_get_bool("lora-rssi-packet", true);
+    _log_enabled = config_get_bool("lora-debug", false); /* app-side debug logging; the driver has no such flag */
 
-    PRINTF_INFO("config: lora: port=%s, rate=%d, bits=%s, "
-                "address=0x%04" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", packet-size=%d, packet-rate=%d, "
-                "transmit-power=%" PRIu8 ", transmission-method=%s, mode-relay=%s, mode-listen-before-transmit=%s, "
-                "rssi-channel=%s, rssi-packet=%s, read-timeout-command=%" PRIu32 "ms, read-timeout-packet=%" PRIu32 "ms, debug=%s\n",
-                cfg_serial->port, cfg_serial->rate, serial_bits_str(cfg_serial->bits), cfg->address, cfg->network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->packet_rate, cfg->transmit_power,
-                cfg->transmission_method == E22900T22_CONFIG_TRANSMISSION_METHOD_TRANSPARENT ? "transparent" : "fixed-point", cfg->relay_enabled ? "on" : "off", cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
-                cfg->rssi_packet ? "on" : "off", cfg->read_timeout_command, cfg->read_timeout_packet, cfg->debug ? "on" : "off");
+    PRINTF_INFO("config: lora: port=%s, module=USB, "
+                "address=0x%04" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", "
+                "packet-size=%" PRIu8 "B, air-rate=%" PRIu16 "bps, transmit-power=%" PRIu8 "dBm, "
+                "listen-before-transmit=%s, rssi-channel=%s, rssi-packet=%s\n",
+                *cfg_port, cfg->e22_address, cfg->e22_network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->air_data_rate, cfg->transmit_power, cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
+                cfg->rssi_packet ? "on" : "off");
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -373,7 +445,7 @@ void process_config_populate(process_state_t *cfg) {
     cfg->mqtt_topic_prefix = config_get_string("mqtt-topic-prefix", MQTT_TOPIC_PREFIX_DEFAULT);
     cfg->interval_rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT); /* same key, same default as the module flag above */
     cfg->capture_rssi_channel = (cfg->interval_rssi_channel > 0);
-    cfg->capture_rssi_packet = config_get_bool("lora-rssi-packet", E22900T22_CONFIG_RSSI_PACKET_DEFAULT); // XXX
+    cfg->capture_rssi_packet = config_get_bool("lora-rssi-packet", true); /* same key as the module register bit */
     cfg->stat_display_interval = config_get_integer("stat-display-interval", STAT_INTERVAL_DEFAULT);
     cfg->stat_publish_interval = config_get_integer("stat-publish-interval", STAT_INTERVAL_DEFAULT);
     cfg->stat_netw_interval = config_get_integer("stat-network-interval", STAT_INTERVAL_DEFAULT);
@@ -385,8 +457,8 @@ void process_config_populate(process_state_t *cfg) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
-    serial_config_t lora_serial_config;
-    e22900t22_config_t lora_device_config;
+    const char *lora_port;
+    lora_config_t lora_config;
     mqtt_config_t mqtt_config;
     mesh_state_t mesh_state;
     ddup_state_t ddup_state;
@@ -413,7 +485,7 @@ bool system_config(system_t *state, const int argc, char *argv[]) {
     if (!config_load(CONFIG_FILE_DEFAULT, argc, argv, config_options))
         return false;
 
-    lora_config_populate(&state->lora_serial_config, &state->lora_device_config);
+    lora_config_populate(&state->lora_port, &state->lora_config);
     mqtt_config_populate(&state->mqtt_config);
     mesh_config_populate(&state->mesh_state);
     ddup_config_populate(&state->ddup_state);
@@ -492,18 +564,21 @@ int main(int argc, char *argv[]) {
 
     gateway_blackbox_begin(&state->bbox_state);
 
-    // DEVICE (LORA SERIAL/DEVICE)
-    if (!serial_begin(&state->lora_serial_config) || !serial_connect()) {
-        PRINTF_ERROR("device: serial connect failure (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
+    // DEVICE (LORA)
+    // lora_setup opens the port, enters config mode, reads the product id, writes-and-verifies the
+    // register set, then parks the module; lora_start puts it in transfer mode. Together they are
+    // the old serial_begin/connect + device_connect + mode_config/info_read/config_update/transfer.
+    hw_uart_set_device(state->lora_port);
+    esp_err_t lerr;
+    if ((lerr = lora_setup(&state->lora_config)) != ESP_OK) {
+        PRINTF_ERROR("device: setup failure (port=%s): %s\n", state->lora_port, esp_err_to_name(lerr));
         goto end_all;
     }
-    if (!device_connect(E22900T22_MODULE_USB, &state->lora_device_config)) {
-        PRINTF_ERROR("device: module connect failure (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
-        goto end_serial;
-    }
-    PRINTF_INFO("device: connect success (port=%s, rate=%d, bits=%s)\n", state->lora_serial_config.port, state->lora_serial_config.rate, serial_bits_str(state->lora_serial_config.bits));
-    if (!(device_mode_config() && device_info_read() && device_config_read_and_update() && device_mode_transfer()))
+    if ((lerr = lora_start()) != ESP_OK) {
+        PRINTF_ERROR("device: start failure (port=%s): %s\n", state->lora_port, esp_err_to_name(lerr));
         goto end_device;
+    }
+    PRINTF_INFO("device: connect success (port=%s)\n", state->lora_port);
 
     // MQTT BROKER
     if (!mqtt_begin(&state->mqtt_config))
@@ -513,17 +588,17 @@ int main(int argc, char *argv[]) {
 
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
     netw_begin(&state->process_state.network);
-    if (!node_begin(&state->node_state, station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->bbox_state, device_packet_write, state->process_state.mqtt_topic_prefix))
+    if (!node_begin(&state->node_state, station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->bbox_state, lora_packet_write, state->process_state.mqtt_topic_prefix))
         goto end_mqtt;
-    if (!mesh_begin(&state->mesh_state, device_packet_write, ddup_insert_handler, (void *)&state->process_state))
+    if (!mesh_begin(&state->mesh_state, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
         goto end_node;
     if (!ddup_begin(&state->ddup_state, station_id, &state->mesh_state.dedup_ring, &state->running))
         goto end_mesh;
-    if (!ctrl_begin(&state->ctrl_state, state->process_state.mqtt_topic_prefix, station_id, &state->bbox_state, device_packet_write))
+    if (!ctrl_begin(&state->ctrl_state, state->process_state.mqtt_topic_prefix, station_id, &state->bbox_state, lora_packet_write))
         goto end_ddup;
 
     // PROCESS
-    stat_begin(&state->stat_state, state->process_state.mqtt_topic_prefix, station_id, IOTDATA_GATEWAY_VERSION, &state->lora_device_config);
+    stat_begin(&state->stat_state, state->process_state.mqtt_topic_prefix, station_id, IOTDATA_GATEWAY_VERSION, &state->lora_config);
     ret = process_run(&state->process_state, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
     stat_end(&state->stat_state);
 
@@ -537,9 +612,7 @@ end_node:
 end_mqtt:
     mqtt_end();
 end_device:
-    device_disconnect();
-end_serial:
-    serial_end();
+    (void)lora_stop();
 end_all:
     gateway_blackbox_end(&state->bbox_state);
     return ret;

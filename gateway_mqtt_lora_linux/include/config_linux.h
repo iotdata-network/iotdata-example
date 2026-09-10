@@ -114,15 +114,9 @@ bool config_get_bool(const char *key, const bool default_value) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-serial_bits_t config_get_bits(const char *key, const serial_bits_t default_value) {
-    for (int i = 0; i < config_entry_count; i++)
-        if (strcmp(config_entries[i].key, key) == 0) {
-            if (strcmp(config_entries[i].value, "8N1") == 0)
-                return SERIAL_8N1;
-            PRINTF_ERROR("config: invalid bits value '%s', using default\n", config_entries[i].value);
-        }
-    return default_value;
-}
+/* config_get_bits() lived here for serial_linux.h's serial_bits_t. The common E22 driver fixes the
+   line discipline at 9600 8N1 (it is a register setting on the module too), so there is nothing
+   left to parse -- the lora-rate / lora-bits config keys are inert. */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 

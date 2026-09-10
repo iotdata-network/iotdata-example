@@ -81,9 +81,10 @@ typedef struct {
     uint8_t network;
     uint8_t channel;
     uint32_t frequency_khz;
-    uint8_t packet_size_idx;
-    uint8_t packet_rate_idx;
-    uint8_t transmit_power_idx;
+    /* real units now, not register indices: the common driver's config speaks bytes/bps/dBm */
+    uint8_t packet_size_bytes;
+    uint16_t packet_rate_bps;
+    uint8_t transmit_power_dbm;
     /* runtime counters */
     uint32_t rx_packets;
     uint64_t rx_bytes;
@@ -361,10 +362,9 @@ cJSON *stat_build_links_json(const stat_state_t *const s, const time_t now, cons
         cJSON_AddNumberToObject(config, "network", (double)s->link.network);
         cJSON_AddNumberToObject(config, "channel", (double)s->link.channel);
         cJSON_AddNumberToObject(config, "frequency_khz", (double)s->link.frequency_khz);
-        cJSON_AddNumberToObject(config, "packet_size_idx", (double)s->link.packet_size_idx);
-        cJSON_AddNumberToObject(config, "packet_rate_idx", (double)s->link.packet_rate_idx);
-        cJSON_AddNumberToObject(config, "transmit_power_idx", (double)s->link.transmit_power_idx);
-        cJSON_AddStringToObject(config, "transmit_power", get_transmit_power(s->link.transmit_power_idx));
+        cJSON_AddNumberToObject(config, "packet_size_bytes", (double)s->link.packet_size_bytes);
+        cJSON_AddNumberToObject(config, "packet_rate_bps", (double)s->link.packet_rate_bps);
+        cJSON_AddNumberToObject(config, "transmit_power_dbm", (double)s->link.transmit_power_dbm);
         cJSON *rssi = cJSON_AddObjectToObject(link, "rssi");
         cJSON_AddNumberToObject(rssi, "packet_dbm", (double)get_rssi_dbm(s->link.rssi_packet_ema));
         cJSON_AddNumberToObject(rssi, "packet_samples", (double)s->link.rssi_packet_cnt);
@@ -635,7 +635,7 @@ void stat_display(stat_state_t *const s, const mesh_state_t *const mesh, const d
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, uint16_t station_id, const char *const version, const e22900t22_config_t *const lora_config) {
+bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, uint16_t station_id, const char *const version, const lora_config_t *const lora_config) {
     assert(topic_prefix && version && lora_config);
 
     s->version = version;
@@ -643,13 +643,13 @@ bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic
     s->start_time = time(NULL);
     s->link.name = "e22-900t22";
     s->link.type = "lora";
-    s->link.address = lora_config->address;
-    s->link.network = lora_config->network;
+    s->link.address = lora_config->e22_address;
+    s->link.network = lora_config->e22_network;
     s->link.channel = lora_config->channel;
     s->link.frequency_khz = 850125U + (uint32_t)lora_config->channel * 1000U;
-    s->link.packet_size_idx = lora_config->packet_size;
-    s->link.packet_rate_idx = lora_config->packet_rate;
-    s->link.transmit_power_idx = lora_config->transmit_power;
+    s->link.packet_size_bytes = lora_config->packet_size;
+    s->link.packet_rate_bps = lora_config->air_data_rate;
+    s->link.transmit_power_dbm = lora_config->transmit_power;
 
     PRINTF_INFO("stat: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", s->station_id, s->link.name, s->link.channel, s->link.frequency_khz);
 
