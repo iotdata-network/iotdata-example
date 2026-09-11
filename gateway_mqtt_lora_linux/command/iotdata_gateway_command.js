@@ -3,17 +3,30 @@
 // ------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------
 //
-// iotdata_gateway_command.js - drive iotdata mesh MANAGE commands over MQTT.
+// iotdata_gateway_command.js - drive iotdata node CONTROL commands over MQTT.
 //
 // Publishes a JSON management request to <prefix>/manage/req; the gateway
-// (iotdata_gateway_mqtt.h) turns it into a mesh MANAGE frame on air, addressed to one
-// node or broadcast to all. The node executes the command — e.g. STATUS makes it dump
-// its status line to its own USB console (the response is NOT on MQTT, so watch the
-// relay console via esp32-tool to see it).
+// (iotdata_gateway_ctrl.h) turns it into a node CONTROL payload, executed locally when it
+// is addressed to the gateway itself and aired as a DOWN frame to the target otherwise.
 //
-// Extend COMMANDS as the management vocabulary grows (reboot, drop-parent, set-param,
-// report/uplink-diagnostics, ...). Each command builds the JSON request; a matching
-// dedicated builder is added on the C side (iotdata_mesh_pack_manage_*).
+// There is ONE command namespace: every command here, mesh management included, is a
+// CONTROL key from iotdata_node.h. (Mesh management used to be a parallel MANAGE
+// vocabulary of its own; it is not any more.) Add a command by adding a CONTROL key
+// there and a line for it in the gateway's ctrl_on_message.
+//
+// Every response comes back as JSON on ONE topic, <prefix>/manage/resp, and the "resp" field
+// says what it is -- there is no topic per producer to keep track of:
+//   {"resp":"node", "station":"05BF","tlv":"status","data":{...}}        a node TLV report
+//   {"resp":"diag", "station":"0001","cmd":"diag","source":"blackbox","text":"..."}
+//   {"resp":"diag", "station":"0001","cmd":"diag-dump","source":"blackbox","index":0,"record":"..."}
+//   {"resp":"error","station":"0001","cmd":"node-foo","text":"unknown tlv 'foo'"}
+// A diag names its source because the blackbox recorder is one possible diagnostic, not the
+// definition of one. Records stay strings: decoding one needs the @blackbox definitions header,
+// which this tool has and the gateway does not -- pass --definitions and it is decoded in place.
+//
+// What a command produces still depends on the command: a report that has a TLV (the node ones,
+// and mesh state as the mesh scope of STATUS) comes back on that topic; a table dump
+// (stations/peers/filters) prints on the target's own console, so watch that via esp32-tool.
 //
 // Usage:
 //   ./iotdata_gateway_command.js [options] <command> [args]
@@ -68,211 +81,134 @@ function parseStation(s) {
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
-// Command registry — extend here (mirror each with a dedicated iotdata_mesh_pack_manage_* on the C side).
+// Command registry — extend here (mirror each with a CONTROL key in iotdata_node.h and a line in
+// the gateway's ctrl_on_message).
 // build(args) returns the JSON request body; `target` is attached by buildRequest unless the command sets it.
 // ------------------------------------------------------------------------------------------------------------------------
 
+/*
+ * The command vocabulary.
+ *
+ * A subject is FOUR LETTERS, matching the device's own USB CLI (`vers`, `stat`, `logl`, `boot`
+ * there), and verbs are full words. So `diag enable` is the same words over MQTT as over serial,
+ * and an operator driving a node both ways learns one set.
+ *
+ * The mesh subjects keep a `mesh` prefix because it names a real group in the key space (0x40
+ * upward, as against `type << 3` for a TLV subject). There is deliberately NO `node` prefix: since
+ * mesh management became node CONTROL, such a prefix would be on every command and would therefore
+ * distinguish nothing.
+ *
+ * Subjects may be typed space-separated as on the serial CLI, or hyphenated -- `mesh peers clear`
+ * and `mesh-peers-clear` are the same command. The wire always carries the hyphenated token.
+ *
+ * `takes` says what a command consumes from the remaining arguments:
+ *   'station'  a station id, required   (which node the command is ABOUT; --target says who to ask)
+ *   'scope'    an optional scope word, in that command's own vocabulary
+ */
 const COMMANDS = {
-    'status': {
-        summary: 'dump status + peers + filter to the node console',
-        usage: 'status',
-        build() {
-            return { cmd: 'status' };
-        },
-    },
-    'peers': {
-        summary: 'dump the node peer (neighbour) table',
-        usage: 'peers',
-        build() {
-            return { cmd: 'peers' };
-        },
-    },
-    'stations': {
-        summary: 'dump the "stations heard" table (mesh peers + sensors)',
-        usage: 'stations',
-        build() {
-            return { cmd: 'stations' };
-        },
-    },
-    'flush': {
-        summary: 'clear the peer table (force re-discovery)',
-        usage: 'flush',
-        build() {
-            return { cmd: 'peers-clear' };
-        },
-    },
-    'peers-remove': {
-        summary: 'forget one peer',
-        usage: 'peers-remove <station>',
-        build(a) {
-            return { cmd: 'peers-remove', station: parseStation(a[0]) };
-        },
-    },
-    'block': {
-        summary: 'block RX from a station (blacklist) — e.g. block the gateway to force a hop',
-        usage: 'block <station>',
-        build(a) {
-            return { cmd: 'block', station: parseStation(a[0]) };
-        },
-    },
-    'allow': {
-        summary: 'whitelist a station (when any exist, only allowed stations pass)',
-        usage: 'allow <station>',
-        build(a) {
-            return { cmd: 'allow', station: parseStation(a[0]) };
-        },
-    },
-    'unfilter': {
-        summary: 'remove a station from the filter',
-        usage: 'unfilter <station>',
-        build(a) {
-            return { cmd: 'unfilter', station: parseStation(a[0]) };
-        },
-    },
-    'filters': {
-        summary: 'dump the station filter table',
-        usage: 'filters',
-        build() {
-            return { cmd: 'filters' };
-        },
-    },
-    'filter-clear': {
-        summary: 'clear the filter table (scope: all | manual | auto)',
-        usage: 'filter-clear [scope]',
-        build(a) {
-            return a[0] ? { cmd: 'filter-clear', scope: a[0] } : { cmd: 'filter-clear' };
-        },
-    },
-    // --- blackbox diagnostic recorder — one vocabulary, addressed by --target (a node id, the
-    //     gateway's own id, or broadcast). The gateway acts locally when addressed to itself/broadcast
-    //     (reply on <prefix>/blackbox/resp); nodes act on the aired MANAGE frame (output on their
-    //     console). Pair a gateway/broadcast dump with --definitions to read records as JSON. ---
-    'diag': {
-        summary: "recorder: dump a target's diagnostic status",
-        usage: 'diag',
-        build() {
-            return { cmd: 'diag' };
-        },
-    },
-    'diag-enable': {
-        summary: 'recorder: enable recording on the target',
-        usage: 'diag-enable',
-        build() {
-            return { cmd: 'diag-enable' };
-        },
-    },
-    'diag-disable': {
-        summary: 'recorder: disable recording on the target',
-        usage: 'diag-disable',
-        build() {
-            return { cmd: 'diag-disable' };
-        },
-    },
-    'diag-clear': {
-        summary: 'recorder: erase the diagnostic log on the target',
-        usage: 'diag-clear',
-        build() {
-            return { cmd: 'diag-clear' };
-        },
-    },
-    'diag-dump': {
-        summary: "recorder: dump the target's stored records",
-        usage: 'diag-dump',
-        build() {
-            return { cmd: 'diag-dump' };
-        },
-    },
-    // --- node: the iotdata system TLVs (iotdata_node.h), spoken by EVERY node -- gateway, relay,
-    //     sensor, simulator. Addressed by --target like everything else, because a gateway is just
-    //     another station: a target of its own id it answers itself, anything else goes on air.
-    //
-    //     Unlike the mesh commands, the reply comes back over MQTT as JSON on <prefix>/node/resp,
-    //     so --watch shows it. But a SLEEPING target (a sensor) will not answer promptly: the
-    //     gateway holds the command and delivers it in that node's next receive window, which may
-    //     be hours away. That is the design, not a fault -- see iotdata_node.h.
-    'node': {
-        summary: 'node: request every report the target can produce',
-        usage: 'node',
-        build() {
-            return { cmd: 'node' };
-        },
-    },
-    'node-version': {
-        summary: 'node: request what it IS: firmware, hardware, platform, build',
-        usage: 'node-version',
-        build() {
-            return { cmd: 'node-version' };
-        },
-    },
-    'node-variant': {
-        summary: 'node: request which telemetry variants it produces (empty for a gateway or relay)',
-        usage: 'node-variant',
-        build() {
-            return { cmd: 'node-variant' };
-        },
-    },
-    'node-control': {
-        summary: 'node: request its command inventory: what it will accept',
-        usage: 'node-control',
-        build() {
-            return { cmd: 'node-control' };
-        },
-    },
-    'node-status': {
-        summary: 'node: request how it is DOING: uptime, restarts, supply, heap',
-        usage: 'node-status',
-        build() {
-            return { cmd: 'node-status' };
-        },
-    },
-    'node-config': {
-        summary: 'node: request its settable operating parameters',
-        usage: 'node-config',
-        build() {
-            return { cmd: 'node-config' };
-        },
-    },
-    'node-diagnostics': {
-        summary: 'node: request its recorded diagnostic data (blackbox)',
-        usage: 'node-diagnostics',
-        build() {
-            return { cmd: 'node-diagnostics' };
-        },
-    },
-    'node-content': {
-        summary: 'node: request bulk payload: firmware image, user data',
-        usage: 'node-content',
-        build() {
-            return { cmd: 'node-content' };
-        },
-    },
-    'raw': {
-        summary: 'send a raw JSON request (power user), e.g. raw \'{"cmd":"status"}\'',
-        usage: 'raw <json>',
-        build(args) {
-            if (!args[0]) throw new Error('raw needs a JSON string argument');
-            try {
-                return JSON.parse(args[0]);
-            } catch (e) {
-                throw new Error('raw: invalid JSON: ' + e.message);
-            }
-        },
-    },
-    // future: reboot, drop-parent (force orphan), set-param, report (uplink diagnostics), ...
+    // --- the system TLVs: one request each --------------------------------------------------
+    'vers': { summary: 'request VERSION — device firmware, platform, build, serial' },
+    'vari': { summary: 'request VARIANT — iotdata variant suite produced' },
+    'ctrl': { summary: 'request CONTROL — supported control operations' },
+    'stat': { summary: 'request STATUS — operating status (system, network)', takes: 'scope', scopes: 'node | mesh | node,mesh   (default: every group)' },
+    'conf': { summary: 'request CONFIG — tbd' },
+    'diag': { summary: 'request DIAGNOSTICS — diagnostic operations and recordings' },
+    'cont': { summary: 'request CONTENT — tbd' },
+    'reports': { summary: 'request every report the node can produce, in type order' },
+
+    // --- generic system control ---------------------------------------------------------------
+    'boot': { summary: 'restart the node' },
+
+    // --- the recorder -------------------------------------------------------------------------
+    'diag-enable': { summary: 'enable recording' },
+    'diag-disable': { summary: 'disable recording' },
+    'diag-clear': { summary: 'clear recordings' },
+    'diag-dump': { summary: 'dump recordings (to console)' },
+
+    // --- mesh management ----------------------------------------------------------------------
+    'mesh-stations': { summary: 'request the stations table' },
+    'mesh-stations-dump': { summary: 'print the table on the node\'s console' },
+    'mesh-peers': { summary: 'request the peers table' },
+    'mesh-peers-update': { summary: 'update one peer in the table', takes: 'station+action', actions: 'remove | none' },
+    'mesh-peers-clear': { summary: 'remove all peers (forcing re-discovery)' },
+    'mesh-peers-dump': { summary: 'print the table on the node\'s console' },
+    'mesh-filters': { summary: 'request the filters tabl' },
+    'mesh-filters-update': { summary: 'update one filter in the table', takes: 'station+action', actions: 'block | allow | none' },
+    'mesh-filters-clear': { summary: 'remove all filters', takes: 'scope', scopes: 'all | manual | auto   (default: all)' },
+    'mesh-filters-dump': { summary: 'print the table on the node\'s console' },
+
+    // --- compatibility ------------------------------------------------------------------------
+    'status': { summary: 'the MESH group of STATUS' },
+
+    // --- power user ---------------------------------------------------------------------------
+    'raw': { summary: 'send a raw JSON request, e.g. raw \'{"cmd":"stat"}\'' },
 };
 
+/* Resolve leading argument words into a command name, longest match first, so a space-separated
+   subject reads as it does on the serial console. Returns [name, remaining args]. */
+function resolveCommand(words) {
+    for (let n = Math.min(4, words.length); n >= 1; n--) {
+        const joined = words.slice(0, n).join('-');
+        if (COMMANDS[joined] !== undefined)
+            return [joined, words.slice(n)];
+    }
+    return [words[0] ?? '', words.slice(1)];
+}
+
+// A record arrives as a string field inside the response envelope, because decoding it needs the
+// @blackbox definitions header that only this side has. With --definitions, decode it in place so
+// the printed response is JSON the whole way down.
+function convertResponse(text, convert) {
+    let obj;
+    try {
+        obj = JSON.parse(text);
+    } catch {
+        // not the envelope: telemetry, or a bare line from something that does not wrap
+        return text.split('\n').map((l) => convert(l.trim()) ?? l).join('\n');
+    }
+    if (obj !== null && typeof obj === 'object' && typeof obj.record === 'string') {
+        const decoded = convert(obj.record.trim());
+        if (decoded !== null) {
+            try {
+                return JSON.stringify({ ...obj, record: JSON.parse(decoded) });
+            } catch {
+                /* leave the raw record in place */
+            }
+        }
+    }
+    return text;
+}
+
 function buildRequest(name, args) {
-    const command = COMMANDS[name];
-    if (!command) throw new Error(`unknown command '${name}' (try: ${Object.keys(COMMANDS).join(', ')})`);
-    const req = command.build(args);
-    if (req.target === undefined) req.target = opts.target; // raw may set its own
+    if (name === 'raw') {
+        if (args[0] === undefined) throw new Error("raw: needs a JSON request, e.g. raw '{\"cmd\":\"stat\"}'");
+        let req;
+        try {
+            req = JSON.parse(args[0]);
+        } catch (e) {
+            throw new Error('raw: invalid JSON: ' + e.message);
+        }
+        if (req.target === undefined) req.target = opts.target;
+        return req;
+    }
+    /* An alias is sent as typed: the gateway knows both vocabularies, so there is one place that
+       maps a name to a CONTROL key rather than two that must agree. The alias table here is for
+       help and validation. */
+    const spec = COMMANDS[name];
+    if (!spec) throw new Error(`unknown command '${name}' (try --help)`);
+    const req = { cmd: name, target: opts.target };
+    if (spec.takes === 'station') req.station = parseStation(args[0]);
+    else if (spec.takes === 'station+action') {
+        req.station = parseStation(args[0]);
+        if (args[1] !== undefined) req.action = args[1];
+    } else if (spec.takes === 'scope' && args[0] !== undefined) req.scope = args[0];
     return req;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
 
 function usage() {
-    display.log('iotdata_gateway_command.js - drive iotdata mesh MANAGE commands over MQTT\n');
+    display.log('iotdata_gateway_command.js - drive iotdata node CONTROL commands over MQTT\n');
     display.log('Usage: iotdata_gateway_command.js [options] <command> [args]\n');
     display.log('Options:');
     display.log(`  --broker <url>   MQTT broker      (default: ${DEFAULTS.broker}, or $MQTT_BROKER)`);
@@ -283,8 +219,14 @@ function usage() {
     display.log('                   convert recognised record lines (e.g. a blackbox-dump reply) CSV -> JSON');
     display.log('  --dry-run | -n   print the request that would be sent, do not connect');
     display.log('  --verbose | --debug | --help\n');
-    display.log('Commands:');
-    for (const [name, c] of Object.entries(COMMANDS)) display.log(`  ${name.padEnd(16)} ${c.summary}`);
+    display.log('Commands  (spaced or hyphenated: `mesh peers clear`):');
+    for (const [name, c] of Object.entries(COMMANDS)) {
+        display.log(`  ${name.padEnd(18)} ${c.summary}`);
+        if (c.takes === 'station') display.log(`  ${''.padEnd(18)}   takes <station>`);
+        if (c.takes === 'station+action') display.log(`  ${''.padEnd(18)}   takes <station> <action>`);
+        if (c.actions) display.log(`  ${''.padEnd(18)}   action: ${c.actions}`);
+        if (c.scopes) display.log(`  ${''.padEnd(18)}   scope: ${c.scopes}`);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
@@ -369,7 +311,8 @@ async function main() {
         process.exit(1);
     }
 
-    const [command, ...args] = rest;
+    /* longest-match, so `mesh peers clear` reads as it does on the serial console */
+    const [command, args] = resolveCommand(rest);
     let request;
     try {
         request = buildRequest(command, args);
@@ -414,13 +357,10 @@ async function main() {
     if (opts.watch > 0) {
         const watchTopic = `${opts.prefix}/#`;
         const convert = opts.definitions ? makeRecordConverter(opts.definitions) : null;
-        display.log(`watching ${watchTopic} for ${opts.watch}s  (node-* replies arrive here as JSON; mesh/diag output goes to the node console)`);
+        display.log(`watching ${watchTopic} for ${opts.watch}s  (responses arrive on ${opts.prefix}/manage/resp as JSON; table dumps go to the target's own console)`);
         client.on('message', (topic, msg) => {
             const text = msg.toString();
-            // With --definitions, turn recognised record lines (a blackbox-dump reply on
-            // <prefix>/blackbox/resp) into JSON; anything else (status lines, telemetry) stays as-is.
-            const out = convert ? text.split('\n').map((l) => convert(l.trim()) ?? l).join('\n') : text;
-            display.log(`<- ${topic}  ${out}`);
+            display.log(`<- ${topic}  ${convert ? convertResponse(text, convert) : text}`);
         });
         await new Promise((resolve, reject) => client.subscribe(watchTopic, (e) => (e ? reject(e) : resolve()))).catch((e) => {
             display.err(`error: subscribe failed: ${e.message}`);

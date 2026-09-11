@@ -35,6 +35,7 @@ SOURCES_DEPEND=\
     $(IOTDATA_SRC_COMMON)/include/device/d_interface_e22900t22.h \
     $(IOTDATA_SRC_COMMON)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
     $(IOTDATA_SRC_COMMON)/include/iotdata_blackbox.h $(IOTDATA_SRC_DEPEND_BLACKBOX)/blackbox.h \
+    $(IOTDATA_SRC_COMMON)/include/iotdata_station_filter.h \
     $(IOTDATA_SRC_LIBRARY_SOURCES)
 SOURCES=$(SOURCES_TARGET) $(SOURCES_DEPEND)
 

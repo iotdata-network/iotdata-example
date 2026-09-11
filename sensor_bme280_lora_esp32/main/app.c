@@ -95,17 +95,22 @@ static const char *centi_str(char *const buf, const size_t size, const int32_t c
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#include "d_common.h"
-
 #define PIN_DEVICE_UART_TX  PIN_E22_RXD
 #define PIN_DEVICE_UART_RX  PIN_E22_TXD
 #define PIN_DEVICE_LORA_AUX PIN_E22_AUX
 #define PIN_DEVICE_LORA_M0  PIN_E22_M0
 #define PIN_DEVICE_LORA_M1  PIN_E22_M1
+#define PIN_DEVICE_I2C_SDA  PIN_BME280_SDA
+#define PIN_DEVICE_I2C_SCL  PIN_BME280_SCL
 
+#include "d_common.h"
+#include "d_readings.h"
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"
+#include "d_hardware_i2c.h"
 #include "d_interface_e22900t22.h"
+#include "d_interface_bme280.h"
+#include "d_interface_batt.h"
 
 static const lora_config_t lora_cfg = {
     .e22_address = IOTDATA_CONFIG_LORA_ADDRESS,
@@ -120,14 +125,6 @@ static const lora_config_t lora_cfg = {
     .rssi_packet = true,
     .rssi_channel = false,
 };
-
-#define PIN_DEVICE_I2C_SDA PIN_BME280_SDA
-#define PIN_DEVICE_I2C_SCL PIN_BME280_SCL
-
-#include "d_hardware_i2c.h"
-#include "d_readings.h"
-#include "d_interface_bme280.h"
-#include "d_interface_batt.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // iotdata — variant suite (unity build, encode-only)
@@ -151,16 +148,6 @@ static const lora_config_t lora_cfg = {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/*
- * The weather_station variant is the full outdoor station map — battery, link,
- * environment, wind, rain, solar, and more. This node populates environment
- * (temperature + pressure + humidity), which is all a BME280 has to offer, and
- * battery on the carriers that have a divider fitted; presence bits mean the
- * unused slots cost nothing on air — a node without a divider sends the same
- * packet it always did — and the same station can later grow wind/rain/solar
- * without changing the variant or the gateway. Flags are sent only when
- * something is worth reporting.
- */
 #define PACKET_VARIANT IOTDATA_VSUITE_WEATHER_STATION
 
 typedef struct {
@@ -201,14 +188,10 @@ static bool packet_build(packet_t *const out, const uint16_t station, const uint
         ESP_LOGW(__tag_app, "encode_battery: %s", iotdata_strerror(rc));
 
     if (reading != NULL) {
-        /* Rounded to the units the field carries: whole hPa, whole %RH. */
-        /* The driver reports floats; the encoder is built NO_FLOATING and takes centi-units, so
-           the conversion happens here -- once, at the boundary, rather than through the app. */
         const iotdata_float_t temperature_c100 = (iotdata_float_t)lroundf(reading->temperature_c * 100.0f);
         const uint16_t pressure_hpa = (uint16_t)lroundf(reading->pressure_hpa);
         const uint8_t humidity_pct = (uint8_t)lroundf(reading->humidity_pct);
         if ((rc = iotdata_encode_environment(&enc, temperature_c100, pressure_hpa, humidity_pct)) != IOTDATA_OK) {
-            /* In range for the sensor but out of range for the protocol: report the fault rather than an implausible value. */
             ESP_LOGW(__tag_app, "encode_environment: %s", iotdata_strerror(rc));
             flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
         }
@@ -287,7 +270,6 @@ static const blackbox_config_t blackbox_config = {
     .persist_arg = "diag",          /* ESP_FLASH: the partition label; ignored by PERSIST_NONE */
     .enabled = true,                /* compiled in == collecting; the compile-time knob is the gate */
 };
-
 static void blackbox_start(const esp_reset_reason_t reason, const bool restarted) {
     iotdata_blackbox_begin();
     if (blackbox_init(&blackbox, &blackbox_config) != 0) {
@@ -332,7 +314,6 @@ static uint8_t sensor_node_reason(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void sensor_node_status(__attribute__((unused)) const uint16_t station, iotdata_kvr_t *const kv) {
     iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_UPTIME, (uint32_t)(esp_timer_get_time() / 1000000));
@@ -349,18 +330,15 @@ static bool sensor_node_tx(const uint8_t *const packet, const size_t len) {
 }
 
 static void sensor_receive_window(void) {
-
     const uint32_t opened = (uint32_t)(esp_timer_get_time() / 1000);
     idep_window_begin(&idep_cfg, &state.node, opened);
     ESP_LOGI(__tag_app, "receive: window open for %ums (station=%" PRIu16 ")", (unsigned)IDEP_RECEIVE_WINDOW_MS, state.station_id);
     BLACKBOX_EVENT(IOTDATA_BB_LC_WAKE, 0);
-
     bool reboot = false;
     unsigned frames = 0, acted = 0;
-    while (idep_window_active(&state.node, (uint32_t)(esp_timer_get_time() / 1000))) {
+    while (idep_window_active(&idep_cfg, &state.node, (uint32_t)(esp_timer_get_time() / 1000))) {
         uint8_t buf[IDEP_PACKET_MAX];
         int len = 0, rssi_dbm = 0;
-        /* 0ms first-byte timeout: this polls inside the window loop rather than blocking in it. */
         if (lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) == ESP_OK && len > 0) {
             frames++;
             if (idep_on_frame(&idep_cfg, &state.node, buf, (size_t)len, &reboot))
@@ -370,7 +348,6 @@ static void sensor_receive_window(void) {
     }
     idep_window_end(&state.node);
     ESP_LOGI(__tag_app, "receive: window closed (%u frame(s) heard, %u for us)", frames, acted);
-
     if (reboot) {
         ESP_LOGW(__tag_app, "node: REBOOT commanded -- restarting");
         BLACKBOX_EVENT(IOTDATA_BB_LC_STOP, 0);
@@ -389,11 +366,7 @@ static bool app_cycle(void) {
     if (state.cycles == 0)
         flags |= (uint8_t)(1U << VSUITE_FLAG_RESTART_RECENT);
 
-    /* --- sensor ---
-     *
-     * bme280_setup reads the chip id and the factory calibration and keeps them in RTC memory, so
-     * like the radio it only needs doing once per power cycle and survives deep sleep. Each wake
-     * then goes straight to start/read/stop. */
+    /* --- sensor --- */
     bme280_reading_t reading;
     bool measured = false;
     if (!state.sensor_calibrated)
@@ -429,52 +402,36 @@ static bool app_cycle(void) {
     ESP_LOGI(__tag_app, "packet: variant=%s station=%" PRIu16 " sequence=%" PRIu16 " flags=0x%02" PRIX8 "%s", iotdata_vsuite_name(PACKET_VARIANT), state.station_id, state.sequence, flags, advertise ? " +receive" : "");
     state.sequence = iotdata_sequence_next(state.sequence);
 
-    /* --- radio ---
-     *
-     * lora_setup writes and verifies the module's register block; it only needs doing once per
-     * power cycle, since the E22 holds that config in its own NVM and the driver keeps its copy in
-     * RTC memory (which survives deep sleep). Every wake after that goes straight to lora_start,
-     * saving a second or so of command traffic. lora_stop parks the module. */
+    /* --- radio --- */
     bool transmitted = false;
-    bool ready = true;
-    if (!state.radio_configured) {
-        if (lora_setup(&lora_cfg) != ESP_OK)
-            ready = false;
-        else
-            state.radio_configured = true;
-    }
-    if (ready && lora_start() != ESP_OK)
-        ready = false;
-    if (ready) {
+    if (!state.radio_configured)
+        state.radio_configured = lora_setup(&lora_cfg) == ESP_OK;
+    if (state.radio_configured && lora_start() == ESP_OK) {
         transmitted = lora_write_complete(packet.buf, packet.len, /*wait_complete=*/true) == ESP_OK;
         if (transmitted && advertise)
             sensor_receive_window();
+        (void)lora_stop();
     }
-    (void)lora_stop(); /* the module must not be left awake for the sleep ahead */
-
     if (transmitted)
         state.tx_count++;
     else
         state.tx_errors++;
-    return transmitted && measured;
+
+    return measured && transmitted;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void app_sleep(const int64_t time_start_us) {
-
+#define MAX_INT(a, b) ((a) > (b) ? (a) : (b))
     const int64_t awake_ms = (esp_timer_get_time() - time_start_us) / 1000;
-    int64_t sleep_ms = (int64_t)TX_PERIOD_MS - awake_ms - CONSOLE_DRAIN_MS;
-    if (sleep_ms < TX_PERIOD_MIN_MS)
-        sleep_ms = TX_PERIOD_MIN_MS;
+    const int64_t sleep_ms = MAX_INT((int64_t)TX_PERIOD_MS - awake_ms - CONSOLE_DRAIN_MS, TX_PERIOD_MIN_MS);
 
     ESP_LOGI(__tag_app, "cycle %" PRIu32 " done: tx=%" PRIu32 " errors=%" PRIu32 " awake=%" PRId64 "ms, sleeping %" PRId64 "ms", state.cycles, state.tx_count, state.tx_errors, awake_ms, sleep_ms);
 
     BLACKBOX_EVENT(IOTDATA_BB_LC_SLEEP, (uint8_t)(sleep_ms / 1000));
-    BLACKBOX_FLUSH(); /* one flash append per cycle when persisting; a no-op in RAM-only mode */
+    BLACKBOX_FLUSH();
 
-    /* The USB-Serial-JTAG console goes down with the chip and takes anything still
-       queued with it, so give the host a moment to collect this cycle's output. */
     __SLEEP_MS(CONSOLE_DRAIN_MS);
 
     lora_hold();
@@ -485,7 +442,7 @@ static void app_sleep(const int64_t time_start_us) {
 
 void app_main(void) {
 
-    const int64_t time_start = esp_timer_get_time();
+    const int64_t time_start_us = esp_timer_get_time();
 
     setbuf(stdout, NULL);
 
@@ -502,8 +459,8 @@ void app_main(void) {
         ESP_LOGI(__tag_app, "iotdata bme280 lora sensor: %s variant, every %us", iotdata_vsuite_name(PACKET_VARIANT), (unsigned)(TX_PERIOD_MS / 1000));
         ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
         state_reset();
-        state.battery_present = battery_probe(); /* restart only; see battery_probe() */
-        __SLEEP_MS(STARTUP_DELAY_MS);            /* cold boot only, so it costs nothing per cycle */
+        state.battery_present = battery_probe();
+        __SLEEP_MS(STARTUP_DELAY_MS);
     }
 
     if (!app_cycle()) {
@@ -512,7 +469,7 @@ void app_main(void) {
     }
     state.cycles++;
 
-    app_sleep(time_start);
+    app_sleep(time_start_us);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

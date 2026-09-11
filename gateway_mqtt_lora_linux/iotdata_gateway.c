@@ -27,10 +27,6 @@
  *     other gateways to synchronise station_id/sequence pairs for edge
  *     de-duplication before publishing to MQTT. Operates indepemdently of
  *     Mesh protocol.
- *
- * Uses EBYTE E22 connector for low-level, but is sufficiently modular to
- * fit onto another driver.
- * https://github.com/matthewgream/e22900t22
  */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -110,6 +106,12 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #include "d_platform_linux.h"
 #include "d_common.h"
 
+#define BUFFER_LOCK_TYPE       pthread_mutex_t
+#define BUFFER_LOCK_INIT(l)    pthread_mutex_init((l), NULL)
+#define BUFFER_LOCK_ACQUIRE(l) pthread_mutex_lock(l)
+#define BUFFER_LOCK_RELEASE(l) pthread_mutex_unlock(l)
+#include "d_module_buffers.h"
+
 /* No pins on a USB dongle. The driver takes these by name and ignores them when module == USB. */
 #define PIN_DEVICE_UART_TX  GPIO_NUM_NC
 #define PIN_DEVICE_UART_RX  GPIO_NUM_NC
@@ -160,6 +162,7 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_node.h"
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 #include "iotdata_blackbox.h"
+#include "iotdata_station_filter.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -370,6 +373,10 @@ void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
     cfg->listen_before_transmit = config_get_bool("lora-listen-before-transmit", true);
     /* Same key, same default as the read interval below: off also stops the module computing it. */
     cfg->rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT) > 0;
+    /* This host does not sleep, so the driver should not park the module for it: no sleep command,
+       no UART teardown between setup and start, and nothing issued in transparent mode at exit.
+       Not a config key -- it is a property of what a gateway is. See lora_config_t.host_sleeps. */
+    cfg->host_sleeps = false;
     cfg->rssi_packet = config_get_bool("lora-rssi-packet", true);
     _log_enabled = config_get_bool("lora-debug", false); /* app-side debug logging; the driver has no such flag */
 
@@ -455,6 +462,12 @@ void process_config_populate(process_state_t *cfg) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
+
+#define GW_FRAME_MAX     240 /* the E22 sub-packet size: the largest frame that arrives in one piece */
+#define GW_PREFIX_MAX    0   /* nothing is prepended: a gateway terminates frames, it does not forward them */
+#define GW_BUFFER_STRIDE (GW_FRAME_MAX + 1 + GW_PREFIX_MAX)
+#define GW_BUFFER_COUNT  12 /* frames alive at once: one being received, one being sent, the held DOWN commands */
+BUFFER_POOL_DECLARE(s_pool, GW_BUFFER_COUNT, GW_BUFFER_STRIDE);
 
 typedef struct {
     const char *lora_port;
@@ -562,12 +575,11 @@ int main(int argc, char *argv[]) {
         return ret;
     const uint16_t station_id = state->mesh_state.station_id; // from config
 
+    BUFFER_POOL_INIT(s_pool, GW_BUFFER_COUNT, GW_BUFFER_STRIDE, GW_PREFIX_MAX);
+
     gateway_blackbox_begin(&state->bbox_state);
 
     // DEVICE (LORA)
-    // lora_setup opens the port, enters config mode, reads the product id, writes-and-verifies the
-    // register set, then parks the module; lora_start puts it in transfer mode. Together they are
-    // the old serial_begin/connect + device_connect + mode_config/info_read/config_update/transfer.
     hw_uart_set_device(state->lora_port);
     esp_err_t lerr;
     if ((lerr = lora_setup(&state->lora_config)) != ESP_OK) {
@@ -588,17 +600,19 @@ int main(int argc, char *argv[]) {
 
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
     netw_begin(&state->process_state.network);
-    if (!node_begin(&state->node_state, station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->bbox_state, lora_packet_write, state->process_state.mqtt_topic_prefix))
+    if (!node_begin(&state->node_state, station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, exec_node_control, exec_node_status_mesh, exec_node_table_count, exec_node_table_row,
+                    exec_node_control_keys, (uint8_t)(sizeof(exec_node_control_keys) / sizeof(exec_node_control_keys[0])), state->process_state.mqtt_topic_prefix))
         goto end_mqtt;
-    if (!mesh_begin(&state->mesh_state, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
+    if (!mesh_begin(&state->mesh_state, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
         goto end_node;
     if (!ddup_begin(&state->ddup_state, station_id, &state->mesh_state.dedup_ring, &state->running))
         goto end_mesh;
-    if (!ctrl_begin(&state->ctrl_state, state->process_state.mqtt_topic_prefix, station_id, &state->bbox_state, lora_packet_write))
+    if (!ctrl_begin(&state->ctrl_state, state->process_state.mqtt_topic_prefix, station_id, &state->bbox_state, &s_pool))
         goto end_ddup;
 
     // PROCESS
-    stat_begin(&state->stat_state, state->process_state.mqtt_topic_prefix, station_id, IOTDATA_GATEWAY_VERSION, &state->lora_config);
+    stat_begin(&state->stat_state, state->process_state.mqtt_topic_prefix, station_id, IOTDATA_GATEWAY_VERSION, &state->lora_config, &s_pool);
+    state->process_state.pool = &s_pool;
     ret = process_run(&state->process_state, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
     stat_end(&state->stat_state);
 

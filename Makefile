@@ -39,6 +39,7 @@ clean:
 
 format:
 	@for d in $(NATIVE) $(EMBEDDED); do $(MAKE) -C $$d format; done
+	@clang-format-19 -i include/*.h
 
 config:
 	@echo "IOTDATA_APEX                  = $(IOTDATA_APEX)"

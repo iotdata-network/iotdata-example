@@ -12,4 +12,9 @@ idf_component_register(
         "${IOTDATA_SRC_DEPEND_BLACKBOX}"            # blackbox.h (only used when BLACKBOX_ENABLE > 0)
 )
 
+if(NOT "${SIMULATE_RECEIVE_ALWAYS}" STREQUAL "")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SIMULATE_RECEIVE_ALWAYS=${SIMULATE_RECEIVE_ALWAYS})
+    message(STATUS "simulator: SIMULATE_RECEIVE_ALWAYS = ${SIMULATE_RECEIVE_ALWAYS}")
+endif()
+
 include("${IOTDATA_SRC_COMMON}/make/target-esp32.cmake")

@@ -2,6 +2,10 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#ifndef LORA_READ_TIMEOUT_MS
+#define LORA_READ_TIMEOUT_MS 5000
+#endif
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -17,14 +21,24 @@ typedef struct {
     time_t stat_publish_interval_last;
     time_t stat_netw_interval;
     time_t stat_netw_interval_last;
-    netw_t network; /* stations heard (mesh + sensor), printed every stat-network-interval */
+    netw_t network;  /* stations heard (mesh + sensor), printed every stat-network-interval */
+    filter_t filter; /* per-station RX allow/block, exactly as a relay has one */
     node_state_t *state_node;
     mesh_state_t *state_mesh;
     ddup_state_t *state_ddup;
     stat_state_t *state_stat;
     char _buffer_mqtt_topic[256], _buffer_mqtt_message[1024];
     iotdata_decode_to_json_scratch_t _iotdata_scratch;
-    uint8_t _buffer_packet[LORA_PACKET_SIZE_MAX + 1]; /* +1 for RSSI byte */
+    iotdata_decoder_t _iotdata_dec; /* for the validity gate below, kept out of the stack */
+    /* Frames come from the pool, not from here. A gateway has no forwarding path, so unlike a
+       relay it saves no copies by pooling -- what it gains is a bounded, MEASURED ceiling on frame
+       memory, which is what will matter when this runs on an ESP32. */
+    buffer_pool_t *pool;
+    /* The receive buffer, held ACROSS cycles. Most cycles read nothing, so acquiring and releasing
+       one per cycle was a pair of pool operations to no purpose: this keeps the same buffer until a
+       frame actually lands in it and is done with. One buffer stays out of the pool for the life of
+       the run, which at this depth is the right trade. BUFFER_NONE means we hold none. */
+    buffer_handle_t rx_held;
     bool debug;
     bool debug_data;
 } process_state_t;
@@ -66,6 +80,34 @@ bool ddup_check_sensor_packet(process_state_t *st, uint16_t station_id, uint16_t
 // packet_rssi is the raw byte the radio appends to each received packet; 0 means the radio did
 // not supply one (RSSI capture off, or a mesh-relayed packet that this gateway never heard over
 // the air). It is a property of THIS hop's reception, not of the sensor, hence 'rssi_packet'.
+/*
+ * Does this frame actually decode?
+ *
+ * A truncated or corrupt reception can still carry a plausible header -- the station and sequence
+ * read fine -- and must NOT be allowed to claim that {station, sequence} in the dedup ring. If it
+ * does, the good copy arriving a moment later via a relay is suppressed as a duplicate of a packet
+ * we never actually received, and nothing is published at all. That defeats the point of having a
+ * mesh: the relayed copy exists precisely to rescue a bad direct reception.
+ *
+ * Observed with a 56-byte node VERSION report split across two UART reads: the first chunk decoded
+ * as far as the header, claimed {05BF, 5}, then failed on content -- and the relay's forward of the
+ * same report was dropped as a duplicate.
+ *
+ * So: decode first, claim second. The cost is one throw-away TLV walk per direct packet, which on
+ * this host is nothing next to being wrong.
+ */
+static bool process_packet_decodes(process_state_t *const st, const uint8_t *const buf, const int len) {
+    /* Decoding is the whole test, and it must not also require a TLV -- nor a field.
+       A packet may carry variant fields, TLVs, or both: the presence byte has a TLV flag so the
+       two can coexist. A plain sensor sends fields and no TLV, a sleeping sensor sends fields plus
+       a RECEIVE TLV, the TSA sends a proprietary TLV and no fields. Requiring tlv_count > 0 here
+       rejected the first shape on the direct path, while the same bytes arriving inside a relay's
+       FORWARD published normally, because that path never consults this gate.
+       (node_on_packet does require a TLV, correctly: it is hunting for system TLVs to republish,
+       which is a different question from whether the frame is a packet at all.) */
+    return iotdata_decode(buf, (size_t)len, &st->_iotdata_dec) == IOTDATA_OK;
+}
+
 void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, const char *via, uint8_t packet_rssi) {
     // Network-table tracking (per-path counts, dups, sequence gaps) is done by the caller at the
     // dedup point (netw_note_receive), so it also sees suppressed duplicates — which never reach here.
@@ -135,9 +177,14 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
             if (inner_ok) /* no rssi: that hop is relay->gateway, not sensor->gateway */
                 netw_note_receive(&st->network, fw.origin_station, inner_variant, fw.origin_sequence, NETW_PATH_MESH, is_new, 0, fw.sender_station, now);
             if (is_new) {
-                if (inner_ok)
+                if (inner_ok) {
+                    /* A forwarded packet carries system TLVs exactly as a direct one does -- a node
+                       two hops out can only ever be heard this way, so without this its reports are
+                       handed to the telemetry path alone and never reach the node topic. Addressed
+                       by the ORIGIN, not the relay that carried it. */
+                    (void)node_on_packet(st->state_node, fw.inner_packet, (size_t)fw.inner_len, fw.origin_station);
                     process_sensor_packet(st, fw.inner_packet, fw.inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi);
-                else {
+                } else {
                     PRINTF_ERROR("exec: mesh FORWARD inner packet peek failed (len=%d)\n", fw.inner_len);
                     stat_on_link_rx_drop(st->state_stat);
                 }
@@ -170,9 +217,6 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
         (void)mesh_receive_pong(st->state_mesh, packet_buffer, packet_length);
         break;
     case IOTDATA_MESH_CTRL_PING:
-    case IOTDATA_MESH_CTRL_MANAGE:
-        /* assigned types this gateway does not act on -- MANAGE it originates rather than receives.
-           Counted as themselves, so "seen but not handled" is distinguishable from "unrecognised". */
         mesh_stat_frame(st->state_mesh, ctrl_type, packet_length, true);
         if (st->state_mesh->debug)
             PRINTF_INFO("exec: mesh rx %s from station=%04" PRIX16 " (not handled here)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id);
@@ -188,13 +232,269 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+/* The node layer calls back into the app through function pointers that take no context (the same
+   shape ctrl.h needs for the mosquitto callback), so the state is reached through this. Set in
+   process_run, which owns everything the hooks touch. */
+static process_state_t *g_exec = NULL;
+
+/*
+ * How this gateway sees the mesh it is part of: the mesh group of STATUS.
+ *
+ * A gateway is a node like any other and answers the same question a relay does -- it simply has
+ * different answers. It IS the root, so: state GATEWAY, cost 0, no parent and no parent RSSI, and
+ * the counters a node only accumulates by having a parent (peer_new, reparent, failover, orphan)
+ * stay 0 because a root does none of those things. Reporting them as zero is the honest answer,
+ * not a gap: "never reparented" is true of a root by construction.
+ */
+static void exec_node_status_mesh(iotdata_node_status_mesh_t *const out) {
+    const process_state_t *const st = g_exec;
+    if (st == NULL || !st->state_mesh->enabled)
+        return; /* .present stays false: mesh off, so there is no group to report */
+    out->present = true;
+    out->state = IOTDATA_NODE_STATUS_MESH_STATE_GATEWAY;
+    out->parent = 0;
+    out->cost = 0;
+    out->generation = st->state_mesh->beacon_generation;
+    out->parent_rssi = 0;
+    out->peers = (uint8_t)st->state_stat->peers_count;
+    out->accepting = true;
+    out->beacon_rx = st->state_mesh->ctrl[IOTDATA_MESH_CTRL_BEACON].rx;
+    out->beacon_tx = st->state_mesh->stat_beacons_tx;
+    out->rerr_rx = st->state_mesh->ctrl[IOTDATA_MESH_CTRL_ROUTE_ERROR].rx;
+    out->rerr_tx = 0; /* the root never sends one: it has no route to lose */
+    out->forwards = st->state_mesh->stat_forwards_unwrapped;
+    out->duplicates = st->state_mesh->stat_duplicates;
+}
+
+static void exec_report_peers(const stat_state_t *const s) {
+    PRINTF_INFO("exec: peers - %d\n", s->peers_count);
+    for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && c < s->peers_count; i++) {
+        const stat_peer_t *const e = &s->peers[i];
+        if (e->valid) {
+            c++;
+            PRINTF_INFO("exec:   %04" PRIX16 " cost=%u gen=%u flags=0x%02" PRIX8 " age=%lds\n", e->station_id, (unsigned)e->cost, (unsigned)e->generation, e->flags, (long)(time(NULL) - e->last_seen));
+        }
+    }
+}
+
+static void exec_report_filter(const filter_t *const f) {
+    PRINTF_INFO("exec: filters - %d\n", filter_count(f));
+    for (int i = 0, c = 0; i < (int)(sizeof(f->e) / sizeof(f->e[0])) && c < f->count; i++) {
+        const filter_entry_t *const e = &f->e[i];
+        if (e->valid) {
+            c++;
+            PRINTF_INFO("exec:   %04" PRIX16 " %s (%s)\n", e->station, e->action == FILTER_ALLOW ? "allow" : "block", e->source == FILTER_AUTO ? "auto" : "manual");
+        }
+    }
+}
+
+static uint8_t exec_node_table_count(const uint8_t type) {
+    const process_state_t *const st = g_exec;
+    if (st == NULL)
+        return 0;
+    switch (type) {
+    case IOTDATA_NODE_TLV_MESH_STATIONS:
+        return (uint8_t)st->network.count;
+    case IOTDATA_NODE_TLV_MESH_PEERS:
+        return (uint8_t)st->state_stat->peers_count;
+    case IOTDATA_NODE_TLV_MESH_FILTERS:
+        return (uint8_t)filter_count(&st->filter);
+    default:
+        return 0;
+    }
+}
+
+/* Map a dense report index onto a sparse slot: every one of these tables leaves holes. */
+#define EXEC_TABLE_NTH(arr, idx, out) \
+    do { \
+        int _c = 0; \
+        (out) = -1; \
+        for (int _i = 0; _i < (int)((sizeof(arr)) / sizeof((arr)[0])); _i++) \
+            if ((arr)[_i].valid && _c++ == (int)(idx)) { \
+                (out) = _i; \
+                break; \
+            } \
+    } while (0)
+
+static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t *const row) {
+    process_state_t *const st = g_exec;
+    if (st == NULL)
+        return false;
+    const time_t now = time(NULL);
+    int slot = -1;
+    switch (type) {
+    case IOTDATA_NODE_TLV_MESH_STATIONS: {
+        EXEC_TABLE_NTH(st->network.s, index, slot);
+        if (slot < 0)
+            return false;
+        const netw_station_t *const e = &st->network.s[slot];
+        iotdata_node_table_put_u16(row, 0, e->station);
+        row[2] = (e->kind == NETW_KIND_GATEWAY)  ? IOTDATA_NODE_TABLE_KIND_GATEWAY
+                 : (e->kind == NETW_KIND_RELAY)  ? IOTDATA_NODE_TABLE_KIND_RELAY
+                 : (e->kind == NETW_KIND_SENSOR) ? IOTDATA_NODE_TABLE_KIND_SENSOR
+                                                 : IOTDATA_NODE_TABLE_KIND_UNKNOWN;
+        row[3] = e->variant;
+        row[4] = (uint8_t)(int8_t)e->rssi;
+        iotdata_node_table_put_u16(row, 5, (uint16_t)(now > e->last_seen ? (now - e->last_seen) : 0));
+        iotdata_node_table_put_u32(row, 7, e->rx_count);
+        return true;
+    }
+    case IOTDATA_NODE_TLV_MESH_PEERS: {
+        EXEC_TABLE_NTH(st->state_stat->peers, index, slot);
+        if (slot < 0)
+            return false;
+        const stat_peer_t *const e = &st->state_stat->peers[slot];
+        iotdata_node_table_put_u16(row, 0, e->station_id);
+        iotdata_node_table_put_u16(row, 2, st->state_mesh->station_id); /* we ARE the gateway */
+        row[4] = e->cost;
+        iotdata_node_table_put_u16(row, 5, e->generation);
+        row[7] = 0; /* this peer table is built from beacons, which carry no RSSI of their own */
+        iotdata_node_table_put_u16(row, 8, (uint16_t)(now > e->last_seen ? (now - e->last_seen) : 0));
+        /* the root has no parent, so only ACCEPTING can be true of a peer here */
+        row[10] = (uint8_t)((e->flags & IOTDATA_MESH_FLAG_ACCEPTING) ? IOTDATA_NODE_TABLE_PEER_ACCEPTING : 0);
+        return true;
+    }
+    case IOTDATA_NODE_TLV_MESH_FILTERS: {
+        EXEC_TABLE_NTH(st->filter.e, index, slot);
+        if (slot < 0)
+            return false;
+        const filter_entry_t *const e = &st->filter.e[slot];
+        iotdata_node_table_put_u16(row, 0, e->station);
+        row[2] = (e->action == FILTER_ALLOW) ? IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW : IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK;
+        row[3] = (e->source == FILTER_AUTO) ? IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_AUTO : IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_MANUAL;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+/*
+ * The mesh-management half of node CONTROL, on the gateway.
+ *
+ * Deliberately the same set, the same values and the same semantics as the relay's
+ * relay_node_control(): every mesh station answers these the same way, and a manager should not
+ * have to know whether it is talking to a relay or a gateway. What differs is only what the
+ * tables are called underneath -- the gateway's "stations heard" is its netw mirror, its peers
+ * are the beacons it hears.
+ *
+ * Every command is state-relative and idempotent, because there is no acknowledgement on the mesh.
+ * Table dumps go to the log: there is no TLV for a table yet.
+ */
+static bool exec_node_control(const uint8_t key, const uint8_t *const val, const uint8_t vlen) {
+    process_state_t *const st = g_exec;
+    if (st == NULL)
+        return false;
+    switch (key) {
+
+    case IOTDATA_NODE_CONTROL_MESH_STATIONS_DUMP:
+        PRINTF_INFO("exec: CONTROL - MESH_STATIONS_DUMP\n");
+        netw_report(&st->network, st->state_mesh->station_id);
+        return true;
+
+    case IOTDATA_NODE_CONTROL_MESH_PEERS_DUMP:
+        PRINTF_INFO("exec: CONTROL - MESH_PEERS_DUMP\n");
+        exec_report_peers(st->state_stat);
+        return true;
+    case IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE: {
+        int n = 0;
+        for (int i = 0; i + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE) {
+            const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
+            if (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_PEER_NONE) {
+                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %04" PRIX16 " none -> %s\n", station, stat_mesh_peer_remove(st->state_stat, station) ? "removed" : "not present");
+                n++;
+            } else
+                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %04" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
+        }
+        if (n > 0)
+            exec_report_peers(st->state_stat);
+        return true;
+    }
+    case IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR:
+        PRINTF_INFO("exec: CONTROL - MESH_PEERS_CLEAR -> forgetting %d peer(s)\n", st->state_stat->peers_count);
+        stat_mesh_peers_clear(st->state_stat);
+        return true;
+
+    case IOTDATA_NODE_CONTROL_MESH_FILTERS_DUMP:
+        PRINTF_INFO("exec: CONTROL - MESH_FILTERS_DUMP\n");
+        exec_report_filter(&st->filter);
+        return true;
+    case IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE: {
+        int n = 0;
+        for (int i = 0; i + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE) {
+            const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
+            switch (val[i + 2]) {
+            case IOTDATA_NODE_CONTROL_MESH_FILTERS_NONE:
+                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " none -> %s\n", station, filter_remove(&st->filter, station) ? "removed" : "not present");
+                n++;
+                break;
+            case IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK:
+            case IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW: {
+                /* the wire values are NONE/BLOCK/ALLOW = 0/1/2; the table's are BLOCK/ALLOW = 0/1 */
+                const bool allow = (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW);
+                const bool ok = filter_insert(&st->filter, station, allow ? FILTER_ALLOW : FILTER_BLOCK, FILTER_MANUAL);
+                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " %s -> %s\n", station, allow ? "allow" : "block", ok ? "ok" : "table full");
+                if (ok && !allow) /* make the block take effect on what we already believe */
+                    (void)stat_mesh_peer_remove(st->state_stat, station);
+                n++;
+                break;
+            }
+            default:
+                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
+                break;
+            }
+        }
+        if (n > 0)
+            exec_report_filter(&st->filter);
+        return true;
+    }
+    case IOTDATA_NODE_CONTROL_MESH_FILTERS_CLEAR: {
+        const filter_scope_t scope = (vlen >= 1) ? (filter_scope_t)val[0] : FILTER_SCOPE_ALL;
+        PRINTF_INFO("exec: CONTROL - MESH_FILTER_CLEAR scope=%u -> %d cleared\n", (unsigned)scope, filter_clear(&st->filter, scope));
+        exec_report_filter(&st->filter);
+        return true;
+    }
+
+    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE: {
+        const bool on = (vlen >= 1) ? (val[0] != 0u) : true;
+        PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_ENABLE -> %s\n", on ? "true" : "false");
+        ctrl_diag_enable(on);
+        return true;
+    }
+    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR:
+        PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_CLEAR\n");
+        ctrl_diag_clear();
+        return true;
+    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_DUMP:
+        PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_DUMP\n");
+        ctrl_diag_dump();
+        return true;
+
+    default:
+        return false; /* not ours: the node layer counts it unknown */
+    }
+}
+
+/* What exec_node_control() implements, so the CONTROL report can advertise it. The same list a
+   relay advertises -- that symmetry is the point. */
+static const uint8_t exec_node_control_keys[] = {
+    IOTDATA_NODE_CONTROL_MESH_STATIONS_DUMP, IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR,   IOTDATA_NODE_CONTROL_MESH_PEERS_DUMP,   IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE,
+    IOTDATA_NODE_CONTROL_MESH_FILTERS_CLEAR, IOTDATA_NODE_CONTROL_MESH_FILTERS_DUMP, IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE, IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR, IOTDATA_NODE_CONTROL_DIAGNOSTICS_DUMP,
+};
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *state_ctrl, volatile bool *running) {
     assert(st && state_node && state_mesh && state_ddup && state_stat && state_ctrl && running);
 
+    g_exec = st;
+    filter_init(&st->filter);
     st->state_node = state_node;
     st->state_mesh = state_mesh;
     st->state_ddup = state_ddup;
     st->state_stat = state_stat;
+    st->rx_held = BUFFER_NONE;
 
     char buf[16];
     PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu32 "s, stats-publish=%" PRIu32 "s, rssi=%" PRIu32 "s [packets=%c, channel=%c], topic-prefix=%s) :: mesh=%c%s\n", (uint32_t)st->stat_display_interval,
@@ -210,61 +510,75 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
 
     while (*running) {
 
-/* First-byte wait in the receive poll; the driver then delimits the frame with a short inter-byte
-   gap. Was the lora-read-timeout-packet config key. */
-#ifndef LORA_READ_TIMEOUT_MS
-#define LORA_READ_TIMEOUT_MS 5000
-#endif
-
         // packet processing
-        int packet_length;
-        uint8_t packet_rssi = 0, channel_rssi = 0;
-        /* lora_read strips the trailing RSSI byte and reports it in dBm; the stat layer stores the
-           raw byte, so convert back. A 0 dBm reading means "none reported", as before. */
-        int packet_rssi_dbm = 0;
-        const bool got = lora_read(st->_buffer_packet, sizeof(st->_buffer_packet), &packet_length, &packet_rssi_dbm, LORA_READ_TIMEOUT_MS) == ESP_OK && packet_length > 0;
-        packet_rssi = packet_rssi_dbm != 0 ? rssi_raw_from_dbm(packet_rssi_dbm) : 0;
-        if (got && running) {
-            stat_on_link_rx_packet(st->state_stat, (uint16_t)packet_length);
-            if (st->debug_data)
-                debug_hexdump("data: ", st->_buffer_packet, (size_t)packet_length);
-            if (st->capture_rssi_packet) {
-                if (packet_rssi > 0)
-                    stat_on_link_rssi_packet(st->state_stat, packet_rssi);
-                else
-                    stat_on_link_rssi_packet_error(st->state_stat);
-            }
-            uint8_t variant_id;
-            uint16_t station_id, sequence;
-            if (iotdata_peek(st->_buffer_packet, (size_t)packet_length, &variant_id, &station_id, &sequence) != IOTDATA_OK) {
-                PRINTF_ERROR("exec: packet too short for iotdata header (size=%d)\n", packet_length);
-                stat_on_link_rx_drop(st->state_stat);
-            } else if (variant_id == IOTDATA_MESH_VARIANT) {
-                if (st->state_mesh->enabled)
-                    process_mesh_packet(st, st->_buffer_packet, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, packet_rssi);
-                else {
-                    stat_on_link_rx_mesh_unexpected(st->state_stat, station_id);
-                    PRINTF_INFO("exec: mesh packet unexpected from station=%04" PRIX16 " while not enabled\n", station_id);
+        if (st->rx_held == BUFFER_NONE)
+            st->rx_held = buffer_acquire(st->pool);
+        if (st->rx_held != BUFFER_NONE) {
+            (void)buffer_reset(st->pool, st->rx_held);
+            int packet_rssi_dbm = 0, packet_length;
+            uint8_t *rxbuf = buffer_data(st->pool, st->rx_held);
+            if (lora_read(rxbuf, buffer_room(st->pool, st->rx_held), &packet_length, &packet_rssi_dbm, LORA_READ_TIMEOUT_MS) == ESP_OK && packet_length > 0) {
+                buffer_set_len(st->pool, st->rx_held, (uint16_t)packet_length);
+                const uint8_t packet_rssi = packet_rssi_dbm != 0 ? rssi_raw_from_dbm(packet_rssi_dbm) : 0;
+                stat_on_link_rx_packet(st->state_stat, (uint16_t)packet_length);
+                if (st->debug_data)
+                    debug_hexdump("data: ", rxbuf, (size_t)packet_length);
+                if (st->capture_rssi_packet) {
+                    if (packet_rssi > 0)
+                        stat_on_link_rssi_packet(st->state_stat, packet_rssi);
+                    else
+                        stat_on_link_rssi_packet_error(st->state_stat);
                 }
-            } else {
-                // Dedup direct receptions against the SAME ring the forward path uses, so a sensor
-                // heard both directly and via a relay publishes once — whichever path adds {station,
-                // seq} first wins, the other is suppressed. is_new is true unless it was a duplicate
-                // (always true when mesh is off). Track the reception either way for observability.
-                /* a packet may carry system TLVs (node reports) as well as telemetry */
-                (void)node_on_packet(st->state_node, st->_buffer_packet, (size_t)packet_length, station_id);
-                const bool is_new = ddup_check_sensor_packet(st, station_id, sequence);
-                netw_note_receive(&st->network, station_id, variant_id, sequence, NETW_PATH_DIRECT, is_new, (st->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, 0, time(NULL));
-                if (is_new)
-                    process_sensor_packet(st, st->_buffer_packet, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, "direct", packet_rssi);
+                uint8_t variant_id;
+                uint16_t station_id, sequence;
+                if (iotdata_peek(rxbuf, (size_t)packet_length, &variant_id, &station_id, &sequence) != IOTDATA_OK) {
+                    PRINTF_ERROR("exec: packet too short for iotdata header (size=%d)\n", packet_length);
+                    stat_on_link_rx_drop(st->state_stat);
+                } else if (!filter_allows(&st->filter, station_id)) {
+                    st->filter.stat_blocked++;
+                    stat_on_link_rx_drop(st->state_stat);
+                    if (st->debug)
+                        PRINTF_INFO("exec: FILTERED from=%04" PRIX16 " var=%u len=%d (blocked)\n", station_id, (unsigned)variant_id, packet_length);
+                } else if (variant_id == IOTDATA_MESH_VARIANT) {
+                    if (st->state_mesh->enabled)
+                        process_mesh_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, packet_rssi);
+                    else {
+                        stat_on_link_rx_mesh_unexpected(st->state_stat, station_id);
+                        PRINTF_INFO("exec: mesh packet unexpected from station=%04" PRIX16 " while not enabled\n", station_id);
+                    }
+                } else {
+                    // Dedup direct receptions against the SAME ring the forward path uses, so a sensor
+                    // heard both directly and via a relay publishes once — whichever path adds {station,
+                    // seq} first wins, the other is suppressed. is_new is true unless it was a duplicate
+                    // (always true when mesh is off). Track the reception either way for observability.
+                    /* a packet may carry system TLVs (node reports) as well as telemetry */
+                    (void)node_on_packet(st->state_node, rxbuf, (size_t)packet_length, station_id);
+                    if (process_packet_decodes(st, rxbuf, packet_length)) {
+                        const bool is_new = ddup_check_sensor_packet(st, station_id, sequence);
+                        netw_note_receive(&st->network, station_id, variant_id, sequence, NETW_PATH_DIRECT, is_new, (st->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, 0, time(NULL));
+                        if (is_new)
+                            process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, "direct", packet_rssi);
+                    } else {
+                        stat_on_link_rx_drop(st->state_stat);
+                        PRINTF_ERROR("exec: undecodable frame from station=%04" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station_id, sequence, packet_length,
+                                     iotdata_strerror(iotdata_decode(rxbuf, (size_t)packet_length, &st->_iotdata_dec)));
+                    }
+                }
+                if (st->rx_held != BUFFER_NONE && buffer_refs(st->pool, st->rx_held) > 1) {
+                    buffer_unref(st->pool, st->rx_held);
+                    st->rx_held = BUFFER_NONE;
+                }
             }
+        } else {
+            stat_on_link_rx_drop(st->state_stat);
+            PRINTF_ERROR("exec: no frame buffer (pool %u/%u): not reading this cycle\n", (unsigned)buffer_pool_used(st->pool), (unsigned)buffer_pool_total(st->pool));
         }
 
         // rssi update
         if (*running && st->capture_rssi_channel && intervalable_and_initial(st->interval_rssi_channel, &st->interval_rssi_channel_last)) {
-            int channel_rssi_dbm = 0;
+            int channel_rssi_dbm;
             if (lora_read_channel_rssi(&channel_rssi_dbm) == ESP_OK)
-                stat_on_link_rssi_channel(st->state_stat, (channel_rssi = rssi_raw_from_dbm(channel_rssi_dbm)));
+                stat_on_link_rssi_channel(st->state_stat, rssi_raw_from_dbm(channel_rssi_dbm));
             else
                 stat_on_link_rssi_channel_error(st->state_stat);
         }
@@ -274,10 +588,10 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
             mesh_transmit_beacon(st->state_mesh);
 
         // control
-        if (*running) {
+        if (*running)
             ctrl_tick(state_ctrl, state_node);
+        if (*running)
             node_tick(state_node);
-        }
 
         // stats publish/display
         if (*running && st->stat_publish_interval > 0 && intervalable(st->stat_publish_interval, &st->stat_publish_interval_last) > 0)
@@ -288,6 +602,11 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
         // network / stations table
         if (*running && st->stat_netw_interval > 0 && intervalable(st->stat_netw_interval, &st->stat_netw_interval_last) > 0)
             netw_report(&st->network, st->state_mesh->station_id);
+    }
+
+    if (st->rx_held != BUFFER_NONE) {
+        buffer_unref(st->pool, st->rx_held);
+        st->rx_held = BUFFER_NONE;
     }
 
     return true;

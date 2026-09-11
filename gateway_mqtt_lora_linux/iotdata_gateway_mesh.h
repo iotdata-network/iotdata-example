@@ -25,6 +25,7 @@ typedef struct {
     bool debug;
     /* handlers */
     mesh_packet_handler_t packet_handler;
+    buffer_pool_t *pool; /* frames are built in pooled buffers, as everywhere else */
     mesh_dedup_handler_t dedup_handler;
     void *dedup_handler_ctx;
     /* statistics: see mesh_ctrl_stat_t above for the per-frame-type table */
@@ -46,23 +47,17 @@ typedef struct {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* Every received mesh frame lands in exactly one bucket: accepted, or failed to unpack, and its
-   bytes counted either way. Recording it in one place is what keeps the types consistent -- the
-   old per-type fields covered only what each handler happened to remember, and the one unpack-error
-   counter that did exist (FORWARD's) could never fire, because the caller unpacked first and
-   never reached the handler on failure. */
 static inline void mesh_stat_frame(mesh_state_t *const st, const uint8_t ctrl, const int len, const bool ok) {
-    if (ctrl >= (uint8_t)(sizeof(st->ctrl) / sizeof(st->ctrl[0]))) { /* a runt: peek_ctrl_type could not read a type at all */
-        st->stat_ctrl_runt++;
-        return;
-    }
-    mesh_ctrl_stat_t *const e = &st->ctrl[ctrl];
-    if (ok)
-        e->rx++;
-    else
-        e->err++;
-    if (len > 0)
-        e->bytes += (uint64_t)len;
+    if (ctrl < (uint8_t)(sizeof(st->ctrl) / sizeof(st->ctrl[0]))) {
+        mesh_ctrl_stat_t *const e = &st->ctrl[ctrl];
+        if (ok)
+            e->rx++;
+        else
+            e->err++;
+        if (len > 0)
+            e->bytes += (uint64_t)len;
+    } else
+        st->stat_ctrl_runt++; /* a runt: peek_ctrl_type could not read a type at all */
 }
 
 static inline uint32_t mesh_stat_total(const mesh_state_t *const s, const bool errors) {
@@ -78,52 +73,68 @@ static inline uint32_t mesh_stat_total(const mesh_state_t *const s, const bool e
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool mesh_transmit_beacon(mesh_state_t *st) {
-    uint8_t buf[IOTDATA_MESH_BEACON_SIZE];
-    const int len = iotdata_mesh_pack_beacon(buf, sizeof(buf),
-                                             &(const iotdata_mesh_beacon_t){
-                                                 .sender_station = st->station_id,
-                                                 .sender_seq = st->mesh_seq++,
-                                                 .gateway_id = st->station_id,
-                                                 .cost = 0,
-                                                 .flags = IOTDATA_MESH_FLAG_ACCEPTING,
-                                                 .generation = st->beacon_generation,
-                                             });
-    if (st->debug)
-        PRINTF_INFO("mesh: tx BEACON generation=%" PRIu16 ", station=%04" PRIX16 "\n", st->beacon_generation, st->station_id);
-    st->beacon_generation = (st->beacon_generation + 1) & (IOTDATA_MESH_GENERATION_MOD - 1);
-    if (st->packet_handler(buf, len)) {
-        st->stat_beacons_tx++;
-        st->stat_bytes_tx += (uint64_t)len;
-        return true;
+    bool ok = false;
+    const buffer_handle_t h = buffer_acquire(st->pool);
+    if (h != BUFFER_NONE) {
+        uint8_t *const buf = buffer_data(st->pool, h);
+        const int len = iotdata_mesh_pack_beacon(buf, buffer_room(st->pool, h),
+                                                 &(const iotdata_mesh_beacon_t){
+                                                     .sender_station = st->station_id,
+                                                     .sender_seq = st->mesh_seq++,
+                                                     .gateway_id = st->station_id,
+                                                     .cost = 0,
+                                                     .flags = IOTDATA_MESH_FLAG_ACCEPTING,
+                                                     .generation = st->beacon_generation,
+                                                 });
+        if (st->debug)
+            PRINTF_INFO("mesh: tx BEACON generation=%" PRIu16 ", station=%04" PRIX16 "\n", st->beacon_generation, st->station_id);
+        st->beacon_generation = (st->beacon_generation + 1) & (IOTDATA_MESH_GENERATION_MOD - 1);
+        ok = len > 0 && st->packet_handler(buf, len);
+        if (ok) {
+            st->stat_beacons_tx++;
+            st->stat_bytes_tx += (uint64_t)len;
+        } else {
+            st->stat_errors_tx++;
+            PRINTF_ERROR("mesh: tx BEACON failed\n");
+        }
+        buffer_unref(st->pool, h); /* written straight to the radio: nothing else holds it */
     } else {
         st->stat_errors_tx++;
-        PRINTF_ERROR("mesh: tx BEACON failed\n");
-        return false;
+        PRINTF_ERROR("mesh: tx BEACON no frame buffer\n");
     }
+    return ok;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool mesh_transmit_ack(mesh_state_t *st, uint16_t origin_station, uint16_t origin_sequence) {
-    uint8_t buf[IOTDATA_MESH_ACK_SIZE];
-    const int len = iotdata_mesh_pack_ack(buf, sizeof(buf),
-                                          &(const iotdata_mesh_ack_t){
-                                              .sender_station = st->station_id,
-                                              .sender_seq = st->mesh_seq++,
-                                              .origin_station = origin_station,
-                                              .origin_sequence = origin_sequence,
-                                          });
-    if (st->debug)
-        PRINTF_INFO("mesh: tx ACK for origin={station=%04" PRIX16 ", sequence=%" PRIu16 "}\n", origin_station, origin_sequence);
-    if (st->packet_handler(buf, len)) {
-        st->stat_acks_tx++;
-        st->stat_bytes_tx += (uint64_t)len;
-        return true;
+    bool ok = false;
+    const buffer_handle_t h = buffer_acquire(st->pool);
+    if (h != BUFFER_NONE) {
+        uint8_t *const buf = buffer_data(st->pool, h);
+        const int len = iotdata_mesh_pack_ack(buf, buffer_room(st->pool, h),
+                                              &(const iotdata_mesh_ack_t){
+                                                  .sender_station = st->station_id,
+                                                  .sender_seq = st->mesh_seq++,
+                                                  .origin_station = origin_station,
+                                                  .origin_sequence = origin_sequence,
+                                              });
+        if (st->debug)
+            PRINTF_INFO("mesh: tx ACK for origin={station=%04" PRIX16 ", sequence=%" PRIu16 "}\n", origin_station, origin_sequence);
+        ok = len > 0 && st->packet_handler(buf, len);
+        if (ok) {
+            st->stat_acks_tx++;
+            st->stat_bytes_tx += (uint64_t)len;
+        } else {
+            st->stat_errors_tx++;
+            PRINTF_ERROR("mesh: tx ACK failed\n");
+        }
+        buffer_unref(st->pool, h);
     } else {
         st->stat_errors_tx++;
-        PRINTF_ERROR("mesh: tx ACK failed\n");
-        return false;
+        PRINTF_ERROR("mesh: tx ACK no frame buffer\n");
     }
+    return ok;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -234,7 +245,8 @@ bool mesh_receive_pong(mesh_state_t *st, const uint8_t *buf, int len) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool mesh_begin(mesh_state_t *st, mesh_packet_handler_t packet_handler, mesh_dedup_handler_t dedup_handler, void *dedup_handler_ctx) {
+bool mesh_begin(mesh_state_t *st, buffer_pool_t *pool, mesh_packet_handler_t packet_handler, mesh_dedup_handler_t dedup_handler, void *dedup_handler_ctx) {
+    st->pool = pool; /* before the enabled check: a disabled mesh never transmits, but never half-built either */
     if (!st->enabled) {
         PRINTF_INFO("mesh: disabled, not starting\n");
         return true;

@@ -25,8 +25,8 @@ LIBS=$(IOTDATA_LIBS_COMMON)
 ##
 
 TARGET=simulator
-MAIN=$(IOTDATA_SRC_EXAMPLE_SIMULATOR)/iotdata_variant_simulator.c
-SOURCES_TARGET=$(IOTDATA_SRC_EXAMPLE_SIMULATOR)/iotdata_variant_simulator.h
+MAIN=iotdata_variant_simulator.c
+SOURCES_TARGET=iotdata_variant_simulator.h
 SOURCES=$(SOURCES_TARGET) \
     $(IOTDATA_SRC_COMMON)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
     $(IOTDATA_SRC_LIBRARY_SOURCES)

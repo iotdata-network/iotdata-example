@@ -11,6 +11,11 @@ IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_
 
 ##
 
+# SIMULATE_RECEIVE_ALWAYS=  1 (default) the simulated sensors listen all the time, so a node
+#                           command is acted on when sent. 0 makes them imitate a real sleeping
+#                           sensor (windows + advertisements), to exercise that path on the bench.
+SIMULATE_RECEIVE_ALWAYS ?= 1
+
 PLATFORM = esp32c3
 NAME     = app
 VERSION  = 1.00
@@ -27,7 +32,8 @@ BUILDER_DEFS = \
     -DIOTDATA_SRC_EXAMPLE=$(IOTDATA_SRC_EXAMPLE) \
     -DIOTDATA_SRC_EXAMPLE_SIMULATOR=$(IOTDATA_SRC_EXAMPLE_SIMULATOR) \
     -DIOTDATA_SRC_COMMON=$(IOTDATA_SRC_COMMON) \
-    -DIOTDATA_VARIANT=$(IOTDATA_VARIANT)
+    -DIOTDATA_VARIANT=$(IOTDATA_VARIANT) \
+    -DSIMULATE_RECEIVE_ALWAYS=$(SIMULATE_RECEIVE_ALWAYS)
 ifneq ($(strip $(IOTDATA_CONFIG)),)
 BUILDER_DEFS += -DIOTDATA_CONFIG=$(abspath $(IOTDATA_CONFIG))
 endif

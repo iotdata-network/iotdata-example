@@ -142,7 +142,8 @@ typedef struct {
     int peers_count;
     char _buffer_topic[STAT_TOPIC_STR_MAX + 8];
     char _buffer_stat[STAT_STRING_MAX];
-    stat_delta_t _delta_last; /* previous counter values, for the "since last line" deltas */
+    stat_delta_t _delta_last;  /* previous counter values, for the "since last line" deltas */
+    const buffer_pool_t *pool; /* frame memory, reported so the ceiling is measured and not assumed */
 } stat_state_t;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -202,14 +203,13 @@ static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint1
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void stat_on_link_rx_packet(stat_state_t *s, uint16_t length) {
-    const time_t now = time(NULL);
     s->link.rx_packets++;
     s->link.rx_bytes += (uint64_t)length;
     if (s->link.rx_size_min == 0 || length < s->link.rx_size_min)
         s->link.rx_size_min = length;
     if (length > s->link.rx_size_max)
         s->link.rx_size_max = length;
-    stat_ring_add(&s->link.rx_ring, now);
+    stat_ring_add(&s->link.rx_ring, time(NULL));
 }
 void stat_on_link_rx_error(stat_state_t *s) {
     s->link.rx_errors++;
@@ -219,8 +219,7 @@ void stat_on_link_rx_drop(stat_state_t *s) {
 }
 void stat_on_link_rx_mesh_unexpected(stat_state_t *s, uint16_t station_id) {
     s->link.rx_mesh_unexpected++;
-    stat_station_t *st = stat_station_find_or_create(s, station_id, time(NULL));
-    st->stat_mesh_unexpected++;
+    stat_station_find_or_create(s, station_id, time(NULL))->stat_mesh_unexpected++;
 }
 void stat_on_link_rssi_packet(stat_state_t *s, uint8_t raw) {
     ema_update_timed(raw, &s->link.rssi_packet_ema, &s->link.rssi_packet_cnt, &s->link.rssi_packet_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
@@ -290,21 +289,15 @@ void stat_on_packet_decoded(stat_state_t *s, uint16_t station_id, uint16_t seque
 }
 
 void stat_on_packet_decode_error(stat_state_t *s, uint16_t station_id, uint8_t variant_id) {
-    stat_station_t *st = stat_station_find_or_create(s, station_id, time(NULL));
-    st->decode_errors++;
-    if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0]))) {
-        stat_variant_t *const e = &s->variants[variant_id];
-        e->decode_errors++;
-    }
+    stat_station_find_or_create(s, station_id, time(NULL))->decode_errors++;
+    if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0])))
+        (&s->variants[variant_id])->decode_errors++;
 }
 
 void stat_on_packet_process_error(stat_state_t *s, uint16_t station_id, uint8_t variant_id) {
-    stat_station_t *st = stat_station_find_or_create(s, station_id, time(NULL));
-    st->process_errors++;
-    if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0]))) {
-        stat_variant_t *const e = &s->variants[variant_id];
-        e->process_errors++;
-    }
+    stat_station_find_or_create(s, station_id, time(NULL))->process_errors++;
+    if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0])))
+        (&s->variants[variant_id])->process_errors++;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -328,7 +321,7 @@ void stat_on_peer(stat_state_t *s, uint16_t station_id, uint16_t generation, uin
             slot = slot_free;
             s->peers_count++;
         } else
-            slot = (slot_oldest >= 0) ? slot_oldest : 0; /* eviction reuses a valid slot: count unchanged */
+            slot = (slot_oldest >= 0) ? slot_oldest : 0;
     }
     stat_peer_t *const e = &s->peers[slot];
     e->valid = true;
@@ -337,6 +330,26 @@ void stat_on_peer(stat_state_t *s, uint16_t station_id, uint16_t generation, uin
     e->cost = cost;
     e->flags = flags;
     e->last_seen = time(NULL);
+}
+
+bool stat_mesh_peer_remove(stat_state_t *const s, const uint16_t station_id) {
+    for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && c < s->peers_count; i++) {
+        stat_peer_t *const e = &s->peers[i];
+        if (e->valid) {
+            c++;
+            if (e->station_id == station_id) {
+                memset(e, 0, sizeof(*e));
+                s->peers_count--;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void stat_mesh_peers_clear(stat_state_t *const s) {
+    memset(s->peers, 0, sizeof(s->peers));
+    s->peers_count = 0;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -543,6 +556,15 @@ cJSON *stat_build_stat_json(const stat_state_t *const s, const mesh_state_t *con
     cJSON_AddItemToObject(root, "stations", stat_build_stations_json(s, now, mesh, ddup));
     cJSON_AddItemToObject(root, "variants", stat_build_variants_json(s, now));
     cJSON_AddItemToObject(root, "mqtt", stat_build_mqtt_json(s, now));
+    if (s->pool) {
+        cJSON *b = cJSON_CreateObject();
+        cJSON_AddNumberToObject(b, "total", (double)buffer_pool_total(s->pool));
+        cJSON_AddNumberToObject(b, "used", (double)buffer_pool_used(s->pool));
+        cJSON_AddNumberToObject(b, "high_water", (double)buffer_pool_high_water(s->pool));
+        cJSON_AddNumberToObject(b, "acquires", (double)buffer_pool_acquires(s->pool));
+        cJSON_AddNumberToObject(b, "failures", (double)buffer_pool_fails(s->pool));
+        cJSON_AddItemToObject(root, "buffers", b);
+    }
     return root;
 }
 
@@ -605,6 +627,8 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
         last->injected = ddup->stat_injected;
     }
     STAT_APPEND(", mqtt{%s, disconnects=%" PRIu32 "}", mqtt_is_connected() ? "up" : "down", mqtt_stat_disconnects);
+    if (s->pool)
+        STAT_APPEND(", buffers{%u/%u, hi=%u, fail=%" PRIu32 "}", (unsigned)buffer_pool_used(s->pool), (unsigned)buffer_pool_total(s->pool), (unsigned)buffer_pool_high_water(s->pool), buffer_pool_fails(s->pool));
 #undef STAT_APPEND
     return buf;
 }
@@ -635,9 +659,10 @@ void stat_display(stat_state_t *const s, const mesh_state_t *const mesh, const d
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, uint16_t station_id, const char *const version, const lora_config_t *const lora_config) {
+bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, uint16_t station_id, const char *const version, const lora_config_t *const lora_config, const buffer_pool_t *const pool) {
     assert(topic_prefix && version && lora_config);
 
+    s->pool = pool;
     s->version = version;
     s->station_id = station_id;
     s->start_time = time(NULL);
