@@ -431,8 +431,7 @@ static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t 
         ok = iotdata_encode_begin(&st->_iotdata_enc, buf, buffer_room(st->pool, h), 0, target, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK && iotdata_encode_tlv(&st->_iotdata_enc, IOTDATA_NODE_TLV_CONTROL, kvbuf, (uint8_t)kvlen) == IOTDATA_OK &&
              iotdata_encode_end(&st->_iotdata_enc, &len) == IOTDATA_OK;
         if (ok) {
-            /* hold it as well as sending it: the target is probably asleep, so this may not be heard */
-            const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, buf, len);
+            const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, h);
             PRINTF_INFO("node: down -> %04" PRIX16 " (%zu bytes, %s)\n", target, len, iotdata_down_ev_name(ev));
             ok = st->tx(buf, (int)len);
         }
@@ -445,20 +444,18 @@ static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t 
 static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const size_t len, const uint16_t station) {
     bool ok = false;
     if (iotdata_decode(buf, len, &st->_iotdata_dec) == IOTDATA_OK && st->_iotdata_dec.tlv_count > 0) {
-
         /* This station has just spoken. If it says it is listening and we are holding a command for
         it, now is the only moment we can deliver -- it may be asleep again by the next tick. We are
         decoding anyway here, so unlike the relay there is nothing to check cheaply first. */
         iotdata_node_receive_t rx;
         if (iotdata_node_receive_find(&st->_iotdata_dec, &rx) && iotdata_down_holds(&st->down, station)) {
             size_t held_len = 0;
-            const uint8_t *const held = iotdata_down_deliver(&st->down, station, &held_len);
-            if (held != NULL && iotdata_node_receive_accepts(&rx, IOTDATA_NODE_TLV_CONTROL)) {
+            const buffer_handle_t held = iotdata_down_deliver(&st->down, station, &held_len);
+            if (held != BUFFER_NONE && iotdata_node_receive_accepts(&rx, IOTDATA_NODE_TLV_CONTROL)) {
                 PRINTF_INFO("node: %04" PRIX16 " is listening -> delivering %zu byte(s) held\n", station, held_len);
-                (void)st->tx(held, (int)held_len);
+                (void)st->tx(buffer_data(st->pool, held), (int)held_len); /* borrowed: the slot keeps holding */
             }
         }
-
         /*
          * A DOWN frame carries a COMMAND, not a report -- and we are the one who sent it. Relays
          * rebroadcast a downstream frame on behalf of a station they cannot reach directly, so our own
@@ -539,7 +536,7 @@ static bool node_begin(node_state_t *st, const uint16_t station_id, const char *
     st->table_row = table_row;
     st->control_keys = control_keys;
     st->control_keys_count = control_keys_count;
-    iotdata_down_init(&st->down);
+    iotdata_down_init(&st->down, pool);
     snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_GATEWAY_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
     PRINTF_INFO("node: station=%04" PRIX16 ", responses on %s\n", station_id, st->topic_resp);
     return true;

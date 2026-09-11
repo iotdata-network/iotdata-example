@@ -77,6 +77,31 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#ifndef BUFFER_LENGTH_FRAME
+#define BUFFER_LENGTH_FRAME 240 /* the E22 sub-packet size: the largest frame that arrives in one piece */
+#endif
+#ifndef BUFFER_LENGTH_PREFIX
+#define BUFFER_LENGTH_PREFIX 0 /* nothing is prepended: a gateway terminates frames, it does not forward them */
+#endif
+#ifndef BUFFER_LENGTH_TOTAL
+#define BUFFER_LENGTH_TOTAL (BUFFER_LENGTH_FRAME + 1 + BUFFER_LENGTH_PREFIX) /* 1 = RSSI byte */
+#endif
+#ifndef BUFFER_SLOTS_DOWNSTREAM
+#define BUFFER_SLOTS_DOWNSTREAM 128
+#endif
+#ifndef BUFFER_SLOTS_PROCESSING
+#define BUFFER_SLOTS_PROCESSING 24 /* one being received, one being sent, the staged control commands */
+#endif
+#ifndef BUFFER_SLOTS_MARGIN
+#define BUFFER_SLOTS_MARGIN 8
+#endif
+#ifndef BUFFER_SLOTS_TOTAL
+#define BUFFER_SLOTS_TOTAL (BUFFER_SLOTS_PROCESSING + BUFFER_SLOTS_DOWNSTREAM + BUFFER_SLOTS_MARGIN)
+#endif
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 bool _log_enabled = false;
 
 __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, const char level, const char *const format, ...) {
@@ -105,6 +130,7 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 
 #include "d_platform_linux.h"
 #include "d_common.h"
+#include "d_format.h"
 
 #define BUFFER_LOCK_TYPE       pthread_mutex_t
 #define BUFFER_LOCK_INIT(l)    pthread_mutex_init((l), NULL)
@@ -158,6 +184,7 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_variant.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
+#define IOTDATA_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
 #include "iotdata_down.h"
 #include "iotdata_node.h"
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
@@ -463,11 +490,7 @@ void process_config_populate(process_state_t *cfg) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define GW_FRAME_MAX     240 /* the E22 sub-packet size: the largest frame that arrives in one piece */
-#define GW_PREFIX_MAX    0   /* nothing is prepended: a gateway terminates frames, it does not forward them */
-#define GW_BUFFER_STRIDE (GW_FRAME_MAX + 1 + GW_PREFIX_MAX)
-#define GW_BUFFER_COUNT  12 /* frames alive at once: one being received, one being sent, the held DOWN commands */
-BUFFER_POOL_DECLARE(s_pool, GW_BUFFER_COUNT, GW_BUFFER_STRIDE);
+BUFFER_POOL_DECLARE(s_pool, BUFFER_SLOTS_TOTAL, BUFFER_LENGTH_TOTAL);
 
 typedef struct {
     const char *lora_port;
@@ -575,7 +598,7 @@ int main(int argc, char *argv[]) {
         return ret;
     const uint16_t station_id = state->mesh_state.station_id; // from config
 
-    BUFFER_POOL_INIT(s_pool, GW_BUFFER_COUNT, GW_BUFFER_STRIDE, GW_PREFIX_MAX);
+    BUFFER_POOL_INIT(s_pool, BUFFER_SLOTS_TOTAL, BUFFER_LENGTH_TOTAL, BUFFER_LENGTH_PREFIX);
 
     gateway_blackbox_begin(&state->bbox_state);
 

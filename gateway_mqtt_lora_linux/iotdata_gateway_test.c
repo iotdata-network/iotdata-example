@@ -39,6 +39,7 @@ static void test_e22_printf_stub(const char *format, ...) {
 #define EMU_LINUX
 #include "d_platform_linux.h"
 #include "d_common.h"
+#include "d_format.h"
 
 /* The pool as the gateway really builds it: locked, because the gateway is not single-threaded.
    The harness itself is, but compiling the same shape is the point -- an unlocked test pool would
@@ -50,7 +51,12 @@ static void test_e22_printf_stub(const char *format, ...) {
 #include "d_module_buffers.h"
 
 #define TEST_FRAME_MAX 240
-BUFFER_POOL_DECLARE(t_pool, 8, TEST_FRAME_MAX + 8);
+/* Set here, before the pool is declared, exactly as the app sets it before including the store:
+   the down table's size is what the pool has to carry on top of the traffic. Kept small for the
+   harness -- the gateway itself dimensions for a whole network. */
+#define IOTDATA_DOWN_SLOTS 8
+#define TEST_POOL_COUNT    (IOTDATA_DOWN_SLOTS + 8)
+BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #define PIN_DEVICE_UART_TX  GPIO_NUM_NC
 #define PIN_DEVICE_UART_RX  GPIO_NUM_NC
 #define PIN_DEVICE_LORA_AUX GPIO_NUM_NC
@@ -369,7 +375,7 @@ static void fwd_test_state(process_state_t *ps, mesh_state_t *ms, stat_state_t *
     fwd_test_node.stat = ss;
     fwd_test_node.pool = &t_pool;
     fwd_test_node.tx = test_packet_handler;
-    iotdata_down_init(&fwd_test_node.down);
+    iotdata_down_init(&fwd_test_node.down, &t_pool);
     ps->state_node = &fwd_test_node;
     ps->pool = &t_pool;
     memset(ms, 0, sizeof(*ms));
@@ -2098,7 +2104,7 @@ static bool test_control_report_is_published(void) {
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
-    iotdata_down_init(&ns.down);
+    iotdata_down_init(&ns.down, &t_pool);
 
     uint8_t frame[TEST_FRAME_MAX];
     const int n = build_report(frame, sizeof(frame), 0x0F1B, 5, IOTDATA_NODE_TLV_CONTROL);
@@ -2117,7 +2123,7 @@ static bool test_down_echo_is_not_published(void) {
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
-    iotdata_down_init(&ns.down);
+    iotdata_down_init(&ns.down, &t_pool);
 
     uint8_t frame[TEST_FRAME_MAX];
     const int n = build_report(frame, sizeof(frame), 0x0F1B, IOTDATA_SEQUENCE_DOWN, IOTDATA_NODE_TLV_CONTROL);
@@ -2334,7 +2340,7 @@ static bool test_table_report_json(void) {
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
-    iotdata_down_init(&ns.down);
+    iotdata_down_init(&ns.down, &t_pool);
 
     uint8_t kv[64];
     iotdata_kvr_t b;
@@ -2414,7 +2420,7 @@ static bool test_text_values_still_render_as_strings(void) {
 int main(void) {
     setbuf(stdout, NULL);
 
-    BUFFER_POOL_INIT(t_pool, 8, TEST_FRAME_MAX + 8, 0);
+    BUFFER_POOL_INIT(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8, 0);
 
     printf("\n=== Mesh Tests ===\n\n");
 

@@ -84,17 +84,6 @@ static const char *__tag_app = "app";
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* Fixed-point rendering for logs: 2135 -> "21.35". Avoids pulling in float printf. */
-#define CENTI_STR_MAX 16
-static const char *centi_str(char *const buf, const size_t size, const int32_t centi) {
-    const int32_t abs = centi < 0 ? -centi : centi;
-    (void)snprintf(buf, size, "%s%" PRId32 ".%02" PRId32, centi < 0 ? "-" : "", abs / 100, abs % 100);
-    return buf;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
 #define PIN_DEVICE_UART_TX  PIN_E22_RXD
 #define PIN_DEVICE_UART_RX  PIN_E22_TXD
 #define PIN_DEVICE_LORA_AUX PIN_E22_AUX
@@ -103,7 +92,9 @@ static const char *centi_str(char *const buf, const size_t size, const int32_t c
 #define PIN_DEVICE_I2C_SDA  PIN_BME280_SDA
 #define PIN_DEVICE_I2C_SCL  PIN_BME280_SCL
 
+#include "d_platform_esp32.h"
 #include "d_common.h"
+#include "d_format.h"
 #include "d_readings.h"
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"

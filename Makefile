@@ -34,7 +34,7 @@ $(NATIVE) $(EMBEDDED):
 	$(MAKE) -C $@
 
 clean:
-	@for d in $(NATIVE); do $(MAKE) -C $$d clean done
+	@for d in $(NATIVE); do $(MAKE) -C $$d clean; done
 	@for d in $(EMBEDDED); do $(MAKE) -C $$d clean; done
 
 format:

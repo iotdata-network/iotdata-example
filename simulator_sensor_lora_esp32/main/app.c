@@ -63,6 +63,7 @@ static const char *__tag_app = "app";
 #define PIN_DEVICE_LORA_M0  PIN_E22_M0
 #define PIN_DEVICE_LORA_M1  PIN_E22_M1
 
+#include "d_platform_esp32.h"
 #include "d_common.h"
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"

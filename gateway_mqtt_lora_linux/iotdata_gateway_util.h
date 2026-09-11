@@ -9,17 +9,6 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-__attribute__((format(printf, 3, 4))) static inline const char *snprintf_inline(char *buf, size_t size, const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    (void)vsnprintf(buf, size, fmt, args);
-    va_end(args);
-    return buf;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
 time_t intervalable(const time_t interval, time_t *last) {
     time_t now = time(NULL);
     if (*last == 0) {
@@ -52,32 +41,9 @@ time_t intervalable_and_initial(const time_t interval, time_t *last) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void debug_hexdump(const char *prefix, const uint8_t *data, size_t length) {
-    static const char hexdigit[] = "0123456789ABCDEF";
-    for (size_t offset = 0; offset < length; offset += 16) {
-        char hex[(16 * 3) + 2], asc[16 + 2];
-        size_t h = 0, a = 0;
-        for (size_t i = 0; i < 16; i++) {
-            if (i == 8) { 
-                hex[h++] = ' ';
-                asc[a++] = ' ';
-            }
-            if (offset + i < length) {
-                const uint8_t b = data[offset + i];
-                hex[h++] = hexdigit[b >> 4];
-                hex[h++] = hexdigit[b & 0x0F];
-                hex[h++] = ' ';
-                asc[a++] = isprint(b) ? (char)b : '.';
-            } else {
-                hex[h++] = ' ';
-                hex[h++] = ' ';
-                hex[h++] = ' ';
-                asc[a++] = ' ';
-            }
-        }
-        hex[h] = '\0';
-        asc[a] = '\0';
-        PRINTF_INFO("%s[%04X] %s %s\n", prefix ? prefix : "", (unsigned)offset, hex, asc);
-    }
+    char line[FORMAT_HEXDUMP_LINE_MAX];
+    for (size_t off = 0; format_hexdump_line(line, sizeof(line), data, length, off); off += FORMAT_HEXDUMP_COLUMNS)
+        PRINTF_INFO("%s%s\n", prefix ? prefix : "", line);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
