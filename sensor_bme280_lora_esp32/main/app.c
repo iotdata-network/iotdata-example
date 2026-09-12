@@ -118,7 +118,7 @@ static const lora_config_t lora_cfg = {
 };
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// iotdata — variant suite (unity build, encode-only)
+// iotdata
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 /*
@@ -136,8 +136,84 @@ static const lora_config_t lora_cfg = {
 #include "iotdata_variant.h"
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
+// variant
+#include "iotdata_node_control.h"
+// status
+// config
+// diagnostics
+// content
 #include "iotdata_node_endpoint.h"
+#if IOTDATA_CONFIG_BLACKBOX
+#ifndef IOTDATA_BLACKBOX_POOL_SZ
+#define IOTDATA_BLACKBOX_POOL_SZ 1024u
+#endif
+#if IOTDATA_CONFIG_BLACKBOX >= 2
+#define BLACKBOX_PERSIST BLACKBOX_PERSIST_ESP_FLASH
+#else
+#define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
+#endif
+#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#include "iotdata_blackbox.h"
+static RTC_NOINIT_ATTR char blackbox_pool[IOTDATA_BLACKBOX_POOL_SZ];
+static blackbox_handle_t blackbox;
+static const blackbox_config_t blackbox_config = {
+    .pool = blackbox_pool,
+    .pool_sz = sizeof(blackbox_pool),
+    .flush = BLACKBOX_FLUSH_MANUAL, /* flushed explicitly before sleep; a no-op under PERSIST_NONE */
+    .persist_arg = "diag",          /* ESP_FLASH: the partition label; ignored by PERSIST_NONE */
+    .enabled = true,                /* compiled in == collecting; the compile-time knob is the gate */
+};
+static bool blackbox_ready = false; /* init can fail, and the handle is then not safe to read */
+static void blackbox_start(const esp_reset_reason_t reason, const bool restarted) {
+    iotdata_blackbox_begin();
+    if (blackbox_init(&blackbox, &blackbox_config) != 0) {
+        ESP_LOGW(__tag_app, "blackbox: init failed -- diagnostics disabled");
+        return;
+    }
+    blackbox_ready = true;
+    (void)iotdata_blackbox_lifecycle(&blackbox, restarted ? IOTDATA_BB_LC_BOOT : IOTDATA_BB_LC_WAKE, (uint8_t)reason);
+}
+#define BLACKBOX_START(reason, restarted) blackbox_start((reason), (restarted))
+#define BLACKBOX_EVENT(ev, reason) \
+    do { \
+        if (blackbox_ready) \
+            (void)iotdata_blackbox_lifecycle(&blackbox, (ev), (uint8_t)(reason)); \
+    } while (0)
+#define BLACKBOX_FLUSH() \
+    do { \
+        if (blackbox_ready) \
+            (void)blackbox_flush(&blackbox); \
+    } while (0)
+static size_t sensor_node_diag(size_t *const cursor, char *const out, const size_t outsize) {
+    if (!blackbox_ready)
+        return 0;
+    const int n = blackbox_pull(&blackbox, cursor, out, outsize);
+    return (n > 0) ? strlen(out) : 0;
+}
+static bool sensor_node_control(const uint16_t station, const uint8_t key, const uint8_t *const val, const uint8_t vlen) {
+    if (!blackbox_ready)
+        return false;
+    switch (key) {
+    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE:
+        blackbox_enable(&blackbox, (vlen >= 1) ? (val[0] != 0u) : true);
+        ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " CONTROL - DIAGNOSTICS_ENABLE -> %s", station, ((vlen >= 1) ? (val[0] != 0u) : true) ? "true" : "false");
+        return true;
+    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR:
+        blackbox_clear(&blackbox);
+        ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " CONTROL - DIAGNOSTICS_CLEAR", station);
+        return true;
+    default:
+        return false;
+    }
+}
+static const uint8_t sensor_node_control_keys[] = { IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE, IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR };
+#else
+#define BLACKBOX_START(reason, restarted) ((void)0)
+#define BLACKBOX_EVENT(ev, reason)        ((void)0)
+#define BLACKBOX_FLUSH()                  ((void)0)
+#endif
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #define PACKET_VARIANT IOTDATA_VSUITE_WEATHER_STATION
@@ -157,6 +233,12 @@ static const idep_config_t idep_cfg = {
     .caps = &s_caps,
     .status = sensor_node_status,
     .tx = sensor_node_tx,
+#if IOTDATA_CONFIG_BLACKBOX
+    .control = sensor_node_control,
+    .control_keys = sensor_node_control_keys,
+    .control_keys_count = (uint8_t)(sizeof(sensor_node_control_keys) / sizeof(sensor_node_control_keys[0])),
+    .diag = sensor_node_diag,
+#endif
     .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
     .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
 };
@@ -233,46 +315,6 @@ static void state_reset(void) {
     state.station_id = state_station_id();
     idep_node_init(&state.node, state.station_id);
 }
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-#if IOTDATA_CONFIG_BLACKBOX
-#ifndef IOTDATA_BLACKBOX_POOL_SZ
-#define IOTDATA_BLACKBOX_POOL_SZ 1024u
-#endif
-#if IOTDATA_CONFIG_BLACKBOX >= 2
-#define BLACKBOX_PERSIST BLACKBOX_PERSIST_ESP_FLASH
-#else
-#define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
-#endif
-#define IOTDATA_BLACKBOX_IMPLEMENTATION
-#include "iotdata_blackbox.h"
-static RTC_NOINIT_ATTR char blackbox_pool[IOTDATA_BLACKBOX_POOL_SZ];
-static blackbox_handle_t blackbox;
-static const blackbox_config_t blackbox_config = {
-    .pool = blackbox_pool,
-    .pool_sz = sizeof(blackbox_pool),
-    .flush = BLACKBOX_FLUSH_MANUAL, /* flushed explicitly before sleep; a no-op under PERSIST_NONE */
-    .persist_arg = "diag",          /* ESP_FLASH: the partition label; ignored by PERSIST_NONE */
-    .enabled = true,                /* compiled in == collecting; the compile-time knob is the gate */
-};
-static void blackbox_start(const esp_reset_reason_t reason, const bool restarted) {
-    iotdata_blackbox_begin();
-    if (blackbox_init(&blackbox, &blackbox_config) != 0) {
-        ESP_LOGW(__tag_app, "blackbox: init failed -- diagnostics disabled");
-        return;
-    }
-    (void)iotdata_blackbox_lifecycle(&blackbox, restarted ? IOTDATA_BB_LC_BOOT : IOTDATA_BB_LC_WAKE, (uint8_t)reason);
-}
-#define BLACKBOX_START(reason, restarted) blackbox_start((reason), (restarted))
-#define BLACKBOX_EVENT(ev, reason)        (void)iotdata_blackbox_lifecycle(&blackbox, (ev), (uint8_t)(reason))
-#define BLACKBOX_FLUSH()                  (void)blackbox_flush(&blackbox)
-#else
-#define BLACKBOX_START(reason, restarted) ((void)0)
-#define BLACKBOX_EVENT(ev, reason)        ((void)0)
-#define BLACKBOX_FLUSH()                  ((void)0)
-#endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------

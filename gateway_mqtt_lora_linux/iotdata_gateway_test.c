@@ -87,6 +87,7 @@ static inline uint8_t rssi_raw_from_dbm(const int dbm) {
 #include "iotdata_down.h"
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
+#include "iotdata_node_control.h"
 
 #define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
@@ -109,6 +110,7 @@ typedef struct {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "iotdata_gateway_node.h"
+#include "iotdata_gateway_state.h"
 #include "iotdata_gateway_ctrl.h"
 #include "iotdata_gateway_exec.h"
 #pragma GCC diagnostic pop
@@ -1438,7 +1440,7 @@ static bool test_stat_mesh_peer_fill_and_evict(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // Ctrl (MQTT -> node CONTROL) tests
 //
-// ctrl_on_message() runs on the mosquitto thread and only STAGES a payload; ctrl_tick() drains it
+// ctrl_from_message() runs on the mosquitto thread and only STAGES a payload; ctrl_tick() drains it
 // on the main loop. These drive the real handler and inspect the staged bytes, which is where the
 // mesh-management commands used to become MANAGE frames and now become CONTROL kvr entries.
 // A kvr entry on the wire is { key, vlen, value... }.
@@ -1500,213 +1502,11 @@ static void ctrl_test_drop(ctrl_state_t *const st) {
 
 static void ctrl_test_feed(ctrl_state_t *const st, const char *const json) {
     g_ctrl = st;
-    ctrl_on_message("test/manage/req", (const unsigned char *)json, (int)strlen(json));
+    ctrl_from_message("test/manage/req", (const unsigned char *)json, (int)strlen(json));
 }
 
-static bool test_ctrl_commands_to_control(void) {
-    static const struct {
-        const char *json;
-        uint8_t expect[8];
-        int expect_len;
-        uint16_t target;
-    } cases[] = {
-        /* mesh management: the old MANAGE vocabulary, now CONTROL keys off MESH_BASE */
-        { "{\"cmd\":\"status\",\"target\":\"0x123\"}", { 0x20, 0x01, 0x02 }, 3, 0x123 },
-        /* The old table names printed to the node's console, and still do -- which is now the DUMP
-           key, not the REQUEST key, because a request is answered by a report. The behaviour is
-           what was preserved; the key moved underneath it. */
-        { "{\"cmd\":\"stations\",\"target\":\"0x123\"}", { 0x41, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"peers\",\"target\":\"0x123\"}", { 0x4B, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"peers-remove\",\"station\":\"0x456\",\"target\":\"0x123\"}", { 0x49, 0x03, 0x04, 0x56, 0x00 }, 5, 0x123 },
-        { "{\"cmd\":\"peers-clear\",\"target\":\"0x123\"}", { 0x4A, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"flush\",\"target\":\"0x123\"}", { 0x4A, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"filters\",\"target\":\"0x123\"}", { 0x53, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"block\",\"station\":\"0x456\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x01 }, 5, 0x123 },
-        { "{\"cmd\":\"allow\",\"station\":\"0x456\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x02 }, 5, 0x123 },
-        { "{\"cmd\":\"unfilter\",\"station\":\"0x456\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x00 }, 5, 0x123 },
-        { "{\"cmd\":\"filter-clear\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x00 }, 3, 0x123 },
-        { "{\"cmd\":\"filter-clear\",\"scope\":\"manual\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x01 }, 3, 0x123 },
-        { "{\"cmd\":\"filter-clear\",\"scope\":\"auto\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x02 }, 3, 0x123 },
-        /* diagnostics: generic node commands, not mesh ones -- one vocabulary for every node */
-        { "{\"cmd\":\"diag\",\"target\":\"0x123\"}", { 0x30, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"diag-enable\",\"target\":\"0x123\"}", { 0x31, 0x01, 0x01 }, 3, 0x123 },
-        { "{\"cmd\":\"diag-disable\",\"target\":\"0x123\"}", { 0x31, 0x01, 0x00 }, 3, 0x123 },
-        { "{\"cmd\":\"diag-clear\",\"target\":\"0x123\"}", { 0x32, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"diag-dump\",\"target\":\"0x123\"}", { 0x33, 0x00 }, 2, 0x123 },
-        /* node: the "node-<tlv>" path, which built CONTROL payloads all along */
-        { "{\"cmd\":\"node-status\",\"target\":\"0x123\"}", { 0x20, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"node-version\",\"target\":\"0x123\"}", { 0x08, 0x00 }, 2, 0x123 },
-        { "{\"cmd\":\"node-diagnostics\",\"target\":\"0x123\"}", { 0x30, 0x00 }, 2, 0x123 },
-    };
-
-    ctrl_state_t st;
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        ctrl_test_state(&st);
-        ctrl_test_feed(&st, cases[i].json);
-        if (!ctrl_staged(&st) || ctrl_staged_len(&st) != cases[i].expect_len || memcmp(ctrl_staged_bytes(&st), cases[i].expect, (size_t)cases[i].expect_len) != 0 || ctrl_staged_target(&st) != cases[i].target) {
-            printf("FAIL (case %zu: %s -> ", i, cases[i].json);
-            for (int k = 0; k < ctrl_staged_len(&st); k++)
-                printf("%02X ", ctrl_staged_bytes(&st)[k]);
-            printf("target=%04X)\n", (unsigned)ctrl_staged_target(&st));
-            ctrl_test_drop(&st);
-            return false;
-        }
-        ctrl_test_drop(&st);
-    }
-    return true;
-}
-
-/* "status" asks for the mesh group only; "node-status" (no value) means every group. The two are
-   deliberately different -- the old MANAGE status was a mesh-management command. */
-static bool test_ctrl_status_scope_differs_from_node_status(void) {
-    ctrl_state_t st;
-
-    ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"status\",\"target\":\"0x123\"}");
-    ASSERT(ctrl_staged(&st));
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_STATUS_REQUEST);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 1);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[2], IOTDATA_NODE_STATUS_SCOPE_MESH);
-    ctrl_test_drop(&st); /* ctrl_test_state below memsets the slot: give this one back first */
-
-    ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"node-status\",\"target\":\"0x123\"}");
-    ASSERT(ctrl_staged(&st));
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_STATUS_REQUEST);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 0); /* no scope value = all groups */
-    ctrl_test_drop(&st);
-    return true;
-}
-
-/* A station-taking command carries { u16 station, u8 action } -- a list, so one request can change
-   several stations; this gateway sends a list of one. */
-static bool test_ctrl_mesh_update_entry_shape(void) {
-    ctrl_state_t st;
-    ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"block\",\"station\":\"0xABC\",\"target\":\"0x123\"}");
-    ASSERT(ctrl_staged(&st));
-    ASSERT_EQ_INT(ctrl_staged_len(&st), 2 + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
-    ASSERT_EQ_INT((uint16_t)((ctrl_staged_bytes(&st)[2] << 8) | ctrl_staged_bytes(&st)[3]), 0x0ABC);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[4], IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK);
-    ctrl_test_drop(&st);
-    return true;
-}
-
-/* The whole point of one response topic: every producer must land on it. node_begin and
-   ctrl_begin build the string independently, so this is the invariant that would quietly regress
-   if either grew its own suffix again. */
-static bool test_ctrl_response_topic_is_shared(void) {
-    node_state_t ns;
-    memset(&ns, 0, sizeof(ns));
-    stat_state_t ss;
-    memset(&ss, 0, sizeof(ss));
-    bbox_state_t bb;
-    memset(&bb, 0, sizeof(bb));
-    ASSERT(node_begin(&ns, 0x0001, NULL, &ss, &bb, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
-
-    ctrl_state_t st;
-    ctrl_test_state(&st);
-    /* ctrl_begin sets the topics before it subscribes, so the (expected) subscribe failure with no
-       broker does not stop us checking them */
-    (void)ctrl_begin(&st, "pre", 0x0001, &bb, &t_pool);
-
-    ASSERT(strcmp(st.topic_req, "pre/manage/req") == 0);
-    ASSERT(strcmp(st.topic_resp, "pre/manage/resp") == 0);
-    ASSERT(strcmp(ns.topic_resp, st.topic_resp) == 0);
-    return true;
-}
-
-static bool test_ctrl_unknown_command_stages_nothing(void) {
-    ctrl_state_t st;
-    ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"no-such-command\",\"target\":\"0x123\"}");
-    ASSERT(!ctrl_staged(&st));
-    ASSERT_EQ_INT(st.stat_req_bad, 1u);
-    ASSERT_EQ_INT(st.stat_req_rx, 1u);
-    return true;
-}
-
-static bool test_ctrl_bad_json_stages_nothing(void) {
-    ctrl_state_t st;
-    ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{not json");
-    ASSERT(!ctrl_staged(&st));
-    ASSERT_EQ_INT(st.stat_req_bad, 1u);
-    return true;
-}
-
-/* target absent means broadcast, and it reaches the staged payload -- ctrl_tick() needs it to
-   decide between executing locally and airing a DOWN frame. */
-static bool test_ctrl_target_defaults_to_broadcast(void) {
-    ctrl_state_t st;
-    ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"peers\"}");
-    ASSERT(ctrl_staged(&st));
-    ASSERT_EQ_INT(ctrl_staged_target(&st), IOTDATA_STATION_BROADCAST);
-    ctrl_test_drop(&st);
-    return true;
-}
-
-/* Requests queue rather than superseding each other, and come back out in the order they arrived.
-   The single slot this replaced delivered only the LAST one, silently losing every command an
-   operator sent between two ticks of the loop -- and they are not interchangeable, because each
-   one can name a different station. */
-static bool test_ctrl_requests_queue_in_order(void) {
-    ctrl_state_t st;
-    ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"peers\",\"target\":\"0x123\"}");
-    ctrl_test_feed(&st, "{\"cmd\":\"filters\",\"target\":\"0x456\"}");
-    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 2u);
-    ASSERT_EQ_INT(buffer_queue_rejected(&st.queue), 0u);
-
-    uint8_t key = 0;
-    uint16_t target = 0;
-    ASSERT(ctrl_test_take(&st, &key, &target));
-    ASSERT_EQ_INT(key, IOTDATA_NODE_CONTROL_MESH_PEERS_DUMP /* `peers` dumps */);
-    ASSERT_EQ_INT(target, 0x123); /* the target travels with each one, not just with the last */
-    ASSERT(ctrl_test_take(&st, &key, &target));
-    ASSERT_EQ_INT(key, IOTDATA_NODE_CONTROL_MESH_FILTERS_DUMP /* `filters` dumps */);
-    ASSERT_EQ_INT(target, 0x456);
-    ASSERT(!ctrl_test_take(&st, NULL, NULL));
-    return true;
-}
-
-/* The queue is bounded, so a burst cannot eat the pool the receive path draws from. Past the
-   bound the operator is TOLD ("busy"), which a superseding slot could never do. */
-static bool test_ctrl_queue_full_is_refused(void) {
-    ctrl_state_t st;
-    ctrl_test_state(&st);
-    for (int i = 0; i < CTRL_QUEUE_MAX + 2; i++)
-        ctrl_test_feed(&st, "{\"cmd\":\"peers\",\"target\":\"0x123\"}");
-    ASSERT_EQ_INT(buffer_queue_count(&st.queue), CTRL_QUEUE_MAX);
-    ASSERT_EQ_INT(buffer_queue_rejected(&st.queue), 2u);
-    ASSERT_EQ_INT(st.stat_req_bad, 2u); /* each refusal answered, not dropped on the floor */
-    ctrl_test_drop(&st);
-    return true;
-}
-
-/* A command staged while nothing could send it must go stale rather than go out minutes late: a
-   mesh command is relative to state the node has since moved on from. */
-static bool test_ctrl_staged_command_expires(void) {
-    ctrl_state_t st;
-    ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"peers\",\"target\":\"0x123\"}");
-    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
-    const uint32_t now_ms = (uint32_t)__ticks_ms();
-    ASSERT_EQ_INT(buffer_queue_expire(&st.queue, now_ms + CTRL_QUEUE_TTL_MS - 1000), 0u); /* not yet */
-    ASSERT_EQ_INT(buffer_queue_expire(&st.queue, now_ms + CTRL_QUEUE_TTL_MS + 1000), 1u);
-    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 0u);
-    ASSERT_EQ_INT(buffer_queue_expired(&st.queue), 1u);
-    return true;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// The gateway as a mesh node: it answers the same mesh questions a relay does, and acts on the
-// same commands. These drive the real hooks (exec_node_control / exec_node_status_mesh), which
-// reach their state through g_exec exactly as the live gateway's do.
-// -----------------------------------------------------------------------------------------------------------------------------------------
+static const uint8_t telemetry_0538[] = { 0x35, 0x38, 0x00, 0x01, 0x2C, 0xC1, 0x68, 0x97, 0x3E };
+static const uint8_t telemetry_0AF9[] = { 0x6A, 0xF9, 0x00, 0x1F, 0x2C, 0xD8, 0xEA, 0xBA, 0x73, 0x60, 0x04 };
 
 static void mesh_node_test_state(process_state_t *ps, mesh_state_t *ms, stat_state_t *ss) {
     fwd_test_state(ps, ms, ss, true, true);
@@ -1714,371 +1514,10 @@ static void mesh_node_test_state(process_state_t *ps, mesh_state_t *ms, stat_sta
     g_exec = ps;
 }
 
-/* A gateway reports the mesh group, and reports itself as the ROOT: state GATEWAY, cost 0, no
-   parent. That is the asymmetry the wire format is designed to carry, rather than the gateway
-   simply having no answer. */
-static bool test_mesh_node_gateway_status_is_root(void) {
-    process_state_t ps;
-    mesh_state_t ms;
-    stat_state_t ss;
-    mesh_node_test_state(&ps, &ms, &ss);
-    ms.beacon_generation = 7;
-    ms.stat_beacons_tx = 11;
-    ms.ctrl[IOTDATA_MESH_CTRL_BEACON].rx = 5;
-    stat_on_peer(&ss, 0x05BF, 1, 1, 0);
-    stat_on_peer(&ss, 0x0F1B, 1, 1, 0);
-
-    iotdata_node_status_mesh_t m;
-    memset(&m, 0, sizeof(m));
-    exec_node_status_mesh(&m);
-    ASSERT(m.present);
-    ASSERT_EQ_INT(m.state, IOTDATA_NODE_STATUS_MESH_STATE_GATEWAY);
-    ASSERT_EQ_INT(m.cost, 0);
-    ASSERT_EQ_INT(m.parent, 0);
-    ASSERT_EQ_INT(m.generation, 7);
-    ASSERT_EQ_INT(m.beacon_tx, 11u);
-    ASSERT_EQ_INT(m.beacon_rx, 5u);
-    ASSERT_EQ_INT(m.peers, 2);
-    ASSERT_EQ_INT(m.reparent, 0u); /* a root never reparents: zero is the answer, not a gap */
-    ASSERT_EQ_INT(m.failover, 0u);
-    ASSERT_EQ_INT(m.orphan, 0u);
-    g_exec = NULL;
-    return true;
-}
-
-/* With the mesh off there is no group to report -- absent, not zeroed. */
-static bool test_mesh_node_status_absent_when_mesh_off(void) {
-    process_state_t ps;
-    mesh_state_t ms;
-    stat_state_t ss;
-    mesh_node_test_state(&ps, &ms, &ss);
-    ms.enabled = false;
-
-    iotdata_node_status_mesh_t m;
-    memset(&m, 0, sizeof(m));
-    exec_node_status_mesh(&m);
-    ASSERT(!m.present);
-    g_exec = NULL;
-    return true;
-}
-
-/* The command a relay answers, answered the same way here -- and it must actually take effect on
-   the receive path, which is the whole point of the gateway having a filter at all. */
-static bool test_mesh_node_filter_update_blocks_rx(void) {
-    process_state_t ps;
-    mesh_state_t ms;
-    stat_state_t ss;
-    mesh_node_test_state(&ps, &ms, &ss);
-
-    ASSERT(filter_allows(&ps.filter, 0x0537)); /* nothing filtered yet */
-
-    const uint8_t block[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK };
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
-    ASSERT(!filter_allows(&ps.filter, 0x0537)); /* blocked */
-    ASSERT(filter_allows(&ps.filter, 0x0538));  /* and only that one */
-    ASSERT_EQ_INT(filter_count(&ps.filter), 1);
-
-    /* NONE removes it: there is no separate remove command, by design */
-    const uint8_t none[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_NONE };
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, none, (uint8_t)sizeof(none)));
-    ASSERT(filter_allows(&ps.filter, 0x0537));
-    ASSERT_EQ_INT(filter_count(&ps.filter), 0);
-    g_exec = NULL;
-    return true;
-}
-
-/* Blocking a station also drops what we already believe about it, so the block takes effect on
-   the current topology rather than only on future frames. */
-static bool test_mesh_node_block_drops_peer(void) {
-    process_state_t ps;
-    mesh_state_t ms;
-    stat_state_t ss;
-    mesh_node_test_state(&ps, &ms, &ss);
-    stat_on_peer(&ss, 0x05BF, 1, 1, 0);
-    ASSERT_EQ_INT(ss.peers_count, 1);
-
-    const uint8_t block[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK };
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
-    ASSERT_EQ_INT(ss.peers_count, 0);
-    g_exec = NULL;
-    return true;
-}
-
-/* peers-update/NONE and peers-clear, and their idempotence: a second identical command is a
-   no-op, which is what makes them safe to send over a link with no acknowledgement. */
-static bool test_mesh_node_peers_update_and_clear(void) {
-    process_state_t ps;
-    mesh_state_t ms;
-    stat_state_t ss;
-    mesh_node_test_state(&ps, &ms, &ss);
-    stat_on_peer(&ss, 0x05BF, 1, 1, 0);
-    stat_on_peer(&ss, 0x0F1B, 1, 1, 0);
-    ASSERT_EQ_INT(ss.peers_count, 2);
-
-    const uint8_t forget[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_PEER_NONE };
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget)));
-    ASSERT_EQ_INT(ss.peers_count, 1);
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget))); /* again */
-    ASSERT_EQ_INT(ss.peers_count, 1);                                                                   /* still 1: idempotent */
-
-    /* the hole a removal leaves must be reusable, or the table leaks slots */
-    stat_on_peer(&ss, 0x0AF9, 1, 1, 0);
-    ASSERT_EQ_INT(ss.peers_count, 2);
-
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR, NULL, 0));
-    ASSERT_EQ_INT(ss.peers_count, 0);
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR, NULL, 0)); /* again */
-    ASSERT_EQ_INT(ss.peers_count, 0);
-    g_exec = NULL;
-    return true;
-}
-
-/* A list can carry several stations, because the wire format takes one -- the gateway's own MQTT
-   interface names one at a time, but a peer manager need not. */
-static bool test_mesh_node_filter_update_takes_a_list(void) {
-    process_state_t ps;
-    mesh_state_t ms;
-    stat_state_t ss;
-    mesh_node_test_state(&ps, &ms, &ss);
-
-    const uint8_t three[3 * IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = {
-        0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK, 0x05, 0x38, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK, 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW,
-    };
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, three, (uint8_t)sizeof(three)));
-    ASSERT_EQ_INT(filter_count(&ps.filter), 3);
-    ASSERT(!filter_allows(&ps.filter, 0x0537));
-    ASSERT(!filter_allows(&ps.filter, 0x0538));
-    ASSERT(filter_allows(&ps.filter, 0x0AF9));
-    /* an allow entry exists, so a station with no entry at all is now excluded (whitelist) */
-    ASSERT(!filter_allows(&ps.filter, 0x06ED));
-    g_exec = NULL;
-    return true;
-}
-
-/* A key the gateway does not implement must be refused, not silently swallowed -- that is how the
-   node layer knows to count it unknown, and how a manager learns the node cannot do it. */
-static bool test_mesh_node_unimplemented_key_refused(void) {
-    process_state_t ps;
-    mesh_state_t ms;
-    stat_state_t ss;
-    mesh_node_test_state(&ps, &ms, &ss);
-    ASSERT(!exec_node_control(0x7F, NULL, 0));
-    ASSERT(!exec_node_control(IOTDATA_NODE_CONTROL_REBOOT, NULL, 0)); /* the node layer's, not ours */
-    g_exec = NULL;
-    return true;
-}
-
-/* Whatever the hook implements has to appear in the CONTROL report, or a manager cannot discover
-   it. The list is declared once and used for both, so this pins them together. */
-static bool test_mesh_node_control_keys_are_all_handled(void) {
-    process_state_t ps;
-    mesh_state_t ms;
-    stat_state_t ss;
-    mesh_node_test_state(&ps, &ms, &ss);
-    for (size_t i = 0; i < sizeof(exec_node_control_keys) / sizeof(exec_node_control_keys[0]); i++) {
-        const uint8_t key = exec_node_control_keys[i];
-        const uint8_t entry[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, 0x00 };
-        if (!exec_node_control(key, entry, (uint8_t)sizeof(entry))) {
-            printf("FAIL (advertised key 0x%02X is not handled)\n", key);
-            g_exec = NULL;
-            return false;
-        }
-    }
-    g_exec = NULL;
-    return true;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-/* The exact frames from a real split reception (2026-09-11): a 56-byte node VERSION report from
-   relay 05BF, torn in half by the UART read gap on a USB dongle. Kept verbatim because a
-   synthesised truncation would not have proved the interesting part -- that the FIRST piece
-   decodes as far as its header and so looks like a real packet from a real station. */
 static const uint8_t split_head[] = { 0x05, 0xBF, 0x00, 0x05, 0x40, 0x02, 0x35, 0x00, 0x0D, 0x64, 0x61, 0x66, 0x63, 0x31, 0x36, 0x38, 0x2D, 0x64, 0x69, 0x72, 0x74, 0x79, 0x02, 0x07, 0x65, 0x73, 0x70, 0x33, 0x32, 0x63, 0x33 };
+
 static const uint8_t split_tail[] = { 0x0D, 0x69, 0x6F, 0x74, 0x64, 0x61, 0x74, 0x61, 0x5F, 0x72, 0x65, 0x6C, 0x61, 0x79, 0x06, 0x0C, 0x37, 0x30, 0x41, 0x46, 0x30, 0x39, 0x31, 0x35, 0x35, 0x32, 0x46, 0x30 };
 
-/* Real telemetry, captured off the air 2026-09-11: a water_level packet from 0538 and a
-   wind_station packet from 0AF9. Verbatim, because the point is what a REAL sensor sends -- a
-   synthesised frame is exactly what failed to catch this. */
-static const uint8_t telemetry_0538[] = { 0x35, 0x38, 0x00, 0x01, 0x2C, 0xC1, 0x68, 0x97, 0x3E };
-static const uint8_t telemetry_0AF9[] = { 0x6A, 0xF9, 0x00, 0x1F, 0x2C, 0xD8, 0xEA, 0xBA, 0x73, 0x60, 0x04 };
-
-/*
- * A packet may carry variant FIELDS, TLVs, or both -- so neither count is a validity test.
- *
- * The presence byte has a TLV flag precisely so the two can coexist: these captured sensor frames
- * carry fields and no TLV; a sleeping sensor's frame carries fields AND a RECEIVE TLV; the TSA
- * carries a proprietary TLV and no fields. All three are well-formed.
- *
- * A gate that required tlv_count > 0 therefore rejected every direct reception of the first shape,
- * while the identical bytes published normally when they arrived inside a relay's FORWARD, since
- * that path does not consult the gate. Every test at the time built its frames with
- * iotdata_encode_tlv(), so every test frame had a TLV and none of them could notice.
- */
-static bool test_telemetry_without_tlvs_decodes(void) {
-    process_state_t ps;
-    memset(&ps, 0, sizeof(ps));
-
-    iotdata_decoder_t d;
-    memset(&d, 0, sizeof(d));
-    ASSERT(iotdata_decode(telemetry_0538, sizeof(telemetry_0538), &d) == IOTDATA_OK);
-    ASSERT_EQ_INT(d.tlv_count, 0); /* legitimate, and the property that broke the gate */
-    ASSERT_EQ_INT(d.variant, 3);
-    ASSERT_EQ_INT(d.station, 0x0538);
-    ASSERT(process_packet_decodes(&ps, telemetry_0538, (int)sizeof(telemetry_0538)));
-
-    memset(&d, 0, sizeof(d));
-    ASSERT(iotdata_decode(telemetry_0AF9, sizeof(telemetry_0AF9), &d) == IOTDATA_OK);
-    ASSERT_EQ_INT(d.tlv_count, 0);
-    ASSERT_EQ_INT(d.variant, 6);
-    ASSERT(process_packet_decodes(&ps, telemetry_0AF9, (int)sizeof(telemetry_0AF9)));
-    return true;
-}
-
-/* The mirror shape, which the TSA sends: a variant and a proprietary TLV, no fields. It must pass
-   the same gate -- a rule about either count would have rejected one shape or the other. */
-static bool test_tlv_only_packet_decodes(void) {
-    process_state_t ps;
-    memset(&ps, 0, sizeof(ps));
-
-    /* built exactly as tsa_encoding.h does: begin(variant) -> encode_tlv -> end */
-    const uint8_t blob[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02 };
-    uint8_t frame[TEST_FRAME_MAX];
-    iotdata_encoder_t enc;
-    size_t len = 0;
-    ASSERT(iotdata_encode_begin(&enc, frame, sizeof(frame), 0 /* weather_station, as TSA uses */, 0x0A01, 7) == IOTDATA_OK);
-    ASSERT(iotdata_encode_tlv(&enc, 0x20u /* TSA_IOTDATA_TLV_TYPE: application-defined */, blob, (uint8_t)sizeof(blob)) == IOTDATA_OK);
-    ASSERT(iotdata_encode_end(&enc, &len) == IOTDATA_OK);
-
-    iotdata_decoder_t d;
-    memset(&d, 0, sizeof(d));
-    ASSERT(iotdata_decode(frame, len, &d) == IOTDATA_OK);
-    ASSERT_EQ_INT(d.tlv_count, 1);
-    ASSERT(process_packet_decodes(&ps, frame, (int)len));
-    return true;
-}
-
-/* And it must still publish: the gate is only worth having if what passes it is usable. */
-static bool test_telemetry_decodes_to_json(void) {
-    static iotdata_decode_to_json_scratch_t scratch;
-    char *json = NULL;
-    ASSERT(iotdata_decode_to_json(telemetry_0538, sizeof(telemetry_0538), &json, &scratch) == IOTDATA_OK);
-    ASSERT(json != NULL);
-    ASSERT(strstr(json, "\"variant\":3") != NULL);
-    free(json);
-    return true;
-}
-
-/* Neither half may pass the gate that guards the dedup ring. The head is the dangerous one: it
-   peeks as station 05BF sequence 5, and before this gate existed it claimed that slot and made
-   the relay's forward of the same report look like a duplicate -- so nothing was published at
-   all, which is the opposite of what having a mesh is for. */
-static bool test_split_frame_is_not_a_packet(void) {
-    process_state_t ps;
-    memset(&ps, 0, sizeof(ps));
-
-    uint8_t variant = 0;
-    uint16_t station = 0, sequence = 0;
-    ASSERT(iotdata_peek(split_head, sizeof(split_head), &variant, &station, &sequence) == IOTDATA_OK);
-    ASSERT_EQ_INT(station, 0x05BF); /* a real station: the header survived the tear */
-    ASSERT_EQ_INT(sequence, 5);
-    ASSERT(!process_packet_decodes(&ps, split_head, (int)sizeof(split_head)));
-
-    /* the tail peeks as a nonsense station (its first bytes are a length prefix and 'i') */
-    ASSERT(!process_packet_decodes(&ps, split_tail, (int)sizeof(split_tail)));
-    return true;
-}
-
-/* The gate must not reject anything real. A well-formed packet of the same shape -- a system TLV
-   carrying strings -- has to pass, or the fix would simply stop the gateway publishing. */
-static bool test_whole_frame_still_decodes(void) {
-    process_state_t ps;
-    memset(&ps, 0, sizeof(ps));
-
-    uint8_t kv[64];
-    iotdata_kvr_t b;
-    iotdata_kvr_init(&b, kv, sizeof(kv));
-    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_HARDWARE, "esp32c3/riscv32");
-    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_FIRMWARE, "idf/6.1+bl1.20");
-    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_SOFTWARE, "relay/1.0.0/202609121607");
-    ASSERT(!b.overflow);
-
-    uint8_t frame[TEST_FRAME_MAX];
-    iotdata_encoder_t enc;
-    size_t len = 0;
-    ASSERT(iotdata_encode_begin(&enc, frame, sizeof(frame), 0, 0x05BF, 5) == IOTDATA_OK);
-    ASSERT(iotdata_encode_tlv(&enc, IOTDATA_NODE_TLV_VERSION, kv, (uint8_t)b.len) == IOTDATA_OK);
-    ASSERT(iotdata_encode_end(&enc, &len) == IOTDATA_OK);
-    ASSERT(len > sizeof(split_head)); /* the whole thing is longer than the piece that tore off */
-
-    ASSERT(process_packet_decodes(&ps, frame, (int)len));
-
-    /* and truncating that same good frame anywhere past the header must be caught */
-    for (size_t cut = 5; cut < len; cut++)
-        if (process_packet_decodes(&ps, frame, (int)cut)) {
-            printf("FAIL (a %zu-byte truncation of a %zu-byte frame passed the gate)\n", cut, len);
-            return false;
-        }
-    return true;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-/* The AUX drain wait is derived from the configured air rate, because air time is. Observed on a
-   relay under load: forward retries filled the module, and a fixed 1000ms wait gave up and
-   reported an error for ordinary back-pressure. Only DIP modules wait at all -- USB has no AUX --
-   but the arithmetic is worth pinning wherever it can be run. */
-static bool test_transmit_wait_scales_with_air_rate(void) {
-    const uint16_t saved = _lora_rtc.config.air_data_rate;
-    static const struct {
-        uint16_t bps;
-        uint32_t expect;
-        const char *why;
-    } cases[] = {
-        { 2400, 1600, "the rate the mesh runs at: 800ms of air time, doubled" },
-        { 1200, 3200, "half the rate, twice the wait" },
-        { 300, 12800, "the slowest rate: where a fixed 1000ms was wrong by 6x" },
-        { 9600, _LORA_TRANSMIT_WAIT_MIN_MS, "fast enough that the floor takes over" },
-        { 62500, _LORA_TRANSMIT_WAIT_MIN_MS, "likewise" },
-        { 0, _LORA_TRANSMIT_WAIT_MIN_MS, "unset: the floor, not a division by zero" },
-        { 100, _LORA_TRANSMIT_WAIT_MAX_MS, "absurdly slow: the cap, not an unbounded block" },
-    };
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        _lora_rtc.config.air_data_rate = cases[i].bps;
-        const uint32_t got = _lora_transmit_wait_ms();
-        if (got != cases[i].expect) {
-            printf("FAIL (%ubps -> %" PRIu32 "ms, expected %" PRIu32 ": %s)\n", (unsigned)cases[i].bps, got, cases[i].expect, cases[i].why);
-            _lora_rtc.config.air_data_rate = saved;
-            return false;
-        }
-    }
-    /* monotonic: a slower rate must never wait less than a faster one */
-    uint32_t prev = 0;
-    static const uint16_t rates[] = { 62500, 38400, 19200, 9600, 4800, 2400, 1200, 300 };
-    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
-        _lora_rtc.config.air_data_rate = rates[i];
-        const uint32_t got = _lora_transmit_wait_ms();
-        if (got < prev) {
-            printf("FAIL (%ubps waits %" PRIu32 "ms, less than the faster rate's %" PRIu32 "ms)\n", (unsigned)rates[i], got, prev);
-            _lora_rtc.config.air_data_rate = saved;
-            return false;
-        }
-        prev = got;
-    }
-    _lora_rtc.config.air_data_rate = saved;
-    return true;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// A node report has to reach the node topic by EITHER path.
-//
-// A station one hop away is heard directly; a station two hops away is only ever heard inside a
-// relay's FORWARD. If the two paths do not both reach the node layer, a node's reports work or do
-// not work depending on where it happens to sit in the tree -- which is how `node-control` came to
-// work for 05BF (direct) and not for 0F1B (via 05BF).
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-/* Build a normal (non-DOWN) packet from `station` carrying one system TLV. */
 static int build_report(uint8_t *out, size_t size, uint16_t station, uint16_t sequence, uint8_t type) {
     uint8_t kv[32];
     iotdata_kvr_t b;
@@ -2096,88 +1535,6 @@ static int build_report(uint8_t *out, size_t size, uint16_t station, uint16_t se
     return (int)len;
 }
 
-/* The CONTROL report -- a node saying which commands it accepts -- must be published. It used to
-   be skipped outright, so this is the case that could never work for any station. */
-static bool test_control_report_is_published(void) {
-    static node_state_t ns;
-    static stat_state_t ss;
-    memset(&ns, 0, sizeof(ns));
-    memset(&ss, 0, sizeof(ss));
-    ns.stat = &ss;
-    ns.tx = test_packet_handler;
-    iotdata_down_init(&ns.down, &t_pool);
-
-    uint8_t frame[TEST_FRAME_MAX];
-    const int n = build_report(frame, sizeof(frame), 0x0F1B, 5, IOTDATA_NODE_TLV_CONTROL);
-    ASSERT(n > 0);
-    ASSERT(node_on_packet(&ns, frame, (size_t)n, 0x0F1B));
-    ASSERT_EQ_INT(ns.stat_rx, 1u);
-    return true;
-}
-
-/* But our OWN command coming back off a relay's rebroadcast must not be: it is a DOWN frame, and
-   republishing it would claim a node had reported something it was merely told. */
-static bool test_down_echo_is_not_published(void) {
-    static node_state_t ns;
-    static stat_state_t ss;
-    memset(&ns, 0, sizeof(ns));
-    memset(&ss, 0, sizeof(ss));
-    ns.stat = &ss;
-    ns.tx = test_packet_handler;
-    iotdata_down_init(&ns.down, &t_pool);
-
-    uint8_t frame[TEST_FRAME_MAX];
-    const int n = build_report(frame, sizeof(frame), 0x0F1B, IOTDATA_SEQUENCE_DOWN, IOTDATA_NODE_TLV_CONTROL);
-    ASSERT(n > 0);
-    ASSERT(!node_on_packet(&ns, frame, (size_t)n, 0x0F1B));
-    ASSERT_EQ_INT(ns.stat_rx, 0u); /* nothing published */
-    return true;
-}
-
-/* And the two-hop case: the same report arriving wrapped in a FORWARD. */
-static bool test_forwarded_report_reaches_node_handler(void) {
-    reset_test_helpers();
-    static process_state_t ps;
-    mesh_state_t ms;
-    static stat_state_t ss;
-    fwd_test_state(&ps, &ms, &ss, true, true /* new */);
-
-    uint8_t inner[TEST_FRAME_MAX];
-    const int inner_len = build_report(inner, sizeof(inner), 0x0F1B, 5, IOTDATA_NODE_TLV_CONTROL);
-    ASSERT(inner_len > 0);
-    uint8_t fwd[IOTDATA_MESH_FORWARD_HDR_SIZE + TEST_FRAME_MAX];
-    const int fwd_len = iotdata_mesh_pack_forward(fwd, sizeof(fwd), 0x0F1B, 5, 7, inner, inner_len);
-    ASSERT(fwd_len > 0);
-
-    process_mesh_packet(&ps, fwd, fwd_len, 15, 0x05BF, 32, "test", 0);
-    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
-    ASSERT_EQ_INT(fwd_test_node.stat_rx, 1u); /* the inner report reached the node layer */
-    return true;
-}
-
-/* A duplicate forward must not republish -- the report goes out once however many relays carry it. */
-static bool test_forwarded_report_duplicate_not_republished(void) {
-    reset_test_helpers();
-    static process_state_t ps;
-    mesh_state_t ms;
-    static stat_state_t ss;
-    fwd_test_state(&ps, &ms, &ss, true, false /* duplicate */);
-
-    uint8_t inner[TEST_FRAME_MAX];
-    const int inner_len = build_report(inner, sizeof(inner), 0x0F1B, 5, IOTDATA_NODE_TLV_CONTROL);
-    uint8_t fwd[IOTDATA_MESH_FORWARD_HDR_SIZE + TEST_FRAME_MAX];
-    const int fwd_len = iotdata_mesh_pack_forward(fwd, sizeof(fwd), 0x0F1B, 5, 7, inner, inner_len);
-
-    process_mesh_packet(&ps, fwd, fwd_len, 15, 0x05BF, 32, "test", 0);
-    ASSERT_EQ_INT(ms.stat_duplicates, 1u);
-    ASSERT_EQ_INT(fwd_test_node.stat_rx, 0u);
-    return true;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-/* The four-letter subject names, which match the device's own USB CLI so one vocabulary serves
-   both interfaces. The old names remain as aliases and are covered by the table test above. */
 static bool test_ctrl_short_names(void) {
     static const struct {
         const char *cmd;
@@ -2204,10 +1561,15 @@ static bool test_ctrl_short_names(void) {
         { "{\"cmd\":\"mesh-filters-update\",\"station\":\"0x456\",\"action\":\"allow\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x02 }, 5 },
         { "{\"cmd\":\"mesh-filters-update\",\"station\":\"0x456\",\"action\":\"none\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x00 }, 5 },
         { "{\"cmd\":\"mesh-peers-update\",\"station\":\"0x456\",\"action\":\"remove\",\"target\":\"0x123\"}", { 0x49, 0x03, 0x04, 0x56, 0x00 }, 5 },
-        { "{\"cmd\":\"mesh-filter-block\",\"station\":\"0x456\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x01 }, 5 },
-        { "{\"cmd\":\"mesh-filter-none\",\"station\":\"0x456\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x00 }, 5 },
-        { "{\"cmd\":\"mesh-peers-remove\",\"station\":\"0x456\",\"target\":\"0x123\"}", { 0x49, 0x03, 0x04, 0x56, 0x00 }, 5 },
-        { "{\"cmd\":\"mesh-filter-clear\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x00 }, 3 }, /* width 1: the byte is sent */
+        /* the recorder, which is a NODE command and not a mesh one: one vocabulary per node */
+        { "{\"cmd\":\"diag-enable\",\"target\":\"0x123\"}", { 0x31, 0x01, 0x01 }, 3 },
+        { "{\"cmd\":\"diag-disable\",\"target\":\"0x123\"}", { 0x31, 0x01, 0x00 }, 3 },
+        { "{\"cmd\":\"diag-clear\",\"target\":\"0x123\"}", { 0x32, 0x00 }, 2 },
+        { "{\"cmd\":\"diag-dump\",\"target\":\"0x123\"}", { 0x33, 0x00 }, 2 },
+        /* a filter scope is carried even when zero, because the key declares a width of 1 */
+        { "{\"cmd\":\"mesh-filters-clear\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x00 }, 3 },
+        { "{\"cmd\":\"mesh-filters-clear\",\"scope\":\"manual\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x01 }, 3 },
+        { "{\"cmd\":\"mesh-filters-clear\",\"scope\":\"auto\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x02 }, 3 },
     };
     ctrl_state_t st;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -2231,9 +1593,13 @@ static bool test_ctrl_short_names(void) {
    This is the check that would have caught sending MESH_FILTER_CLEAR as a bare flag. */
 static bool test_ctrl_table_matches_key_widths(void) {
     ctrl_state_t st;
-    for (size_t i = 0; i < sizeof(ctrl_commands) / sizeof(ctrl_commands[0]); i++) {
-        const ctrl_command_t *const c = &ctrl_commands[i];
-        if (c->arg == CTRL_ARG_REPORTS)
+    /* walked through the framework's own accessor, so a command an application plugs in is
+       covered by this too rather than only the built-ins */
+    for (uint8_t i = 0;; i++) {
+        const iotdata_control_command_t *const c = iotdata_control_at(i);
+        if (c == NULL)
+            break;
+        if (c->arg == IOTDATA_CONTROL_ARG_REPORTS)
             continue; /* not one key */
         ctrl_test_state(&st);
         char json[128];
@@ -2278,7 +1644,7 @@ static bool test_mesh_node_table_report(void) {
     netw_note_receive(&ps.network, 0x0537, 4, 1, NETW_PATH_DIRECT, true, -48, 0, time(NULL));
     netw_note_receive(&ps.network, 0x06ED, 0, 1, NETW_PATH_DIRECT, true, -55, 0, time(NULL));
     stat_on_peer(&ss, 0x05BF, 7, 1, IOTDATA_MESH_FLAG_ACCEPTING);
-    ASSERT(exec_node_control(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, (const uint8_t[]){ 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK }, IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, (const uint8_t[]){ 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK }, IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE));
 
     ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_TLV_MESH_STATIONS), 2);
     ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_TLV_MESH_PEERS), 1);
@@ -2475,6 +1841,567 @@ static bool test_version_report_as_the_monitor_sees_it(void) {
     return true;
 }
 
+static bool test_ctrl_status_scope_differs_from_node_status(void) {
+    ctrl_state_t st;
+
+    /* One command, and the scope decides. `stat` with a scope carries the byte; without one it
+       carries nothing, because STATUS_REQUEST is WIDTH_VARIABLE and absent already means every
+       group -- sending an explicit zero would say the same thing twice and cost a byte. */
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"stat\",\"scope\":\"mesh\",\"target\":\"0x123\"}");
+    ASSERT(ctrl_staged(&st));
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_STATUS_REQUEST);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 1);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[2], IOTDATA_NODE_STATUS_SCOPE_MESH);
+    ctrl_test_drop(&st); /* ctrl_test_state below memsets the slot: give this one back first */
+
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"stat\",\"target\":\"0x123\"}");
+    ASSERT(ctrl_staged(&st));
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_STATUS_REQUEST);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 0); /* no scope value = all groups */
+    ctrl_test_drop(&st);
+    return true;
+}
+
+static bool test_ctrl_mesh_update_entry_shape(void) {
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-filters-update\",\"station\":\"0xABC\",\"action\":\"block\",\"target\":\"0x123\"}");
+    ASSERT(ctrl_staged(&st));
+    ASSERT_EQ_INT(ctrl_staged_len(&st), 2 + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
+    ASSERT_EQ_INT((uint16_t)((ctrl_staged_bytes(&st)[2] << 8) | ctrl_staged_bytes(&st)[3]), 0x0ABC);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[4], IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK);
+    ctrl_test_drop(&st);
+    return true;
+}
+
+static bool test_ctrl_response_topic_is_shared(void) {
+    node_state_t ns;
+    memset(&ns, 0, sizeof(ns));
+    stat_state_t ss;
+    memset(&ss, 0, sizeof(ss));
+    bbox_state_t bb;
+    memset(&bb, 0, sizeof(bb));
+    ASSERT(node_begin(&ns, 0x0001, NULL, &ss, &bb, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
+
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    /* ctrl_begin sets the topics before it subscribes, so the (expected) subscribe failure with no
+       broker does not stop us checking them */
+    (void)ctrl_begin(&st, "pre", 0x0001, &bb, &t_pool);
+
+    ASSERT(strcmp(st.topic_req, "pre/manage/req") == 0);
+    ASSERT(strcmp(st.topic_resp, "pre/manage/resp") == 0);
+    ASSERT(strcmp(ns.topic_resp, st.topic_resp) == 0);
+    return true;
+}
+
+static bool test_ctrl_unknown_command_stages_nothing(void) {
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"no-such-command\",\"target\":\"0x123\"}");
+    ASSERT(!ctrl_staged(&st));
+    ASSERT_EQ_INT(st.stat_req_bad, 1u);
+    ASSERT_EQ_INT(st.stat_req_rx, 1u);
+    return true;
+}
+
+static bool test_ctrl_bad_json_stages_nothing(void) {
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{not json");
+    ASSERT(!ctrl_staged(&st));
+    ASSERT_EQ_INT(st.stat_req_bad, 1u);
+    return true;
+}
+
+static bool test_ctrl_target_defaults_to_broadcast(void) {
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\"}");
+    ASSERT(ctrl_staged(&st));
+    ASSERT_EQ_INT(ctrl_staged_target(&st), IOTDATA_STATION_BROADCAST);
+    ctrl_test_drop(&st);
+    return true;
+}
+
+static bool test_ctrl_requests_queue_in_order(void) {
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-filters\",\"target\":\"0x456\"}");
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 2u);
+    ASSERT_EQ_INT(buffer_queue_rejected(&st.queue), 0u);
+
+    uint8_t key = 0;
+    uint16_t target = 0;
+    ASSERT(ctrl_test_take(&st, &key, &target));
+    ASSERT_EQ_INT(key, IOTDATA_NODE_CONTROL_MESH_PEERS_REQUEST /* a request; the report answers */);
+    ASSERT_EQ_INT(target, 0x123); /* the target travels with each one, not just with the last */
+    ASSERT(ctrl_test_take(&st, &key, &target));
+    ASSERT_EQ_INT(key, IOTDATA_NODE_CONTROL_MESH_FILTERS_REQUEST /* likewise */);
+    ASSERT_EQ_INT(target, 0x456);
+    ASSERT(!ctrl_test_take(&st, NULL, NULL));
+    return true;
+}
+
+static bool test_ctrl_queue_full_is_refused(void) {
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    for (int i = 0; i < CTRL_QUEUE_MAX + 2; i++)
+        ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}");
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), CTRL_QUEUE_MAX);
+    ASSERT_EQ_INT(buffer_queue_rejected(&st.queue), 2u);
+    ASSERT_EQ_INT(st.stat_req_bad, 2u); /* each refusal answered, not dropped on the floor */
+    ctrl_test_drop(&st);
+    return true;
+}
+
+static bool test_ctrl_staged_command_expires(void) {
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}");
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
+    const uint32_t now_ms = (uint32_t)__ticks_ms();
+    ASSERT_EQ_INT(buffer_queue_expire(&st.queue, now_ms + CTRL_QUEUE_TTL_MS - 1000), 0u); /* not yet */
+    ASSERT_EQ_INT(buffer_queue_expire(&st.queue, now_ms + CTRL_QUEUE_TTL_MS + 1000), 1u);
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 0u);
+    ASSERT_EQ_INT(buffer_queue_expired(&st.queue), 1u);
+    return true;
+}
+
+static bool test_mesh_node_gateway_status_is_root(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+    ms.beacon_generation = 7;
+    ms.stat_beacons_tx = 11;
+    ms.ctrl[IOTDATA_MESH_CTRL_BEACON].rx = 5;
+    stat_on_peer(&ss, 0x05BF, 1, 1, 0);
+    stat_on_peer(&ss, 0x0F1B, 1, 1, 0);
+
+    iotdata_node_status_mesh_t m;
+    memset(&m, 0, sizeof(m));
+    exec_node_status_mesh(&m);
+    ASSERT(m.present);
+    ASSERT_EQ_INT(m.state, IOTDATA_NODE_STATUS_MESH_STATE_GATEWAY);
+    ASSERT_EQ_INT(m.cost, 0);
+    ASSERT_EQ_INT(m.parent, 0);
+    ASSERT_EQ_INT(m.generation, 7);
+    ASSERT_EQ_INT(m.beacon_tx, 11u);
+    ASSERT_EQ_INT(m.beacon_rx, 5u);
+    ASSERT_EQ_INT(m.peers, 2);
+    ASSERT_EQ_INT(m.reparent, 0u); /* a root never reparents: zero is the answer, not a gap */
+    ASSERT_EQ_INT(m.failover, 0u);
+    ASSERT_EQ_INT(m.orphan, 0u);
+    g_exec = NULL;
+    return true;
+}
+
+static bool test_mesh_node_status_absent_when_mesh_off(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+    ms.enabled = false;
+
+    iotdata_node_status_mesh_t m;
+    memset(&m, 0, sizeof(m));
+    exec_node_status_mesh(&m);
+    ASSERT(!m.present);
+    g_exec = NULL;
+    return true;
+}
+
+static bool test_mesh_node_filter_update_blocks_rx(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+
+    ASSERT(filter_allows(&ps.filter, 0x0537)); /* nothing filtered yet */
+
+    const uint8_t block[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK };
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
+    ASSERT(!filter_allows(&ps.filter, 0x0537)); /* blocked */
+    ASSERT(filter_allows(&ps.filter, 0x0538));  /* and only that one */
+    ASSERT_EQ_INT(filter_count(&ps.filter), 1);
+
+    /* NONE removes it: there is no separate remove command, by design */
+    const uint8_t none[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_NONE };
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, none, (uint8_t)sizeof(none)));
+    ASSERT(filter_allows(&ps.filter, 0x0537));
+    ASSERT_EQ_INT(filter_count(&ps.filter), 0);
+    g_exec = NULL;
+    return true;
+}
+
+static bool test_mesh_node_block_drops_peer(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+    stat_on_peer(&ss, 0x05BF, 1, 1, 0);
+    ASSERT_EQ_INT(ss.peers_count, 1);
+
+    const uint8_t block[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK };
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
+    ASSERT_EQ_INT(ss.peers_count, 0);
+    g_exec = NULL;
+    return true;
+}
+
+static bool test_mesh_node_peers_update_and_clear(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+    stat_on_peer(&ss, 0x05BF, 1, 1, 0);
+    stat_on_peer(&ss, 0x0F1B, 1, 1, 0);
+    ASSERT_EQ_INT(ss.peers_count, 2);
+
+    const uint8_t forget[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_PEER_NONE };
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget)));
+    ASSERT_EQ_INT(ss.peers_count, 1);
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget))); /* again */
+    ASSERT_EQ_INT(ss.peers_count, 1);                                                                   /* still 1: idempotent */
+
+    /* the hole a removal leaves must be reusable, or the table leaks slots */
+    stat_on_peer(&ss, 0x0AF9, 1, 1, 0);
+    ASSERT_EQ_INT(ss.peers_count, 2);
+
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR, NULL, 0));
+    ASSERT_EQ_INT(ss.peers_count, 0);
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR, NULL, 0)); /* again */
+    ASSERT_EQ_INT(ss.peers_count, 0);
+    g_exec = NULL;
+    return true;
+}
+
+static bool test_mesh_node_filter_update_takes_a_list(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+
+    const uint8_t three[3 * IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = {
+        0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK, 0x05, 0x38, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK, 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW,
+    };
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, three, (uint8_t)sizeof(three)));
+    ASSERT_EQ_INT(filter_count(&ps.filter), 3);
+    ASSERT(!filter_allows(&ps.filter, 0x0537));
+    ASSERT(!filter_allows(&ps.filter, 0x0538));
+    ASSERT(filter_allows(&ps.filter, 0x0AF9));
+    /* an allow entry exists, so a station with no entry at all is now excluded (whitelist) */
+    ASSERT(!filter_allows(&ps.filter, 0x06ED));
+    g_exec = NULL;
+    return true;
+}
+
+static bool test_mesh_node_unimplemented_key_refused(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+    ASSERT(!ctrl_from_iotdata(0x7F, NULL, 0));
+    ASSERT(!ctrl_from_iotdata(IOTDATA_NODE_CONTROL_REBOOT, NULL, 0)); /* the node layer's, not ours */
+    g_exec = NULL;
+    return true;
+}
+
+static bool test_mesh_node_control_keys_are_all_handled(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+    /* The advertised list now includes the recorder's keys, and those reach their state through
+       g_ctrl exactly as the mesh ones reach theirs through g_exec. A node must not advertise a key
+       it cannot service, so the test stands up BOTH -- otherwise it walks straight into a null
+       g_ctrl and the crash says nothing about whether the key is handled. */
+    static ctrl_state_t cs;
+    static bbox_state_t bb;
+    memset(&cs, 0, sizeof(cs));
+    memset(&bb, 0, sizeof(bb));
+    /* a real recorder, in RAM: blackbox_enable/clear/pull walk the handle, so a zeroed one is a
+       crash rather than a no-op. BLACKBOX_PERSIST_NONE (set at the top of this file) keeps it off
+       any filesystem. */
+    bb.config = (blackbox_config_t){ .pool = bb.pool, .pool_sz = sizeof(bb.pool), .flush = BLACKBOX_FLUSH_WRITE_THROUGH, .enabled = true };
+    ASSERT(blackbox_init(&bb.handle, &bb.config) == 0);
+    cs.bbox = &bb;
+    cs.pool = &t_pool;
+    buffer_queue_init(&cs.queue, cs.queue_slot, CTRL_QUEUE_MAX, &t_pool);
+    g_ctrl = &cs;
+    for (size_t i = 0; i < sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0]); i++) {
+        const uint8_t key = ctrl_from_iotdata_keys[i];
+        const uint8_t entry[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, 0x00 };
+        if (!ctrl_from_iotdata(key, entry, (uint8_t)sizeof(entry))) {
+            printf("FAIL (advertised key 0x%02X is not handled)\n", key);
+            g_exec = NULL;
+            g_ctrl = NULL;
+            return false;
+        }
+    }
+    g_exec = NULL;
+    g_ctrl = NULL;
+    return true;
+}
+
+static bool test_telemetry_without_tlvs_decodes(void) {
+    process_state_t ps;
+    memset(&ps, 0, sizeof(ps));
+
+    iotdata_decoder_t d;
+    memset(&d, 0, sizeof(d));
+    ASSERT(iotdata_decode(telemetry_0538, sizeof(telemetry_0538), &d) == IOTDATA_OK);
+    ASSERT_EQ_INT(d.tlv_count, 0); /* legitimate, and the property that broke the gate */
+    ASSERT_EQ_INT(d.variant, 3);
+    ASSERT_EQ_INT(d.station, 0x0538);
+    ASSERT(process_packet_decodes(&ps, telemetry_0538, (int)sizeof(telemetry_0538)));
+
+    memset(&d, 0, sizeof(d));
+    ASSERT(iotdata_decode(telemetry_0AF9, sizeof(telemetry_0AF9), &d) == IOTDATA_OK);
+    ASSERT_EQ_INT(d.tlv_count, 0);
+    ASSERT_EQ_INT(d.variant, 6);
+    ASSERT(process_packet_decodes(&ps, telemetry_0AF9, (int)sizeof(telemetry_0AF9)));
+    return true;
+}
+
+static bool test_tlv_only_packet_decodes(void) {
+    process_state_t ps;
+    memset(&ps, 0, sizeof(ps));
+
+    /* built exactly as tsa_encoding.h does: begin(variant) -> encode_tlv -> end */
+    const uint8_t blob[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02 };
+    uint8_t frame[TEST_FRAME_MAX];
+    iotdata_encoder_t enc;
+    size_t len = 0;
+    ASSERT(iotdata_encode_begin(&enc, frame, sizeof(frame), 0 /* weather_station, as TSA uses */, 0x0A01, 7) == IOTDATA_OK);
+    ASSERT(iotdata_encode_tlv(&enc, 0x20u /* TSA_IOTDATA_TLV_TYPE: application-defined */, blob, (uint8_t)sizeof(blob)) == IOTDATA_OK);
+    ASSERT(iotdata_encode_end(&enc, &len) == IOTDATA_OK);
+
+    iotdata_decoder_t d;
+    memset(&d, 0, sizeof(d));
+    ASSERT(iotdata_decode(frame, len, &d) == IOTDATA_OK);
+    ASSERT_EQ_INT(d.tlv_count, 1);
+    ASSERT(process_packet_decodes(&ps, frame, (int)len));
+    return true;
+}
+
+static bool test_telemetry_decodes_to_json(void) {
+    static iotdata_decode_to_json_scratch_t scratch;
+    char *json = NULL;
+    ASSERT(iotdata_decode_to_json(telemetry_0538, sizeof(telemetry_0538), &json, &scratch) == IOTDATA_OK);
+    ASSERT(json != NULL);
+    ASSERT(strstr(json, "\"variant\":3") != NULL);
+    free(json);
+    return true;
+}
+
+static bool test_split_frame_is_not_a_packet(void) {
+    process_state_t ps;
+    memset(&ps, 0, sizeof(ps));
+
+    uint8_t variant = 0;
+    uint16_t station = 0, sequence = 0;
+    ASSERT(iotdata_peek(split_head, sizeof(split_head), &variant, &station, &sequence) == IOTDATA_OK);
+    ASSERT_EQ_INT(station, 0x05BF); /* a real station: the header survived the tear */
+    ASSERT_EQ_INT(sequence, 5);
+    ASSERT(!process_packet_decodes(&ps, split_head, (int)sizeof(split_head)));
+
+    /* the tail peeks as a nonsense station (its first bytes are a length prefix and 'i') */
+    ASSERT(!process_packet_decodes(&ps, split_tail, (int)sizeof(split_tail)));
+    return true;
+}
+
+static bool test_whole_frame_still_decodes(void) {
+    process_state_t ps;
+    memset(&ps, 0, sizeof(ps));
+
+    uint8_t kv[64];
+    iotdata_kvr_t b;
+    iotdata_kvr_init(&b, kv, sizeof(kv));
+    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_HARDWARE, "esp32c3/riscv32");
+    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_FIRMWARE, "idf/6.1+bl1.20");
+    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_SOFTWARE, "relay/1.0.0/202609121607");
+    ASSERT(!b.overflow);
+
+    uint8_t frame[TEST_FRAME_MAX];
+    iotdata_encoder_t enc;
+    size_t len = 0;
+    ASSERT(iotdata_encode_begin(&enc, frame, sizeof(frame), 0, 0x05BF, 5) == IOTDATA_OK);
+    ASSERT(iotdata_encode_tlv(&enc, IOTDATA_NODE_TLV_VERSION, kv, (uint8_t)b.len) == IOTDATA_OK);
+    ASSERT(iotdata_encode_end(&enc, &len) == IOTDATA_OK);
+    ASSERT(len > sizeof(split_head)); /* the whole thing is longer than the piece that tore off */
+
+    ASSERT(process_packet_decodes(&ps, frame, (int)len));
+
+    /* and truncating that same good frame anywhere past the header must be caught */
+    for (size_t cut = 5; cut < len; cut++)
+        if (process_packet_decodes(&ps, frame, (int)cut)) {
+            printf("FAIL (a %zu-byte truncation of a %zu-byte frame passed the gate)\n", cut, len);
+            return false;
+        }
+    return true;
+}
+
+static bool test_transmit_wait_scales_with_air_rate(void) {
+    const uint16_t saved = _lora_rtc.config.air_data_rate;
+    static const struct {
+        uint16_t bps;
+        uint32_t expect;
+        const char *why;
+    } cases[] = {
+        { 2400, 1600, "the rate the mesh runs at: 800ms of air time, doubled" },
+        { 1200, 3200, "half the rate, twice the wait" },
+        { 300, 12800, "the slowest rate: where a fixed 1000ms was wrong by 6x" },
+        { 9600, _LORA_TRANSMIT_WAIT_MIN_MS, "fast enough that the floor takes over" },
+        { 62500, _LORA_TRANSMIT_WAIT_MIN_MS, "likewise" },
+        { 0, _LORA_TRANSMIT_WAIT_MIN_MS, "unset: the floor, not a division by zero" },
+        { 100, _LORA_TRANSMIT_WAIT_MAX_MS, "absurdly slow: the cap, not an unbounded block" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        _lora_rtc.config.air_data_rate = cases[i].bps;
+        const uint32_t got = _lora_transmit_wait_ms();
+        if (got != cases[i].expect) {
+            printf("FAIL (%ubps -> %" PRIu32 "ms, expected %" PRIu32 ": %s)\n", (unsigned)cases[i].bps, got, cases[i].expect, cases[i].why);
+            _lora_rtc.config.air_data_rate = saved;
+            return false;
+        }
+    }
+    /* monotonic: a slower rate must never wait less than a faster one */
+    uint32_t prev = 0;
+    static const uint16_t rates[] = { 62500, 38400, 19200, 9600, 4800, 2400, 1200, 300 };
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+        _lora_rtc.config.air_data_rate = rates[i];
+        const uint32_t got = _lora_transmit_wait_ms();
+        if (got < prev) {
+            printf("FAIL (%ubps waits %" PRIu32 "ms, less than the faster rate's %" PRIu32 "ms)\n", (unsigned)rates[i], got, prev);
+            _lora_rtc.config.air_data_rate = saved;
+            return false;
+        }
+        prev = got;
+    }
+    _lora_rtc.config.air_data_rate = saved;
+    return true;
+}
+
+static bool test_control_report_is_published(void) {
+    static node_state_t ns;
+    static stat_state_t ss;
+    memset(&ns, 0, sizeof(ns));
+    memset(&ss, 0, sizeof(ss));
+    ns.stat = &ss;
+    ns.tx = test_packet_handler;
+    iotdata_down_init(&ns.down, &t_pool);
+
+    uint8_t frame[TEST_FRAME_MAX];
+    const int n = build_report(frame, sizeof(frame), 0x0F1B, 5, IOTDATA_NODE_TLV_CONTROL);
+    ASSERT(n > 0);
+    ASSERT(node_on_packet(&ns, frame, (size_t)n, 0x0F1B));
+    ASSERT_EQ_INT(ns.stat_rx, 1u);
+    return true;
+}
+
+static bool test_down_echo_is_not_published(void) {
+    static node_state_t ns;
+    static stat_state_t ss;
+    memset(&ns, 0, sizeof(ns));
+    memset(&ss, 0, sizeof(ss));
+    ns.stat = &ss;
+    ns.tx = test_packet_handler;
+    iotdata_down_init(&ns.down, &t_pool);
+
+    uint8_t frame[TEST_FRAME_MAX];
+    const int n = build_report(frame, sizeof(frame), 0x0F1B, IOTDATA_SEQUENCE_DOWN, IOTDATA_NODE_TLV_CONTROL);
+    ASSERT(n > 0);
+    ASSERT(!node_on_packet(&ns, frame, (size_t)n, 0x0F1B));
+    ASSERT_EQ_INT(ns.stat_rx, 0u); /* nothing published */
+    return true;
+}
+
+static bool test_forwarded_report_reaches_node_handler(void) {
+    reset_test_helpers();
+    static process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss;
+    fwd_test_state(&ps, &ms, &ss, true, true /* new */);
+
+    uint8_t inner[TEST_FRAME_MAX];
+    const int inner_len = build_report(inner, sizeof(inner), 0x0F1B, 5, IOTDATA_NODE_TLV_CONTROL);
+    ASSERT(inner_len > 0);
+    uint8_t fwd[IOTDATA_MESH_FORWARD_HDR_SIZE + TEST_FRAME_MAX];
+    const int fwd_len = iotdata_mesh_pack_forward(fwd, sizeof(fwd), 0x0F1B, 5, 7, inner, inner_len);
+    ASSERT(fwd_len > 0);
+
+    process_mesh_packet(&ps, fwd, fwd_len, 15, 0x05BF, 32, "test", 0);
+    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
+    ASSERT_EQ_INT(fwd_test_node.stat_rx, 1u); /* the inner report reached the node layer */
+    return true;
+}
+
+static bool test_forwarded_report_duplicate_not_republished(void) {
+    reset_test_helpers();
+    static process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss;
+    fwd_test_state(&ps, &ms, &ss, true, false /* duplicate */);
+
+    uint8_t inner[TEST_FRAME_MAX];
+    const int inner_len = build_report(inner, sizeof(inner), 0x0F1B, 5, IOTDATA_NODE_TLV_CONTROL);
+    uint8_t fwd[IOTDATA_MESH_FORWARD_HDR_SIZE + TEST_FRAME_MAX];
+    const int fwd_len = iotdata_mesh_pack_forward(fwd, sizeof(fwd), 0x0F1B, 5, 7, inner, inner_len);
+
+    process_mesh_packet(&ps, fwd, fwd_len, 15, 0x05BF, 32, "test", 0);
+    ASSERT_EQ_INT(ms.stat_duplicates, 1u);
+    ASSERT_EQ_INT(fwd_test_node.stat_rx, 0u);
+    return true;
+}
+
+/* A gateway is the top of the pile but still a station: with two or three of them, one can send a
+   CONTROL frame at another's station id, across relay hops. That has to reach the SAME handler an
+   MQTT request reaches, or a gateway becomes the one node in the fleet that cannot be driven over
+   the air. It silently did nothing before -- node_on_packet skipped every DOWN frame outright. */
+static bool test_control_over_the_air_reaches_the_same_handler(void) {
+    process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss;
+    mesh_node_test_state(&ps, &ms, &ss);
+    node_state_t *const ns = ps.state_node;
+    ns->station_id = 0x0001;
+
+    /* another gateway addresses a CONTROL at ours: a DOWN frame whose station field is US */
+    uint8_t kv[16], frame[TEST_FRAME_MAX];
+    iotdata_kvr_t b;
+    iotdata_kvr_init(&b, kv, sizeof(kv));
+    iotdata_kvr_add_flag(&b, IOTDATA_NODE_CONTROL_VERSION_REQUEST);
+
+    iotdata_encoder_t enc;
+    size_t len = 0;
+    ASSERT(iotdata_encode_begin(&enc, frame, sizeof(frame), 0, 0x0001, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK);
+    ASSERT(iotdata_encode_tlv(&enc, IOTDATA_NODE_TLV_CONTROL, kv, (uint8_t)b.len) == IOTDATA_OK);
+    ASSERT(iotdata_encode_end(&enc, &len) == IOTDATA_OK);
+
+    const uint32_t before = ns->stat_requests;
+    (void)node_on_packet(ns, frame, len, 0x0001);
+    ASSERT(ns->stat_requests == before + 1); /* the request was acted on, not discarded */
+
+    /* the same frame aimed at somebody else is OUR OWN ECHO coming back off a relay, and must not
+       be executed -- a gateway never sends a DOWN frame to itself, so an exact match cannot be one */
+    iotdata_kvr_init(&b, kv, sizeof(kv));
+    iotdata_kvr_add_flag(&b, IOTDATA_NODE_CONTROL_VERSION_REQUEST);
+    ASSERT(iotdata_encode_begin(&enc, frame, sizeof(frame), 0, 0x0537, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK);
+    ASSERT(iotdata_encode_tlv(&enc, IOTDATA_NODE_TLV_CONTROL, kv, (uint8_t)b.len) == IOTDATA_OK);
+    ASSERT(iotdata_encode_end(&enc, &len) == IOTDATA_OK);
+    const uint32_t after_ours = ns->stat_requests;
+    (void)node_on_packet(ns, frame, len, 0x0537);
+    ASSERT(ns->stat_requests == after_ours); /* not ours: left alone */
+    return true;
+}
+
 int main(void) {
     setbuf(stdout, NULL);
 
@@ -2569,6 +2496,7 @@ int main(void) {
     RUN_TEST(table_report_json);
     RUN_TEST(text_values_still_render_as_strings);
     RUN_TEST(version_report_as_the_monitor_sees_it);
+    RUN_TEST(control_over_the_air_reaches_the_same_handler);
     RUN_TEST(mesh_node_table_report);
     RUN_TEST(mesh_node_table_skips_holes);
     RUN_TEST(mesh_node_status_absent_when_mesh_off);
@@ -2581,7 +2509,6 @@ int main(void) {
 
     printf("\n=== Ctrl Tests ===\n\n");
 
-    RUN_TEST(ctrl_commands_to_control);
     RUN_TEST(ctrl_short_names);
     RUN_TEST(ctrl_table_matches_key_widths);
     RUN_TEST(ctrl_status_scope_differs_from_node_status);

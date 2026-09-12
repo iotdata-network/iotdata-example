@@ -83,7 +83,7 @@ static const lora_config_t lora_cfg = {
 };
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// iotdata — variant suite + simulator (unity build, encode-only)
+// iotdata
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 /*
@@ -102,12 +102,13 @@ static const lora_config_t lora_cfg = {
 #include "iotdata.c"
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
+// variant
+#include "iotdata_node_control.h"
+// status
+// config
+// diagnostics
+// content
 #include "iotdata_node_endpoint.h"
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// Blackbox diagnostics
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
 #if IOTDATA_CONFIG_BLACKBOX
 #ifndef IOTDATA_BLACKBOX_POOL_SZ
 #define IOTDATA_BLACKBOX_POOL_SZ 1024u
@@ -128,21 +129,49 @@ static const blackbox_config_t blackbox_config = {
     .persist_arg = "diag",          /* ESP_FLASH: the partition label; ignored by PERSIST_NONE */
     .enabled = true,                /* compiled in == collecting; the compile-time knob is the gate */
 };
+static bool blackbox_ready = false; /* init can fail, and the handle is then not safe to read */
 static void blackbox_start(const esp_reset_reason_t reason) {
     iotdata_blackbox_begin();
     if (blackbox_init(&blackbox, &blackbox_config) != 0) {
         ESP_LOGW(__tag_app, "blackbox: init failed -- diagnostics disabled");
         return;
     }
+    blackbox_ready = true;
     (void)iotdata_blackbox_lifecycle(&blackbox, IOTDATA_BB_LC_BOOT, (uint8_t)reason);
     (void)blackbox_flush(&blackbox);
 }
 #define BLACKBOX_START(reason) blackbox_start((reason))
 #define BLACKBOX_EVENT(ev, reason) \
     do { \
-        (void)iotdata_blackbox_lifecycle(&blackbox, (ev), (uint8_t)(reason)); \
-        (void)blackbox_flush(&blackbox); \
+        if (blackbox_ready) { \
+            (void)iotdata_blackbox_lifecycle(&blackbox, (ev), (uint8_t)(reason)); \
+            (void)blackbox_flush(&blackbox); \
+        } \
     } while (0)
+
+static size_t sim_node_diag(size_t *const cursor, char *const out, const size_t outsize) {
+    if (!blackbox_ready)
+        return 0;
+    const int n = blackbox_pull(&blackbox, cursor, out, outsize);
+    return (n > 0) ? strlen(out) : 0;
+}
+static bool sim_node_control(const uint16_t station, const uint8_t key, const uint8_t *const val, const uint8_t vlen) {
+    if (!blackbox_ready)
+        return false;
+    switch (key) {
+    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE:
+        blackbox_enable(&blackbox, (vlen >= 1) ? (val[0] != 0u) : true);
+        ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " CONTROL - DIAGNOSTICS_ENABLE -> %s (this board's recorder)", station, ((vlen >= 1) ? (val[0] != 0u) : true) ? "true" : "false");
+        return true;
+    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR:
+        blackbox_clear(&blackbox);
+        ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " CONTROL - DIAGNOSTICS_CLEAR (this board's recorder)", station);
+        return true;
+    default:
+        return false;
+    }
+}
+static const uint8_t sim_node_control_keys[] = { IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE, IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR };
 #else
 #define BLACKBOX_START(reason)     ((void)0)
 #define BLACKBOX_EVENT(ev, reason) ((void)0)
@@ -211,6 +240,12 @@ static const idep_config_t sim_cfg = {
     .caps = &s_caps,
     .status = sim_node_status,
     .tx = sim_node_tx,
+#if IOTDATA_CONFIG_BLACKBOX
+    .control = sim_node_control,
+    .control_keys = sim_node_control_keys,
+    .control_keys_count = (uint8_t)(sizeof(sim_node_control_keys) / sizeof(sim_node_control_keys[0])),
+    .diag = sim_node_diag,
+#endif
     .receive_always = (SIMULATE_RECEIVE_ALWAYS != 0),
     .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
     .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,

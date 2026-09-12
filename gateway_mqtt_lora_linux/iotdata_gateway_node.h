@@ -35,6 +35,7 @@ typedef struct {
 
     /* what we report ON: borrowed, not owned */
     const iotdata_version_caps_t *caps;
+    bool reboot_requested; /* a REBOOT arrived: the loop stops and the supervisor restarts us */
     const stat_state_t *stat;
     bbox_state_t *bbox;
 
@@ -95,6 +96,12 @@ static int node_build_variant(__attribute__((unused)) const node_state_t *st, ui
     return kv.overflow ? -1 : (int)kv.len;
 }
 
+static int node_build_control(const node_state_t *st, uint8_t *buf, const size_t size) {
+    iotdata_kvr_t kv;
+    iotdata_kvr_init(&kv, buf, size);
+    return iotdata_control_pack(&kv, &(const iotdata_control_report_t){ .tables = st->table_count != NULL, .keys = st->control_keys, .keys_count = st->control_keys_count });
+}
+
 /* `scope` is the STATUS_REQUEST value: which groups to report, 0 (absent) meaning all of them. */
 static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t size, const uint8_t scope) {
     iotdata_kvr_t kv;
@@ -122,25 +129,6 @@ static int node_build_config(const node_state_t *st, uint8_t *buf, const size_t 
     iotdata_kvr_add_u16(&kv, IOTDATA_NODE_CONFIG_PERIOD_CONFIG, st->period[IOTDATA_NODE_TLV_CONFIG]);
     iotdata_kvr_add_u16(&kv, IOTDATA_NODE_CONFIG_PERIOD_DIAGNOSTICS, st->period[IOTDATA_NODE_TLV_DIAGNOSTICS]);
     iotdata_kvr_add_u16(&kv, IOTDATA_NODE_CONFIG_STARTUP, st->startup);
-    return kv.overflow ? -1 : (int)kv.len;
-}
-
-static int node_build_control(const node_state_t *st, uint8_t *buf, const size_t size) {
-    iotdata_kvr_t kv;
-    iotdata_kvr_init(&kv, buf, size);
-    iotdata_kvr_add_flag(&kv, IOTDATA_NODE_CONTROL_VERSION_REQUEST);
-    iotdata_kvr_add_flag(&kv, IOTDATA_NODE_CONTROL_VARIANT_REQUEST);
-    iotdata_kvr_add_flag(&kv, IOTDATA_NODE_CONTROL_CONTROL_REQUEST);
-    iotdata_kvr_add_flag(&kv, IOTDATA_NODE_CONTROL_STATUS_REQUEST);
-    iotdata_kvr_add_flag(&kv, IOTDATA_NODE_CONTROL_CONFIG_REQUEST);
-    iotdata_kvr_add_flag(&kv, IOTDATA_NODE_CONTROL_DIAGNOSTICS_REQUEST);
-    /* the tables it keeps are requestable, one key each -- the capability is advertised whether
-       or not a table happens to be empty right now */
-    if (st->table_count != NULL)
-        for (uint8_t type = IOTDATA_NODE_TLV_MESH_STATIONS; type <= IOTDATA_NODE_TLV_MESH_FILTERS; type++)
-            iotdata_kvr_add_flag(&kv, iotdata_node_tlv_control_key(type));
-    for (uint8_t i = 0; i < st->control_keys_count; i++)
-        iotdata_kvr_add_flag(&kv, st->control_keys[i]);
     return kv.overflow ? -1 : (int)kv.len;
 }
 
@@ -300,25 +288,8 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
         if (name == NULL)
             name = snprintf_inline(namebuf, sizeof(namebuf), "0x%02X", key);
         const uint8_t width = iotdata_node_tlv_key_width(type, key);
-        if (type == IOTDATA_NODE_TLV_VERSION && key == IOTDATA_NODE_VERSION_CAPABILITIES) {
-            iotdata_version_caps_t caps;
-            char capstr[IOTDATA_VERSION_CAPS_STR_MAX + 1];
-            if (iotdata_version_caps_parse(val, vlen, &caps)) {
-                cJSON *const o = cJSON_CreateObject();
-                cJSON_AddStringToObject(o, "names", iotdata_version_caps_str(&caps, capstr, sizeof(capstr)));
-                cJSON *const raw = cJSON_CreateArray();
-                for (uint8_t i = 0; i < caps.count; i++) {
-                    cJSON *const e = cJSON_CreateObject();
-                    cJSON_AddStringToObject(e, "category", iotdata_version_cap_name((uint8_t)(caps.entry[i] >> 12)));
-                    cJSON_AddNumberToObject(e, "mask", (double)(caps.entry[i] & IOTDATA_VERSION_CAP_MASK_MAX));
-                    cJSON_AddItemToArray(raw, e);
-                }
-                cJSON_AddItemToObject(o, "entries", raw);
-                cJSON_AddItemToObject(obj, name, o);
-            } else
-                cJSON_AddStringToObject(obj, name, "malformed");
+        if (type == IOTDATA_NODE_TLV_VERSION && iotdata_version_json_key(obj, name, key, val, vlen))
             continue;
-        }
         if (width == 1 && vlen == 1)
             cJSON_AddNumberToObject(obj, name, (double)val[0]);
         else if (width == 2 && vlen == 2)
@@ -414,10 +385,10 @@ static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const s
             switch (key) {
             case IOTDATA_NODE_CONTROL_REBOOT:
                 st->stat_commands++;
-                PRINTF_INFO("node: REBOOT requested (delay=%us) -- not implemented on the gateway\n", (unsigned)iotdata_kvr_u16(val, vlen, 0));
+                st->reboot_requested = true;
+                PRINTF_INFO("node: REBOOT requested (delay=%us) -- stopping; the service unit restarts us\n", (unsigned)iotdata_kvr_u16(val, vlen, 0));
                 break;
             default:
-                /* not ours: offer it to the app, which is where mesh management lives */
                 if (st->control != NULL && st->control(key, val, vlen))
                     st->stat_commands++;
                 else {
@@ -482,7 +453,38 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
          * also silently dropped the legitimate CONTROL *report*, the one a node sends to say which
          * commands it accepts. So `node-control` could never work for any station.
          */
-        if (!iotdata_node_is_down(st->_iotdata_dec.sequence))
+        if (iotdata_node_is_down(st->_iotdata_dec.sequence)) {
+            /*
+             * A DOWN frame ADDRESSED TO US. A gateway is usually the top of the pile and only ever
+             * sends these, but it is a station like any other: with two or three gateways, one can
+             * address a command at another's station id, and the frame may cross several relay
+             * hops to get there. Ignoring it would make a gateway the one node in the fleet that
+             * cannot be driven over the air -- which is also why this must reach exactly the same
+             * function the MQTT path does, rather than a second implementation that drifts.
+             *
+             * `station` is the TARGET here, not the sender: IOTDATA_SEQUENCE_DOWN inverts what the
+             * field means. An exact match cannot be our own echo, because a gateway never sends a
+             * DOWN frame to itself (node_on_mqtt executes those locally instead of airing them).
+             *
+             * A BROADCAST down is deliberately not executed here. It is addressed to us in the
+             * sense that broadcast is addressed to everyone, but we cannot tell another gateway's
+             * broadcast from the echo of our own coming back off a relay -- and acting on our own
+             * echo would double-count and double-report every broadcast we send. Idempotence makes
+             * that harmless rather than correct, so it waits for a way to tell them apart.
+             */
+            if (station == st->station_id)
+                for (uint8_t i = 0; i < st->_iotdata_dec.tlv_count; i++) {
+                    const iotdata_decoder_tlv_t *const t = &st->_iotdata_dec.tlv[i];
+                    if (t->type == IOTDATA_NODE_TLV_CONTROL && t->format == IOTDATA_TLV_FMT_RAW) {
+                        st->stat_rx++;
+                        /* no sender to name: a DOWN frame's station field is the TARGET, and the
+                           header carries nobody's return address */
+                        PRINTF_INFO("node: CONTROL over the air, addressed to us (%u byte(s))\n", (unsigned)t->length);
+                        node_process_control(st, t->raw, t->length);
+                        ok = true;
+                    }
+                }
+        } else
             for (uint8_t i = 0; i < st->_iotdata_dec.tlv_count; i++) {
                 const iotdata_decoder_tlv_t *const t = &st->_iotdata_dec.tlv[i];
                 if (iotdata_tlv_type_is_system(t->type) && t->format == IOTDATA_TLV_FMT_RAW) {
@@ -555,7 +557,7 @@ static bool node_begin(node_state_t *st, const uint16_t station_id, const iotdat
     st->control_keys = control_keys;
     st->control_keys_count = control_keys_count;
     iotdata_down_init(&st->down, pool);
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_GATEWAY_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
+    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_MQTT_MANAGE_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
     PRINTF_INFO("node: station=%04" PRIX16 ", responses on %s\n", station_id, st->topic_resp);
     return true;
 }

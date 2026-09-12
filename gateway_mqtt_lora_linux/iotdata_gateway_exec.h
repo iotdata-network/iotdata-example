@@ -9,40 +9,6 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-typedef struct {
-    const char *mqtt_topic_prefix;
-    bool capture_rssi_packet;
-    bool capture_rssi_channel;
-    time_t interval_rssi_channel;
-    time_t interval_rssi_channel_last;
-    time_t stat_display_interval;
-    time_t stat_display_interval_last;
-    time_t stat_publish_interval;
-    time_t stat_publish_interval_last;
-    time_t stat_netw_interval;
-    time_t stat_netw_interval_last;
-    netw_t network;  /* stations heard (mesh + sensor), printed every stat-network-interval */
-    filter_t filter; /* per-station RX allow/block, exactly as a relay has one */
-    node_state_t *state_node;
-    mesh_state_t *state_mesh;
-    ddup_state_t *state_ddup;
-    stat_state_t *state_stat;
-    char _buffer_mqtt_topic[256], _buffer_mqtt_message[1024];
-    iotdata_decode_to_json_scratch_t _iotdata_scratch;
-    iotdata_decoder_t _iotdata_dec; /* for the validity gate below, kept out of the stack */
-    /* Frames come from the pool, not from here. A gateway has no forwarding path, so unlike a
-       relay it saves no copies by pooling -- what it gains is a bounded, MEASURED ceiling on frame
-       memory, which is what will matter when this runs on an ESP32. */
-    buffer_pool_t *pool;
-    /* The receive buffer, held ACROSS cycles. Most cycles read nothing, so acquiring and releasing
-       one per cycle was a pair of pool operations to no purpose: this keeps the same buffer until a
-       frame actually lands in it and is done with. One buffer stays out of the pool for the life of
-       the run, which at this depth is the right trade. BUFFER_NONE means we hold none. */
-    buffer_handle_t rx_held;
-    bool debug;
-    bool debug_data;
-} process_state_t;
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -232,11 +198,6 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* The node layer calls back into the app through function pointers that take no context (the same
-   shape ctrl.h needs for the mosquitto callback), so the state is reached through this. Set in
-   process_run, which owns everything the hooks touch. */
-static process_state_t *g_exec = NULL;
-
 /*
  * How this gateway sees the mesh it is part of: the mesh group of STATUS.
  *
@@ -264,28 +225,6 @@ static void exec_node_status_mesh(iotdata_node_status_mesh_t *const out) {
     out->rerr_tx = 0; /* the root never sends one: it has no route to lose */
     out->forwards = st->state_mesh->stat_forwards_unwrapped;
     out->duplicates = st->state_mesh->stat_duplicates;
-}
-
-static void exec_report_peers(const stat_state_t *const s) {
-    PRINTF_INFO("exec: peers - %d\n", s->peers_count);
-    for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && c < s->peers_count; i++) {
-        const stat_peer_t *const e = &s->peers[i];
-        if (e->valid) {
-            c++;
-            PRINTF_INFO("exec:   %04" PRIX16 " cost=%u gen=%u flags=0x%02" PRIX8 " age=%lds\n", e->station_id, (unsigned)e->cost, (unsigned)e->generation, e->flags, (long)(time(NULL) - e->last_seen));
-        }
-    }
-}
-
-static void exec_report_filter(const filter_t *const f) {
-    PRINTF_INFO("exec: filters - %d\n", filter_count(f));
-    for (int i = 0, c = 0; i < (int)(sizeof(f->e) / sizeof(f->e[0])) && c < f->count; i++) {
-        const filter_entry_t *const e = &f->e[i];
-        if (e->valid) {
-            c++;
-            PRINTF_INFO("exec:   %04" PRIX16 " %s (%s)\n", e->station, e->action == FILTER_ALLOW ? "allow" : "block", e->source == FILTER_AUTO ? "auto" : "manual");
-        }
-    }
 }
 
 static uint8_t exec_node_table_count(const uint8_t type) {
@@ -368,119 +307,6 @@ static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t
         return false;
     }
 }
-
-/*
- * The mesh-management half of node CONTROL, on the gateway.
- *
- * Deliberately the same set, the same values and the same semantics as the relay's
- * relay_node_control(): every mesh station answers these the same way, and a manager should not
- * have to know whether it is talking to a relay or a gateway. What differs is only what the
- * tables are called underneath -- the gateway's "stations heard" is its netw mirror, its peers
- * are the beacons it hears.
- *
- * Every command is state-relative and idempotent, because there is no acknowledgement on the mesh.
- * Table dumps go to the log: there is no TLV for a table yet.
- */
-static bool exec_node_control(const uint8_t key, const uint8_t *const val, const uint8_t vlen) {
-    process_state_t *const st = g_exec;
-    if (st == NULL)
-        return false;
-    switch (key) {
-
-    case IOTDATA_NODE_CONTROL_MESH_STATIONS_DUMP:
-        PRINTF_INFO("exec: CONTROL - MESH_STATIONS_DUMP\n");
-        netw_report(&st->network, st->state_mesh->station_id);
-        return true;
-
-    case IOTDATA_NODE_CONTROL_MESH_PEERS_DUMP:
-        PRINTF_INFO("exec: CONTROL - MESH_PEERS_DUMP\n");
-        exec_report_peers(st->state_stat);
-        return true;
-    case IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE: {
-        int n = 0;
-        for (int i = 0; i + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE) {
-            const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
-            if (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_PEER_NONE) {
-                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %04" PRIX16 " none -> %s\n", station, stat_mesh_peer_remove(st->state_stat, station) ? "removed" : "not present");
-                n++;
-            } else
-                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %04" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
-        }
-        if (n > 0)
-            exec_report_peers(st->state_stat);
-        return true;
-    }
-    case IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR:
-        PRINTF_INFO("exec: CONTROL - MESH_PEERS_CLEAR -> forgetting %d peer(s)\n", st->state_stat->peers_count);
-        stat_mesh_peers_clear(st->state_stat);
-        return true;
-
-    case IOTDATA_NODE_CONTROL_MESH_FILTERS_DUMP:
-        PRINTF_INFO("exec: CONTROL - MESH_FILTERS_DUMP\n");
-        exec_report_filter(&st->filter);
-        return true;
-    case IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE: {
-        int n = 0;
-        for (int i = 0; i + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE) {
-            const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
-            switch (val[i + 2]) {
-            case IOTDATA_NODE_CONTROL_MESH_FILTERS_NONE:
-                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " none -> %s\n", station, filter_remove(&st->filter, station) ? "removed" : "not present");
-                n++;
-                break;
-            case IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK:
-            case IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW: {
-                /* the wire values are NONE/BLOCK/ALLOW = 0/1/2; the table's are BLOCK/ALLOW = 0/1 */
-                const bool allow = (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW);
-                const bool ok = filter_insert(&st->filter, station, allow ? FILTER_ALLOW : FILTER_BLOCK, FILTER_MANUAL);
-                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " %s -> %s\n", station, allow ? "allow" : "block", ok ? "ok" : "table full");
-                if (ok && !allow) /* make the block take effect on what we already believe */
-                    (void)stat_mesh_peer_remove(st->state_stat, station);
-                n++;
-                break;
-            }
-            default:
-                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
-                break;
-            }
-        }
-        if (n > 0)
-            exec_report_filter(&st->filter);
-        return true;
-    }
-    case IOTDATA_NODE_CONTROL_MESH_FILTERS_CLEAR: {
-        const filter_scope_t scope = (vlen >= 1) ? (filter_scope_t)val[0] : FILTER_SCOPE_ALL;
-        PRINTF_INFO("exec: CONTROL - MESH_FILTER_CLEAR scope=%u -> %d cleared\n", (unsigned)scope, filter_clear(&st->filter, scope));
-        exec_report_filter(&st->filter);
-        return true;
-    }
-
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE: {
-        const bool on = (vlen >= 1) ? (val[0] != 0u) : true;
-        PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_ENABLE -> %s\n", on ? "true" : "false");
-        ctrl_diag_enable(on);
-        return true;
-    }
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR:
-        PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_CLEAR\n");
-        ctrl_diag_clear();
-        return true;
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_DUMP:
-        PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_DUMP\n");
-        ctrl_diag_dump();
-        return true;
-
-    default:
-        return false; /* not ours: the node layer counts it unknown */
-    }
-}
-
-/* What exec_node_control() implements, so the CONTROL report can advertise it. The same list a
-   relay advertises -- that symmetry is the point. */
-static const uint8_t exec_node_control_keys[] = {
-    IOTDATA_NODE_CONTROL_MESH_STATIONS_DUMP, IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR,   IOTDATA_NODE_CONTROL_MESH_PEERS_DUMP,   IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE,
-    IOTDATA_NODE_CONTROL_MESH_FILTERS_CLEAR, IOTDATA_NODE_CONTROL_MESH_FILTERS_DUMP, IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE, IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR, IOTDATA_NODE_CONTROL_DIAGNOSTICS_DUMP,
-};
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------

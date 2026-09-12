@@ -181,6 +181,7 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "mqtt_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// IOTDATA
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #include "iotdata_config.h"
@@ -191,6 +192,12 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_down.h"
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
+// variant
+#include "iotdata_node_control.h"
+// status
+// config
+// diagnostics
+// content
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 #include "iotdata_blackbox.h"
 #include "iotdata_station_filter.h"
@@ -211,6 +218,7 @@ typedef struct {
 #include "iotdata_gateway_stat.h"
 #include "iotdata_gateway_node.h"
 #include "iotdata_gateway_netw.h"
+#include "iotdata_gateway_state.h"
 #include "iotdata_gateway_ctrl.h"
 #include "iotdata_gateway_exec.h"
 
@@ -636,8 +644,8 @@ int main(int argc, char *argv[]) {
 
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
     (void)netw_begin(&state->process_state.network);
-    if (!node_begin(&state->node_state, station_id, &s_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, exec_node_control, exec_node_status_mesh, exec_node_table_count, exec_node_table_row, exec_node_control_keys,
-                    (uint8_t)(sizeof(exec_node_control_keys) / sizeof(exec_node_control_keys[0])), state->process_state.mqtt_topic_prefix))
+    if (!node_begin(&state->node_state, station_id, &s_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row, ctrl_from_iotdata_keys,
+                    (uint8_t)(sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0])), state->process_state.mqtt_topic_prefix))
         goto end_mqtt;
     if (!mesh_begin(&state->mesh_state, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
         goto end_node;

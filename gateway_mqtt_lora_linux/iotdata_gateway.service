@@ -10,7 +10,10 @@ Type=simple
 ExecStart=/usr/local/bin/iotdata-gateway --config /etc/default/iotdata-gateway
 TimeoutStopSec=15s
 KillMode=mixed
-Restart=on-failure
+# always, not on-failure: a REBOOT command stops the process CLEANLY, and on-failure would leave
+# it stopped -- the one case where the restart matters most. A deliberate `systemctl stop` is
+# unaffected, since Restart= only covers the process exiting on its own.
+Restart=always
 RestartSec=5s
 
 [Install]
