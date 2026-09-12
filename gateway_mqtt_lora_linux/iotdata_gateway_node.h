@@ -431,7 +431,7 @@ static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t 
         ok = iotdata_encode_begin(&st->_iotdata_enc, buf, buffer_room(st->pool, h), 0, target, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK && iotdata_encode_tlv(&st->_iotdata_enc, IOTDATA_NODE_TLV_CONTROL, kvbuf, (uint8_t)kvlen) == IOTDATA_OK &&
              iotdata_encode_end(&st->_iotdata_enc, &len) == IOTDATA_OK;
         if (ok) {
-            const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, h);
+            const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, h, (uint32_t)__ticks_ms());
             PRINTF_INFO("node: down -> %04" PRIX16 " (%zu bytes, %s)\n", target, len, iotdata_down_ev_name(ev));
             ok = st->tx(buf, (int)len);
         }
@@ -494,6 +494,9 @@ static void node_on_mqtt(node_state_t *const st, const uint8_t *kvbuf, const siz
 
 static void node_tick(node_state_t *const st) {
     const time_t now = time(NULL);
+    const int stale = iotdata_down_tick(&st->down, (uint32_t)__ticks_ms());
+    if (stale > 0)
+        PRINTF_INFO("node: %d held command(s) expired unclaimed (ttl=%" PRIu32 "s)\n", stale, iotdata_down_ttl_ms(&st->down) / 1000u);
     if (!st->startup_done) {
         st->startup_done = true;
         static const struct {

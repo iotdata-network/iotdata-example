@@ -622,7 +622,7 @@ int main(int argc, char *argv[]) {
     state->running = true;
 
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
-    netw_begin(&state->process_state.network);
+    (void)netw_begin(&state->process_state.network);
     if (!node_begin(&state->node_state, station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, exec_node_control, exec_node_status_mesh, exec_node_table_count, exec_node_table_row,
                     exec_node_control_keys, (uint8_t)(sizeof(exec_node_control_keys) / sizeof(exec_node_control_keys[0])), state->process_state.mqtt_topic_prefix))
         goto end_mqtt;

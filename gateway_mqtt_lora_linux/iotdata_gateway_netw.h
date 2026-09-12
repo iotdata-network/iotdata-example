@@ -347,8 +347,7 @@ static inline const char *netw_hears_format(const netw_station_t *e, char *out, 
 
 // End-to-end loss as a percentage: gaps / (received + gaps). 0 when nothing is expected yet.
 static inline double netw_loss_pct(uint32_t gaps, uint32_t rx) {
-    const uint32_t total = gaps + rx;
-    return total ? ((double)gaps * 100.0 / (double)total) : 0.0;
+    return gaps + rx ? ((double)gaps * 100.0 / (double)(gaps + rx)) : 0.0;
 }
 
 static inline bool netw_is_stale(const netw_station_t *e, time_t now) {
@@ -408,8 +407,9 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void netw_begin(netw_t *n) {
+bool netw_begin(netw_t *n) {
     memset(n, 0, sizeof(*n));
+    return true;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
