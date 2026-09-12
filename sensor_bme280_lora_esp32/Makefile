@@ -5,16 +5,18 @@ IOTDATA_SRC=../..
 include $(IOTDATA_SRC)/iotdata-common/make/config.mk
 include $(IOTDATA_SRC)/iotdata-depend/make/config.mk
 
-# IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
+IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
 IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_config.$(IOTDATA_HOST).h iotdata_config.$(IOTDATA_HOST).h))
 
 ##
 
 PLATFORM = esp32c3
-NAME     = app
-VERSION  = 1.00
+NAME     = sensor-bme280
+VERSION  = 0.9.9
 
-SOURCES_TARGET= main/$(NAME).c
+##
+
+SOURCES_TARGET= main/app.c
 SOURCES_DEPEND=
 SOURCES=$(SOURCES_TARGET) $(SOURCES_DEPEND)
 

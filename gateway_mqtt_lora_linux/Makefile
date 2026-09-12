@@ -5,8 +5,14 @@ IOTDATA_SRC=../..
 include $(IOTDATA_SRC)/iotdata-common/make/config.mk
 include $(IOTDATA_SRC)/iotdata-depend/make/config.mk
 
-# IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
+IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
 IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_config.$(IOTDATA_HOST).h iotdata_config.$(IOTDATA_HOST).h))
+
+##
+
+PLATFORM = linux
+NAME     = gateway
+VERSION  = 0.9.9
 
 ##
 
@@ -36,6 +42,9 @@ SOURCES_DEPEND=\
     $(IOTDATA_SRC_COMMON)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
     $(IOTDATA_SRC_COMMON)/include/iotdata_blackbox.h $(IOTDATA_SRC_DEPEND_BLACKBOX)/blackbox.h \
     $(IOTDATA_SRC_COMMON)/include/iotdata_station_filter.h \
+    $(IOTDATA_SRC_COMMON)/include/iotdata_node_version.h \
+    $(IOTDATA_SRC_COMMON)/include/device/d_module_buffers.h \
+    $(IOTDATA_SRC_COMMON)/include/device/d_format.h \
     $(IOTDATA_SRC_LIBRARY_SOURCES)
 SOURCES=$(SOURCES_TARGET) $(SOURCES_DEPEND)
 

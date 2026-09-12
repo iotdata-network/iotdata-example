@@ -34,7 +34,7 @@ typedef struct {
     bool startup_done;
 
     /* what we report ON: borrowed, not owned */
-    const char *version;
+    const iotdata_version_caps_t *caps;
     const stat_state_t *stat;
     bbox_state_t *bbox;
 
@@ -68,11 +68,7 @@ typedef struct {
 static int node_build_version(const node_state_t *st, uint8_t *buf, const size_t size) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
-    iotdata_kvr_add_str(&kv, IOTDATA_NODE_VERSION_FIRMWARE, st->version ? st->version : "0");
-    iotdata_kvr_add_str(&kv, IOTDATA_NODE_VERSION_APPLICATION, "iotdata_gateway");
-    iotdata_kvr_add_str(&kv, IOTDATA_NODE_VERSION_PLATFORM, "linux");
-    iotdata_kvr_add_str(&kv, IOTDATA_NODE_VERSION_BUILD, __DATE__);
-    return kv.overflow ? -1 : (int)kv.len;
+    return iotdata_version_pack(&kv, st->caps);
 }
 
 /* VARIANT is one key per variant produced, keyed by variant number. A gateway originates no
@@ -304,6 +300,25 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
         if (name == NULL)
             name = snprintf_inline(namebuf, sizeof(namebuf), "0x%02X", key);
         const uint8_t width = iotdata_node_tlv_key_width(type, key);
+        if (type == IOTDATA_NODE_TLV_VERSION && key == IOTDATA_NODE_VERSION_CAPABILITIES) {
+            iotdata_version_caps_t caps;
+            char capstr[IOTDATA_VERSION_CAPS_STR_MAX + 1];
+            if (iotdata_version_caps_parse(val, vlen, &caps)) {
+                cJSON *const o = cJSON_CreateObject();
+                cJSON_AddStringToObject(o, "names", iotdata_version_caps_str(&caps, capstr, sizeof(capstr)));
+                cJSON *const raw = cJSON_CreateArray();
+                for (uint8_t i = 0; i < caps.count; i++) {
+                    cJSON *const e = cJSON_CreateObject();
+                    cJSON_AddStringToObject(e, "category", iotdata_version_cap_name((uint8_t)(caps.entry[i] >> 12)));
+                    cJSON_AddNumberToObject(e, "mask", (double)(caps.entry[i] & IOTDATA_VERSION_CAP_MASK_MAX));
+                    cJSON_AddItemToArray(raw, e);
+                }
+                cJSON_AddItemToObject(o, "entries", raw);
+                cJSON_AddItemToObject(obj, name, o);
+            } else
+                cJSON_AddStringToObject(obj, name, "malformed");
+            continue;
+        }
         if (width == 1 && vlen == 1)
             cJSON_AddNumberToObject(obj, name, (double)val[0]);
         else if (width == 2 && vlen == 2)
@@ -524,11 +539,11 @@ static void node_tick(node_state_t *const st) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool node_begin(node_state_t *st, const uint16_t station_id, const char *version, const stat_state_t *stat, bbox_state_t *bbox, buffer_pool_t *pool, node_tx_handler_t tx, node_control_handler_t control,
+static bool node_begin(node_state_t *st, const uint16_t station_id, const iotdata_version_caps_t *caps, const stat_state_t *stat, bbox_state_t *bbox, buffer_pool_t *pool, node_tx_handler_t tx, node_control_handler_t control,
                        node_status_mesh_handler_t status_mesh, node_table_count_handler_t table_count, node_table_row_handler_t table_row, const uint8_t *control_keys, const uint8_t control_keys_count, const char *topic_prefix) {
-    assert(version && stat && bbox && pool && tx && topic_prefix);
+    assert(stat && bbox && pool && tx && topic_prefix);
     st->station_id = station_id;
-    st->version = version;
+    st->caps = caps;
     st->stat = stat;
     st->bbox = bbox;
     st->pool = pool;

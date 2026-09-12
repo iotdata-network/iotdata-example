@@ -101,6 +101,7 @@ static const lora_config_t lora_cfg = {
 #include "iotdata_variant_simulator.c"
 #include "iotdata.c"
 #include "iotdata_node.h"
+#include "iotdata_node_version.h"
 #include "iotdata_node_endpoint.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -191,12 +192,7 @@ static bool sim_node_tx(const uint8_t *const packet, const size_t len) {
     }
 }
 
-static const idep_version_t sim_version = {
-    .firmware = "0.01",
-    .application = "iotdata_simulator",
-    .platform = CONFIG_IDF_TARGET,
-    .build = __DATE__,
-};
+static iotdata_version_caps_t s_caps;
 
 /*
  * A simulator is a test instrument, so it listens all the time: a command aimed at one of its
@@ -212,7 +208,7 @@ static const idep_version_t sim_version = {
 #endif
 
 static const idep_config_t sim_cfg = {
-    .version = &sim_version,
+    .caps = &s_caps,
     .status = sim_node_status,
     .tx = sim_node_tx,
     .receive_always = (SIMULATE_RECEIVE_ALWAYS != 0),
@@ -367,6 +363,12 @@ bool app_exec(void) {
 void app_main(void) {
 
     setbuf(stdout, NULL);
+
+    iotdata_version_caps_init(&s_caps);
+    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
+    ESP_LOGI(__tag_app, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
+    if (!iotdata_version_stamp_is_real())
+        ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
 
     const esp_err_t wdt_err = esp_task_wdt_add(NULL);
     if (wdt_err != ESP_OK)

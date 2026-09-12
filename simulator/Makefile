@@ -5,8 +5,14 @@ IOTDATA_SRC=../..
 include $(IOTDATA_SRC)/iotdata-common/make/config.mk
 IOTDATA_SRC_EXAMPLE_SIMULATOR=$(IOTDATA_SRC_EXAMPLE)/simulator
 
-# IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
+IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
 IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_config.$(IOTDATA_HOST).h iotdata_config.$(IOTDATA_HOST).h))
+
+##
+
+PLATFORM = linux
+NAME     = simulator-sensor
+VERSION  = 0.9.9
 
 ##
 

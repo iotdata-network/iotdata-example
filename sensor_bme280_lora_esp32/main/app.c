@@ -135,6 +135,7 @@ static const lora_config_t lora_cfg = {
 #include "iotdata.c"
 #include "iotdata_variant.h"
 #include "iotdata_node.h"
+#include "iotdata_node_version.h"
 #include "iotdata_node_endpoint.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -150,15 +151,10 @@ static void sensor_node_status(const uint16_t station, iotdata_kvr_t *const kv);
 static bool sensor_node_tx(const uint8_t *const packet, const size_t len);
 static void sensor_receive_window(void); /* defined below app_cycle, which opens it */
 
-static const idep_version_t sensor_version = {
-    .firmware = "0.01",
-    .application = "iotdata_sensor_bme280",
-    .platform = CONFIG_IDF_TARGET,
-    .build = __DATE__,
-};
+static iotdata_version_caps_t s_caps;
 
 static const idep_config_t idep_cfg = {
-    .version = &sensor_version,
+    .caps = &s_caps,
     .status = sensor_node_status,
     .tx = sensor_node_tx,
     .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
@@ -436,6 +432,13 @@ void app_main(void) {
     const int64_t time_start_us = esp_timer_get_time();
 
     setbuf(stdout, NULL);
+
+    iotdata_version_caps_init(&s_caps);
+    (void)iotdata_version_caps_add(&s_caps, IOTDATA_VERSION_CAP_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
+    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
+    ESP_LOGI(__tag_app, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
+    if (!iotdata_version_stamp_is_real())
+        ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
 
     const esp_err_t err = esp_task_wdt_add(NULL);
     if (err != ESP_OK)

@@ -50,7 +50,7 @@ static void test_e22_printf_stub(const char *format, ...) {
 #define BUFFER_LOCK_RELEASE(l) pthread_mutex_unlock(l)
 #include "d_module_buffers.h"
 
-#define TEST_FRAME_MAX 240
+#define TEST_FRAME_MAX     240
 /* Set here, before the pool is declared, exactly as the app sets it before including the store:
    the down table's size is what the pool has to carry on top of the traffic. Kept small for the
    harness -- the gateway itself dimensions for a whole network. */
@@ -86,6 +86,7 @@ static inline uint8_t rssi_raw_from_dbm(const int dbm) {
 #include "iotdata_mesh.h"
 #include "iotdata_down.h"
 #include "iotdata_node.h"
+#include "iotdata_node_version.h"
 
 #define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
@@ -1603,7 +1604,7 @@ static bool test_ctrl_response_topic_is_shared(void) {
     memset(&ss, 0, sizeof(ss));
     bbox_state_t bb;
     memset(&bb, 0, sizeof(bb));
-    ASSERT(node_begin(&ns, 0x0001, "test", &ss, &bb, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
+    ASSERT(node_begin(&ns, 0x0001, NULL, &ss, &bb, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
 
     ctrl_state_t st;
     ctrl_test_state(&st);
@@ -1997,9 +1998,9 @@ static bool test_whole_frame_still_decodes(void) {
     uint8_t kv[64];
     iotdata_kvr_t b;
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_FIRMWARE, "dafc168-dirty");
-    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_PLATFORM, "esp32c3");
-    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_APPLICATION, "iotdata_relay");
+    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_HARDWARE, "esp32c3/riscv32");
+    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_FIRMWARE, "idf/6.1+bl1.20");
+    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_SOFTWARE, "relay/1.0.0/202609121607");
     ASSERT(!b.overflow);
 
     uint8_t frame[TEST_FRAME_MAX];
@@ -2403,17 +2404,74 @@ static bool test_text_values_still_render_as_strings(void) {
     uint8_t kv[64];
     iotdata_kvr_t b;
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_FIRMWARE, "dafc168-dirty");
-    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_PLATFORM, "esp32c3");
+    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_HARDWARE, "esp32c3/riscv32");
+    iotdata_kvr_add_str(&b, IOTDATA_NODE_VERSION_FIRMWARE, "idf/6.1+bl1.20");
 
     cJSON *const root = cJSON_CreateObject();
     node_json_kvr(&ns, root, IOTDATA_NODE_TLV_VERSION, kv, b.len);
     char *const out = cJSON_PrintUnformatted(root);
     ASSERT(out != NULL);
-    ASSERT(strstr(out, "\"firmware\":\"dafc168-dirty\"") != NULL);
-    ASSERT(strstr(out, "\"platform\":\"esp32c3\"") != NULL);
+    ASSERT(strstr(out, "\"hardware\":\"esp32c3/riscv32\"") != NULL);
+    /* the '+' in a firmware value survives JSON intact -- it is part of the grammar, not an escape */
+    ASSERT(strstr(out, "\"firmware\":\"idf/6.1+bl1.20\"") != NULL);
     free(out);
     cJSON_Delete(root);
+    return true;
+}
+
+/* What a `vers` request actually puts on manage/resp. The four buckets arrive as strings, and
+   capabilities -- 16-bit entries, so hex by any generic rule -- must arrive DECODED, or whoever
+   asked has to own a copy of the bit registry to read the answer. */
+static bool test_version_report_as_the_monitor_sees_it(void) {
+    node_state_t ns;
+    stat_state_t ss;
+    memset(&ns, 0, sizeof(ns));
+    memset(&ss, 0, sizeof(ss));
+    ns.stat = &ss;
+
+    iotdata_version_caps_t caps;
+    memset(&caps, 0, sizeof(caps));
+    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAP_RADIO, IOTDATA_VERSION_RADIO_E22_USB);
+    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAP_FEATURES, IOTDATA_VERSION_FEATURE_MESH | IOTDATA_VERSION_FEATURE_BLACKBOX);
+    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAP_PROPRIETARY, 0x008); /* a bit with no name */
+
+    uint8_t kv[200];
+    iotdata_kvr_t b;
+    iotdata_kvr_init(&b, kv, sizeof(kv));
+    ASSERT(iotdata_version_pack(&b, &caps) > 0);
+
+    cJSON *const root = cJSON_CreateObject();
+    node_json_kvr(&ns, root, IOTDATA_NODE_TLV_VERSION, kv, b.len);
+    char *const out = cJSON_PrintUnformatted(root);
+    ASSERT(out != NULL);
+
+    /* the four buckets, by the names the key table gives -- which is what a reader keys off */
+    ASSERT(strstr(out, "\"hardware\":\"") != NULL);
+    ASSERT(strstr(out, "\"firmware\":\"") != NULL);
+    ASSERT(strstr(out, "\"serial\":\"") != NULL);
+    /* software carries the grammar a reader parses: app/semver/stamp */
+    ASSERT(strstr(out, "\"software\":\"" IOTDATA_VERSION_APP "/" IOTDATA_VERSION_SEMVER "/") != NULL);
+
+    /* capabilities decoded, not hex */
+    ASSERT(strstr(out, "\"capabilities\"") != NULL);
+    /* rendered in the order the categories were declared, bits low-to-high within one */
+    ASSERT(strstr(out, "radio/e22-usb,mesh,bbox,proprietary/0x008") != NULL);
+    /* and the raw entries travel too, so a newer registry can decode what this one could not */
+    ASSERT(strstr(out, "\"category\":\"radio\"") != NULL);
+    ASSERT(strstr(out, "\"entries\"") != NULL);
+    free(out);
+    cJSON_Delete(root);
+
+    /* a malformed value is reported as malformed rather than rendered as a guess */
+    iotdata_kvr_init(&b, kv, sizeof(kv));
+    const uint8_t odd[3] = { 0x00, 0x01, 0x02 };
+    iotdata_kvr_add(&b, IOTDATA_NODE_VERSION_CAPABILITIES, odd, sizeof(odd));
+    cJSON *const bad = cJSON_CreateObject();
+    node_json_kvr(&ns, bad, IOTDATA_NODE_TLV_VERSION, kv, b.len);
+    char *const badout = cJSON_PrintUnformatted(bad);
+    ASSERT(badout != NULL && strstr(badout, "\"capabilities\":\"malformed\"") != NULL);
+    free(badout);
+    cJSON_Delete(bad);
     return true;
 }
 
@@ -2510,6 +2568,7 @@ int main(void) {
     RUN_TEST(mesh_node_gateway_status_is_root);
     RUN_TEST(table_report_json);
     RUN_TEST(text_values_still_render_as_strings);
+    RUN_TEST(version_report_as_the_monitor_sees_it);
     RUN_TEST(mesh_node_table_report);
     RUN_TEST(mesh_node_table_skips_holes);
     RUN_TEST(mesh_node_status_absent_when_mesh_off);

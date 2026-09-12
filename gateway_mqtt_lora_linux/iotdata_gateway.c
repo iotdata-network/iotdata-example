@@ -55,11 +55,14 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define MQTT_CONNECT_TIMEOUT          60
-#define MQTT_PUBLISH_QOS              0
-#define MQTT_PUBLISH_RETAIN           false
+#define MQTT_CONNECT_TIMEOUT    60
+#define MQTT_PUBLISH_QOS        0
+#define MQTT_PUBLISH_RETAIN     false
 
-#define IOTDATA_GATEWAY_VERSION       "1.0.0"
+#define IOTDATA_GATEWAY_VERSION IOTDATA_VERSION_SEMVER
+
+#define IOTDATA_VERSION_HAS_MESH
+#define IOTDATA_VERSION_HAS_BLACKBOX
 
 #define CONFIG_FILE_DEFAULT           "iotdata_gateway.cfg"
 
@@ -187,6 +190,7 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #define IOTDATA_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
 #include "iotdata_down.h"
 #include "iotdata_node.h"
+#include "iotdata_node_version.h"
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 #include "iotdata_blackbox.h"
 #include "iotdata_station_filter.h"
@@ -508,6 +512,8 @@ typedef struct {
 
 static system_t system_state;
 
+static iotdata_version_caps_t s_caps;
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool system_config(system_t *state, const int argc, char *argv[]) {
@@ -598,6 +604,13 @@ int main(int argc, char *argv[]) {
         return ret;
     const uint16_t station_id = state->mesh_state.station_id; // from config
 
+    iotdata_version_caps_init(&s_caps); /* seeds the build-time features */
+    (void)iotdata_version_caps_add(&s_caps, IOTDATA_VERSION_CAP_RADIO, state->lora_config.module == LORA_MODULE_USB ? IOTDATA_VERSION_RADIO_E22_USB : IOTDATA_VERSION_RADIO_E22_DIP);
+    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
+    PRINTF_INFO("version: %s\n", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
+    if (!iotdata_version_stamp_is_real())
+        PRINTF_WARN("version: build stamp is unset -- this binary cannot say when it was built\n");
+
     BUFFER_POOL_INIT(s_pool, BUFFER_SLOTS_TOTAL, BUFFER_LENGTH_TOTAL, BUFFER_LENGTH_PREFIX);
 
     gateway_blackbox_begin(&state->bbox_state);
@@ -623,8 +636,8 @@ int main(int argc, char *argv[]) {
 
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
     (void)netw_begin(&state->process_state.network);
-    if (!node_begin(&state->node_state, station_id, IOTDATA_GATEWAY_VERSION, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, exec_node_control, exec_node_status_mesh, exec_node_table_count, exec_node_table_row,
-                    exec_node_control_keys, (uint8_t)(sizeof(exec_node_control_keys) / sizeof(exec_node_control_keys[0])), state->process_state.mqtt_topic_prefix))
+    if (!node_begin(&state->node_state, station_id, &s_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, exec_node_control, exec_node_status_mesh, exec_node_table_count, exec_node_table_row, exec_node_control_keys,
+                    (uint8_t)(sizeof(exec_node_control_keys) / sizeof(exec_node_control_keys[0])), state->process_state.mqtt_topic_prefix))
         goto end_mqtt;
     if (!mesh_begin(&state->mesh_state, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
         goto end_node;

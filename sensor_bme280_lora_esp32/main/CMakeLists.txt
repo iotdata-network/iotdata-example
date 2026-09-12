@@ -1,7 +1,7 @@
 
 idf_component_register(
     SRCS "app.c"
-    PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_i2c esp_driver_usb_serial_jtag esp_adc esp_partition esp_hw_support
+    PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_i2c esp_driver_usb_serial_jtag esp_adc esp_partition esp_hw_support esp_app_format esp_bootloader_format
     INCLUDE_DIRS
         "."
         "${IOTDATA_SRC_EXAMPLE}/include"            # iotdata_config.h
