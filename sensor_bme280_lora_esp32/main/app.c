@@ -9,7 +9,7 @@
  *
  * Reads a Bosch BME280 (temperature / pressure / humidity) over I2C, encodes
  * the reading as an iotdata packet using the "weather_station" variant,
- * transmits it via the E22 LoRa radio module, then deep sleeps until the next
+ * transmits it via the E22 LoRa radio module, then sleeps until the next
  * cycle — one transmission every TX_PERIOD_MS.
  *
  * Every wake is a complete, self-contained cycle: measure, transmit, sleep.
@@ -18,9 +18,6 @@
  * cache — anything missing is re-acquired on the next wake. So a cycle can be
  * repeated, or missed, without disturbing the ones around it.
  *
- * Note that deep sleep takes the USB-Serial-JTAG console down with it, so a
- * board watched over USB drops and re-enumerates its serial port once a minute;
- * that is the sleep working, not a fault.
  */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -61,29 +58,34 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+static const char *__tag_app = "app";
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// EXAMPLE config + hardware
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 #include "iotdata_config.h"
 #include "iotdata_hardware.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// TUNABLE
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define TX_PERIOD_MS     IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
-#define TX_PERIOD_MIN_MS 1000                               /* floor, if a cycle overruns the period  */
-#define CONSOLE_DRAIN_MS 100                                /* let the console flush before deep sleep    */
-#define PACKET_MAX       64                                 /* the packets built here are a dozen bytes   */
+#define TX_PERIOD_MS        IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
+#define TX_PERIOD_MIN_MS    1000                               /* floor, if a cycle overruns the period  */
+#define CONSOLE_DRAIN_MS    100                                /* let the console flush before deep sleep    */
+#define PACKET_MAX          64                                 /* the packets built here are a dozen bytes   */
+#define PACKET_VARIANT      IOTDATA_VSUITE_WEATHER_STATION
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// HARDWARE
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static const char *__tag_app = "app";
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
 // AE GEN LORA I2C --> BME280
 // (A) SDA -> (4) SDA
 // (B) SCL -> (3) SCL
 // (C) VCC -> (1) VCC + (5) CSB
 // (D) GND -> (2) GND + (6) SD0
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
 #define PIN_DEVICE_UART_TX  PIN_E22_RXD
 #define PIN_DEVICE_UART_RX  PIN_E22_TXD
@@ -119,7 +121,7 @@ static const lora_config_t lora_cfg = {
 };
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// iotdata
+// IOTDATA PROTOCOL + COMMONS
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 /*
@@ -152,25 +154,17 @@ static void sensor_diagnostics_emit(const char *const line) {
 #include "iotdata_node_endpoint.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-#define PACKET_VARIANT IOTDATA_VSUITE_WEATHER_STATION
-
-typedef struct {
-    uint8_t buf[PACKET_MAX];
-    size_t len;
-} packet_t;
 
 static void sensor_node_status(const uint16_t station, iotdata_node_status_t *const out);
-static bool sensor_node_tx(const uint8_t *const packet, const size_t len);
-static void sensor_receive_window(void); /* defined below app_exec, which opens it */
+static bool sensor_node_transmit(const uint8_t *const packet, const size_t len);
+static void sensor_node_receive(void);
 
 static iotdata_version_caps_t s_caps;
 
 static const idep_config_t idep_cfg = {
     .caps = &s_caps,
     .status = sensor_node_status,
-    .tx = sensor_node_tx,
+    .tx = sensor_node_transmit,
     .control = IOTDATA_DIAGNOSTICS_CONTROL,
     .control_keys = iotdata_diagnostics_control_keys,
     .control_keys_count = IOTDATA_DIAGNOSTICS_CONTROL_KEYS_COUNT,
@@ -179,43 +173,8 @@ static const idep_config_t idep_cfg = {
     .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
 };
 
-static bool packet_build(packet_t *const out, const uint16_t station, const uint16_t sequence, const bme280_reading_t *const reading, const battery_reading_t *const battery, uint8_t flags, const bool advertise_receive) {
-
-    static iotdata_encoder_t enc;
-
-    iotdata_status_t rc;
-    if ((rc = iotdata_encode_begin(&enc, out->buf, sizeof(out->buf), PACKET_VARIANT, station, sequence)) != IOTDATA_OK) {
-        ESP_LOGE(__tag_app, "encode_begin: %s", iotdata_strerror(rc));
-        return false;
-    }
-
-    if (battery != NULL && (rc = iotdata_encode_battery(&enc, battery->percent, battery->charging)) != IOTDATA_OK)
-        ESP_LOGW(__tag_app, "encode_battery: %s", iotdata_strerror(rc));
-
-    if (reading != NULL) {
-        const iotdata_float_t temperature_c100 = (iotdata_float_t)lroundf(reading->temperature_c * 100.0f);
-        const uint16_t pressure_hpa = (uint16_t)lroundf(reading->pressure_hpa);
-        const uint8_t humidity_pct = (uint8_t)lroundf(reading->humidity_pct);
-        if ((rc = iotdata_encode_environment(&enc, temperature_c100, pressure_hpa, humidity_pct)) != IOTDATA_OK) {
-            ESP_LOGW(__tag_app, "encode_environment: %s", iotdata_strerror(rc));
-            flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
-        }
-    }
-
-    if (flags != 0 && (rc = iotdata_encode_flags(&enc, flags)) != IOTDATA_OK)
-        ESP_LOGW(__tag_app, "encode_flags: %s", iotdata_strerror(rc));
-
-    if (advertise_receive && !idep_receive_append(&idep_cfg, &enc))
-        ESP_LOGW(__tag_app, "encode_receive: no room");
-
-    if ((rc = iotdata_encode_end(&enc, &out->len)) != IOTDATA_OK) {
-        ESP_LOGE(__tag_app, "encode_end: %s", iotdata_strerror(rc));
-        return false;
-    }
-    return true;
-}
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// APP STATE
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #define STATE_MAGIC 0xB1E28002U
@@ -236,6 +195,8 @@ typedef struct {
 
 static RTC_NOINIT_ATTR state_t state;
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static uint16_t state_station_id(void) {
     uint8_t mac[6] = { 0 };
     (void)esp_efuse_mac_get_default(mac);
@@ -253,6 +214,7 @@ static void state_reset(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// IOTDATA COMMONS
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static uint8_t sensor_node_reason(void) {
@@ -296,13 +258,13 @@ static void sensor_node_status(__attribute__((unused)) const uint16_t station, i
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool sensor_node_tx(const uint8_t *const packet, const size_t len) {
+static bool sensor_node_transmit(const uint8_t *const packet, const size_t len) {
     return lora_write_complete(packet, len, /*wait_complete=*/true) == ESP_OK;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void sensor_receive_window(void) {
+static void sensor_node_receive(void) {
     const uint32_t opened = (uint32_t)(esp_timer_get_time() / 1000);
     idep_window_begin(&idep_cfg, &state.node, opened);
     ESP_LOGI(__tag_app, "receive: window open for %ums (station=%" PRIu16 ")", (unsigned)IDEP_RECEIVE_WINDOW_MS, state.station_id);
@@ -329,6 +291,51 @@ static void sensor_receive_window(void) {
         __SLEEP_MS(CONSOLE_DRAIN_MS);
         esp_restart();
     }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// IOTDATA APP
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+typedef struct {
+    uint8_t buf[PACKET_MAX];
+    size_t len;
+} packet_t;
+
+static bool packet_build(packet_t *const out, const uint16_t station, const uint16_t sequence, const bme280_reading_t *const reading, const battery_reading_t *const battery, uint8_t flags, const bool advertise_receive) {
+
+    static iotdata_encoder_t enc;
+
+    iotdata_status_t rc;
+    if ((rc = iotdata_encode_begin(&enc, out->buf, sizeof(out->buf), PACKET_VARIANT, station, sequence)) != IOTDATA_OK) {
+        ESP_LOGE(__tag_app, "encode_begin: %s", iotdata_strerror(rc));
+        return false;
+    }
+
+    if (battery != NULL && (rc = iotdata_encode_battery(&enc, battery->percent, battery->charging)) != IOTDATA_OK)
+        ESP_LOGW(__tag_app, "encode_battery: %s", iotdata_strerror(rc));
+
+    if (reading != NULL) {
+        const iotdata_float_t temperature_c100 = (iotdata_float_t)lroundf(reading->temperature_c * 100.0f);
+        const uint16_t pressure_hpa = (uint16_t)lroundf(reading->pressure_hpa);
+        const uint8_t humidity_pct = (uint8_t)lroundf(reading->humidity_pct);
+        if ((rc = iotdata_encode_environment(&enc, temperature_c100, pressure_hpa, humidity_pct)) != IOTDATA_OK) {
+            ESP_LOGW(__tag_app, "encode_environment: %s", iotdata_strerror(rc));
+            flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
+        }
+    }
+
+    if (flags != 0 && (rc = iotdata_encode_flags(&enc, flags)) != IOTDATA_OK)
+        ESP_LOGW(__tag_app, "encode_flags: %s", iotdata_strerror(rc));
+
+    if (advertise_receive && !idep_receive_append(&idep_cfg, &enc))
+        ESP_LOGW(__tag_app, "encode_receive: no room");
+
+    if ((rc = iotdata_encode_end(&enc, &out->len)) != IOTDATA_OK) {
+        ESP_LOGE(__tag_app, "encode_end: %s", iotdata_strerror(rc));
+        return false;
+    }
+    return true;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -422,7 +429,7 @@ bool app_cycle(void) {
     if (state.radio_configured && lora_start() == ESP_OK) {
         transmitted = lora_write_complete(packet.buf, packet.len, /*wait_complete=*/true) == ESP_OK;
         if (transmitted && advertise)
-            sensor_receive_window();
+            sensor_node_receive();
         (void)lora_stop();
     }
     if (transmitted)

@@ -31,6 +31,7 @@
 // Usage:
 //   ./iotdata_gateway_command.js [options] <command> [args]
 //   ./iotdata_gateway_command.js status --target all
+//   ./iotdata_gateway_command.js status --target 0x5BF,0x537,0x538      (one frame each)
 //   ./iotdata_gateway_command.js status --target 0x5BF --broker mqtt://192.168.0.61:1883
 //   ./iotdata_gateway_command.js raw '{"cmd":"status","target":"all"}'
 //
@@ -63,13 +64,29 @@ const display = {
 // Target: "all" / "broadcast" / "*" -> broadcast; otherwise a station id (decimal or 0x..), 1..4094.
 // ------------------------------------------------------------------------------------------------------------------------
 
-function parseTarget(t) {
-    if (t === undefined) throw new Error('--target needs a value');
+const TARGETS_MAX = 8; // IOTDATA_CONTROL_TARGETS_MAX -- the gateway refuses a longer list outright
+
+function parseTargetOne(t, whole) {
     const s = String(t).toLowerCase();
     if (s === 'all' || s === 'broadcast' || s === '*') return 'all';
     const n = s.startsWith('0x') ? parseInt(s, 16) : parseInt(s, 10);
-    if (Number.isNaN(n) || n < 1 || n > 0xffe) throw new Error(`invalid target '${t}' (use all, or a station id 1..4094 / 0x001..0xFFE)`);
+    if (Number.isNaN(n) || n < 1 || n > 0xffe) throw new Error(`invalid target '${t}'${whole !== t ? ` in '${whole}'` : ''} (use all, or a station id 1..4094 / 0x001..0xFFE)`);
     return n;
+}
+
+// One station, or several comma-separated. A list goes over as a JSON array and the gateway sends
+// one DOWN frame per station -- the wire addresses one station at a time, so "several" is the
+// gateway's fan-out, not a wire feature. `all` anywhere makes the whole thing a broadcast.
+function parseTarget(t) {
+    if (t === undefined) throw new Error('--target needs a value');
+    const parts = String(t).split(',').map((p) => p.trim()).filter((p) => p.length > 0);
+    if (parts.length === 0) throw new Error('--target needs a value');
+    if (parts.length === 1) return parseTargetOne(parts[0], t);
+    const list = parts.map((p) => parseTargetOne(p, t));
+    if (list.some((v) => v === 'all')) return 'all';
+    const uniq = [...new Set(list)];
+    if (uniq.length > TARGETS_MAX) throw new Error(`too many targets in '${t}': ${uniq.length}, at most ${TARGETS_MAX}`);
+    return uniq;
 }
 
 // A concrete station id (decimal or 0x..) — for block/allow/unfilter/peers-remove.
@@ -213,7 +230,7 @@ function usage() {
     display.log('Options:');
     display.log(`  --broker <url>   MQTT broker      (default: ${DEFAULTS.broker}, or $MQTT_BROKER)`);
     display.log(`  --prefix <p>     topic prefix     (default: ${DEFAULTS.prefix}, or $IOTDATA_PREFIX)`);
-    display.log('  --target <t>     all | broadcast | <station id: 1..4094 or 0x..>   (default: all)');
+    display.log('  --target <t>     all | broadcast | <station id: 1..4094 or 0x..> | a comma-separated list of ids (default: all)');
     display.log(`  --watch [secs]   after sending, print live telemetry for N seconds (default ${DEFAULTS.watch})`);
     display.log('  --definitions <hdr>  blackbox record header (with // @blackbox tag=...); while watching,');
     display.log('                   convert recognised record lines (e.g. a blackbox-dump reply) CSV -> JSON');

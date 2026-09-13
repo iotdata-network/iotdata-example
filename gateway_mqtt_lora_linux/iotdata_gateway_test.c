@@ -64,7 +64,6 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #define PIN_DEVICE_LORA_M1  GPIO_NUM_NC
 #include "d_interface_e22900t22.h"
 
-
 /* __sleep_ms was the depend core's delay callback; the common driver uses hw_delay_ms_yieldable
    from d_common.h, which the platform shim backs with nanosleep. */
 
@@ -1950,8 +1949,49 @@ static bool test_ctrl_queue_full_is_refused(void) {
     for (int i = 0; i < CTRL_QUEUE_MAX + 2; i++)
         ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), CTRL_QUEUE_MAX);
-    ASSERT_EQ_INT(buffer_queue_rejected(&st.queue), 2u);
+    /* Refused by the ctrl layer BEFORE a buffer is acquired, so the queue never sees the attempt:
+       a request naming several targets has to be checked against the room for all of them at once,
+       and refusing at the queue could only discover that half way through the fan-out. */
+    ASSERT_EQ_INT(buffer_queue_rejected(&st.queue), 0u);
     ASSERT_EQ_INT(st.stat_req_bad, 2u); /* each refusal answered, not dropped on the floor */
+    ctrl_test_drop(&st);
+    return true;
+}
+
+/* One request, several stations: the wire carries one station per DOWN frame, so the gateway has
+   to emit one per target -- and must refuse the lot if they will not all fit. */
+static bool test_ctrl_multiple_targets(void) {
+    ctrl_state_t st;
+    ctrl_test_state(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":[\"0x123\",\"0x456\",\"0x789\"]}");
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 3u); /* one frame each */
+    ASSERT_EQ_INT(st.stat_req_bad, 0u);
+    /* a repeated station is airtime for nothing, and a broadcast anywhere absorbs the rest */
+    ctrl_test_drop(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":[\"0x123\",\"0x123\"]}");
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
+    ctrl_test_drop(&st);
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":[\"0x123\",\"all\",\"0x456\"]}");
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
+    ctrl_test_drop(&st);
+    /* more targets than one request may name: refused, never truncated to what happens to fit */
+    char many[256] = "{\"cmd\":\"mesh-peers\",\"target\":[";
+    for (int i = 0; i < IOTDATA_CONTROL_TARGETS_MAX + 1; i++)
+        (void)snprintf(many + strlen(many), sizeof(many) - strlen(many), "%s\"0x%03X\"", i ? "," : "", 0x100 + i);
+    (void)snprintf(many + strlen(many), sizeof(many) - strlen(many), "]}");
+    ctrl_test_feed(&st, many);
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 0u);
+    ASSERT_EQ_INT(st.stat_req_bad, 1u);
+    /* and a list that FITS but the queue has no room for: also refused whole, nothing staged */
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x001\"}");
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
+    char full[256] = "{\"cmd\":\"mesh-peers\",\"target\":[";
+    for (int i = 0; i < IOTDATA_CONTROL_TARGETS_MAX; i++)
+        (void)snprintf(full + strlen(full), sizeof(full) - strlen(full), "%s\"0x%03X\"", i ? "," : "", 0x200 + i);
+    (void)snprintf(full + strlen(full), sizeof(full) - strlen(full), "]}");
+    ctrl_test_feed(&st, full);
+    ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u); /* still just the one */
+    ASSERT_EQ_INT(st.stat_req_bad, 2u);
     ctrl_test_drop(&st);
     return true;
 }
@@ -2515,6 +2555,7 @@ int main(void) {
     RUN_TEST(ctrl_target_defaults_to_broadcast);
     RUN_TEST(ctrl_requests_queue_in_order);
     RUN_TEST(ctrl_queue_full_is_refused);
+    RUN_TEST(ctrl_multiple_targets);
     RUN_TEST(ctrl_staged_command_expires);
 
     /* Every frame the suite built came from the pool, so every one must have come back. A leaked

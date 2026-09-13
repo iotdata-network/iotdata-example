@@ -35,7 +35,11 @@
 /* Staged commands waiting for the main loop. Bounded on purpose: they come out of the same pool
    the receive path draws from, so an operator hammering the request topic must not be able to
    starve it. A full queue is an answer ("busy"), not a silent overwrite. */
-#define CTRL_QUEUE_MAX    4
+/* At least IOTDATA_CONTROL_TARGETS_MAX: one request may name several stations and each becomes its
+   own DOWN frame, so a queue shorter than the target limit could never stage a full request. */
+#define CTRL_QUEUE_MAX    IOTDATA_CONTROL_TARGETS_MAX
+/* The largest CONTROL payload one command builds: `reports` is the widest, a flag per report type. */
+#define CTRL_PAYLOAD_MAX  32
 #define CTRL_QUEUE_TTL_MS 30000 /* a command nobody could send in 30s is stale, not queued */
 
 #define CTRL_TAG_CONTROL  1
@@ -178,28 +182,44 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
         const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
         const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
         if (c != NULL) {
-            const buffer_handle_t h = buffer_acquire(st->pool);
-            if (h != BUFFER_NONE) {
-                iotdata_kvr_t kv;
-                iotdata_kvr_init(&kv, buffer_data(st->pool, h), buffer_room(st->pool, h));
-                (void)iotdata_control_build(&kv, c, &args);
-                const size_t n = kv.overflow ? 0u : kv.len;
-                if (n > 0) {
-                    buffer_set_len(st->pool, h, (uint16_t)n);
+            /* Built ONCE: every target gets the same payload and differs only in where the DOWN
+               frame is addressed, so the fan-out is a copy per target rather than a rebuild. */
+            uint8_t built[CTRL_PAYLOAD_MAX];
+            iotdata_kvr_t kv;
+            iotdata_kvr_init(&kv, built, sizeof(built));
+            (void)iotdata_control_build(&kv, c, &args);
+            const size_t n = kv.overflow ? 0u : kv.len;
+            if (n > 0) {
+                /* Room for ALL of them, checked before any are staged: half a fan-out is worse
+                   than none, because nothing downstream can say which stations got it. */
+                if (args.targets_overflow) {
+                    ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "too many targets (at most %u)", (unsigned)IOTDATA_CONTROL_TARGETS_MAX));
+                    st->stat_req_bad++;
+                } else if (buffer_queue_count(&st->queue) + args.targets_count > CTRL_QUEUE_MAX) {
+                    ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "busy: %u staged, no room for %u more", (unsigned)buffer_queue_count(&st->queue), (unsigned)args.targets_count));
+                    st->stat_req_bad++;
+                } else {
                     const uint32_t now_ms = (uint32_t)__ticks_ms();
-                    if (buffer_queue_add(&st->queue, h, now_ms, now_ms + CTRL_QUEUE_TTL_MS, CTRL_TAG_CONTROL, args.target))
-                        PRINTF_INFO("ctrl: %s target=%04X station=%04X -> %zu byte control (staged %u)\n", cmd, (unsigned)args.target, (unsigned)args.station, n, (unsigned)buffer_queue_count(&st->queue));
+                    unsigned staged = 0;
+                    for (uint8_t i = 0; i < args.targets_count; i++) {
+                        const buffer_handle_t h = buffer_acquire(st->pool);
+                        if (h == BUFFER_NONE)
+                            break;
+                        (void)buffer_write(st->pool, h, built, (uint16_t)n);
+                        if (buffer_queue_add(&st->queue, h, now_ms, now_ms + CTRL_QUEUE_TTL_MS, CTRL_TAG_CONTROL, args.targets[i]))
+                            staged++;
+                        buffer_unref(st->pool, h);
+                    }
+                    if (staged == args.targets_count)
+                        PRINTF_INFO("ctrl: %s target=%04X%s station=%04X -> %zu byte control x%u (staged %u)\n", cmd, (unsigned)args.target, args.targets_count > 1 ? "+" : "", (unsigned)args.station, n, (unsigned)args.targets_count,
+                                    (unsigned)buffer_queue_count(&st->queue));
                     else {
-                        ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "busy: %u commands already staged", (unsigned)buffer_queue_count(&st->queue)));
+                        ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "staged %u of %u: no frame buffer", staged, (unsigned)args.targets_count));
                         st->stat_req_bad++;
                     }
-                } else {
-                    ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "payload would not fit (%zu bytes)", kv.len));
-                    st->stat_req_bad++;
                 }
-                buffer_unref(st->pool, h);
             } else {
-                ctrl_respond_error(st, cmd, "no frame buffer available");
+                ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "payload would not fit (%zu bytes)", kv.len));
                 st->stat_req_bad++;
             }
         } else {
