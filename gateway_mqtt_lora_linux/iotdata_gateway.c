@@ -141,7 +141,6 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #define BUFFER_LOCK_RELEASE(l) pthread_mutex_unlock(l)
 #include "d_module_buffers.h"
 
-/* No pins on a USB dongle. The driver takes these by name and ignores them when module == USB. */
 #define PIN_DEVICE_UART_TX  GPIO_NUM_NC
 #define PIN_DEVICE_UART_RX  GPIO_NUM_NC
 #define PIN_DEVICE_LORA_AUX GPIO_NUM_NC
@@ -196,10 +195,9 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_node_status.h"
 #include "iotdata_node_control.h"
 // config
-// diagnostics
-// content
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
-#include "iotdata_blackbox.h"
+#include "iotdata_node_diagnostics.h"
+// content
 #include "iotdata_station_filter.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

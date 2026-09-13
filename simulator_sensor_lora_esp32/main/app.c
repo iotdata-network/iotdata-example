@@ -106,76 +106,15 @@ static const lora_config_t lora_cfg = {
 #include "iotdata_node_status.h"
 #include "iotdata_node_control.h"
 // config
-// diagnostics
+#define IOTDATA_DIAGNOSTICS       IOTDATA_CONFIG_BLACKBOX
+#define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
+#define IOTDATA_BLACKBOX_IMPLEMENTATION
+static void sim_diagnostics_emit(const char *const line) {
+    ESP_LOGI(__tag_app, "%s", line);
+}
+#include "iotdata_node_diagnostics.h"
 // content
 #include "iotdata_node_endpoint.h"
-#if IOTDATA_CONFIG_BLACKBOX
-#ifndef IOTDATA_BLACKBOX_POOL_SZ
-#define IOTDATA_BLACKBOX_POOL_SZ 1024u
-#endif
-#if IOTDATA_CONFIG_BLACKBOX >= 2
-#define BLACKBOX_PERSIST BLACKBOX_PERSIST_ESP_FLASH
-#else
-#define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
-#endif
-#define IOTDATA_BLACKBOX_IMPLEMENTATION
-#include "iotdata_blackbox.h"
-static RTC_NOINIT_ATTR char blackbox_pool[IOTDATA_BLACKBOX_POOL_SZ];
-static blackbox_handle_t blackbox;
-static const blackbox_config_t blackbox_config = {
-    .pool = blackbox_pool,
-    .pool_sz = sizeof(blackbox_pool),
-    .flush = BLACKBOX_FLUSH_MANUAL, /* flushed explicitly after each event; a no-op under PERSIST_NONE */
-    .persist_arg = "diag",          /* ESP_FLASH: the partition label; ignored by PERSIST_NONE */
-    .enabled = true,                /* compiled in == collecting; the compile-time knob is the gate */
-};
-static bool blackbox_ready = false; /* init can fail, and the handle is then not safe to read */
-static void blackbox_start(const esp_reset_reason_t reason) {
-    iotdata_blackbox_begin();
-    if (blackbox_init(&blackbox, &blackbox_config) != 0) {
-        ESP_LOGW(__tag_app, "blackbox: init failed -- diagnostics disabled");
-        return;
-    }
-    blackbox_ready = true;
-    (void)iotdata_blackbox_lifecycle(&blackbox, IOTDATA_BB_LC_BOOT, (uint8_t)reason);
-    (void)blackbox_flush(&blackbox);
-}
-#define BLACKBOX_START(reason) blackbox_start((reason))
-#define BLACKBOX_EVENT(ev, reason) \
-    do { \
-        if (blackbox_ready) { \
-            (void)iotdata_blackbox_lifecycle(&blackbox, (ev), (uint8_t)(reason)); \
-            (void)blackbox_flush(&blackbox); \
-        } \
-    } while (0)
-
-static size_t sim_node_diag(size_t *const cursor, char *const out, const size_t outsize) {
-    if (!blackbox_ready)
-        return 0;
-    const int n = blackbox_pull(&blackbox, cursor, out, outsize);
-    return (n > 0) ? strlen(out) : 0;
-}
-static bool sim_node_control(const uint16_t station, const uint8_t key, const uint8_t *const val, const uint8_t vlen) {
-    if (!blackbox_ready)
-        return false;
-    switch (key) {
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE:
-        blackbox_enable(&blackbox, (vlen >= 1) ? (val[0] != 0u) : true);
-        ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " CONTROL - DIAGNOSTICS_ENABLE -> %s (this board's recorder)", station, ((vlen >= 1) ? (val[0] != 0u) : true) ? "true" : "false");
-        return true;
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR:
-        blackbox_clear(&blackbox);
-        ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " CONTROL - DIAGNOSTICS_CLEAR (this board's recorder)", station);
-        return true;
-    default:
-        return false;
-    }
-}
-static const uint8_t sim_node_control_keys[] = { IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE, IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR };
-#else
-#define BLACKBOX_START(reason)     ((void)0)
-#define BLACKBOX_EVENT(ev, reason) ((void)0)
-#endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -244,12 +183,10 @@ static const idep_config_t sim_cfg = {
     .caps = &s_caps,
     .status = sim_node_status,
     .tx = sim_node_tx,
-#if IOTDATA_CONFIG_BLACKBOX
-    .control = sim_node_control,
-    .control_keys = sim_node_control_keys,
-    .control_keys_count = (uint8_t)(sizeof(sim_node_control_keys) / sizeof(sim_node_control_keys[0])),
-    .diag = sim_node_diag,
-#endif
+    .control = IOTDATA_DIAGNOSTICS_CONTROL,
+    .control_keys = iotdata_diagnostics_control_keys,
+    .control_keys_count = IOTDATA_DIAGNOSTICS_CONTROL_KEYS_COUNT,
+    .diag = IOTDATA_DIAGNOSTICS_PULL,
     .receive_always = (SIMULATE_RECEIVE_ALWAYS != 0),
     .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
     .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
@@ -274,7 +211,7 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
                     ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " acted on a downstream command", sim_nodes[i].station_id);
                 if (reboot) {
                     ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " REBOOT commanded -- restarting", sim_nodes[i].station_id);
-                    BLACKBOX_EVENT(IOTDATA_BB_LC_STOP, 0);
+                    iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
                     __SLEEP_MS(200);
                     esp_restart();
                 }
@@ -325,30 +262,42 @@ static void transmit_packets(iotsim_t *const sim) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool app_exec(void) {
+void app_fail(void) {
+        ESP_LOGE(__tag_app, "failed");
+        iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
+        __SLEEP_MS(30 * 1000);
+        esp_restart();
+}
+
+bool app_init(void) {
 
     ESP_LOGI(__tag_app, "iotdata multi-sensor simulator transmitter");
-
+    iotdata_version_caps_init(&s_caps);
+    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
+    ESP_LOGI(__tag_app, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
+    if (!iotdata_version_stamp_is_real())
+        ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
-
-    BLACKBOX_START(reset_reason);
+    iotdata_diagnostics_emit_set(sim_diagnostics_emit);
+    if (!iotdata_diagnostics_begin((uint8_t)reset_reason, true))
+        ESP_LOGW(__tag_app, "diagnostics: the recorder did not start");
 
     /* --- Hardware init --- */
     esp_err_t lerr;
     if ((lerr = lora_setup(&lora_cfg)) != ESP_OK) {
         ESP_LOGE(__tag_app, "device: e22 setup failed: %s", esp_err_to_name(lerr));
-        BLACKBOX_EVENT(IOTDATA_BB_LC_ERROR, 2);
+        iotdata_diagnostics_event(IOTDATA_BB_LC_ERROR, 2);
         return false;
     }
     ESP_LOGI(__tag_app, "device: e22 configured");
     if ((lerr = lora_start()) != ESP_OK) {
         ESP_LOGE(__tag_app, "device: e22 start failed: %s", esp_err_to_name(lerr));
-        BLACKBOX_EVENT(IOTDATA_BB_LC_ERROR, 3);
+        iotdata_diagnostics_event(IOTDATA_BB_LC_ERROR, 3);
         return false;
     }
     ESP_LOGI(__tag_app, "device: e22 configured, transfer mode active");
-    BLACKBOX_EVENT(IOTDATA_BB_LC_START, 0);
+    iotdata_diagnostics_event(IOTDATA_BB_LC_START, 0);
 
     /* --- Simulator init --- Identity comes from the factory MAC so each board is
        unique AND stable across reboots: a per-board station_base (disjoint ID band)
@@ -360,8 +309,7 @@ bool app_exec(void) {
     const uint32_t seed = mac32 ? mac32 : 0xDEADBEEFU;
     const uint16_t nbands = (uint16_t)(IOTDATA_STATION_ASSIGNABLE_MAX / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS); /* 4094/8 = 511 */
     const uint16_t station_base = (uint16_t)((mac32 % nbands) * (uint32_t)IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
-    const uint32_t t0 = __MILLIS();
-    iotsim_init(&g_sim, seed, t0, station_base);
+    iotsim_init(&g_sim, seed, __MILLIS(), station_base);
     ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed,
              (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS));
     ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS, IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES, (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS / 1000),
@@ -376,8 +324,13 @@ bool app_exec(void) {
         ESP_LOGI(__tag_app, "node: receiver always on (no advertisement needed), per sensor");
     else
         ESP_LOGI(__tag_app, "node: receive window %us every %uh, per sensor", (unsigned)(IDEP_RECEIVE_WINDOW_MS / 1000), (unsigned)(IDEP_RECEIVE_EVERY_MS / 3600000u));
+    return true;
+}
 
-    /* --- Application loop --- */
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+bool app_exec(void) {
+    const uint32_t t0 = __MILLIS();
     uint32_t tx_count_last = 0, window_last_ms = __MILLIS();
     for (;;) {
         const uint32_t now = __MILLIS(), delta = now - window_last_ms;
@@ -387,27 +340,22 @@ bool app_exec(void) {
 
         transmit_packets(&g_sim);
         receive_packets(&g_sim);
+        (void)iotdata_diagnostics_pump(); /* drains a DUMP a chunk per pass, so the loop keeps time */
 
         if (tx_count >= tx_count_last + STATUS_EVERY_N_TX) {
             tx_count_last = tx_count;
             ESP_LOGI(__tag_app, "status: tx=%" PRIu32 " errors=%" PRIu32 " uptime=%" PRIu32 "s", tx_count, tx_errors, (__MILLIS() - t0) / 1000);
         }
-
         __SLEEP_MS(POLL_INTERVAL_MS);
     }
-
     return true;
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 void app_main(void) {
 
     setbuf(stdout, NULL);
-
-    iotdata_version_caps_init(&s_caps);
-    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
-    ESP_LOGI(__tag_app, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
-    if (!iotdata_version_stamp_is_real())
-        ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
 
     const esp_err_t wdt_err = esp_task_wdt_add(NULL);
     if (wdt_err != ESP_OK)
@@ -415,12 +363,8 @@ void app_main(void) {
     else
         ESP_LOGI(__tag_app, "task watchdog: subscribed (timeout=%ds)", CONFIG_ESP_TASK_WDT_TIMEOUT_S);
 
-    if (!app_exec()) {
-        ESP_LOGE(__tag_app, "failed");
-        BLACKBOX_EVENT(IOTDATA_BB_LC_STOP, 0);
-        __SLEEP_MS(30 * 1000);
-        esp_restart();
-    }
+    if (!app_init() || !app_exec()) 
+        app_fail();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

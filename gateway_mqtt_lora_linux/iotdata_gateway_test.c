@@ -92,7 +92,7 @@ static inline uint8_t rssi_raw_from_dbm(const int dbm) {
 
 #define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
-#include "iotdata_blackbox.h"
+#include "iotdata_node_diagnostics.h"
 
 typedef struct {
     blackbox_handle_t handle;

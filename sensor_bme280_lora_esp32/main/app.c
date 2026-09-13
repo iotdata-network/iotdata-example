@@ -21,9 +21,6 @@
  * Note that deep sleep takes the USB-Serial-JTAG console down with it, so a
  * board watched over USB drops and re-enumerates its serial port once a minute;
  * that is the sleep working, not a fault.
- *
- * Depends upon EBYTE E22 connector
- * https://github.com/matthewgream/e22900t22u
  */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -72,7 +69,6 @@
 
 #define TX_PERIOD_MS     IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
 #define TX_PERIOD_MIN_MS 1000                               /* floor, if a cycle overruns the period  */
-#define STARTUP_DELAY_MS (5 * 1000)                         /* cold boot only: let the USB console attach */
 #define CONSOLE_DRAIN_MS 100                                /* let the console flush before deep sleep    */
 #define PACKET_MAX       64                                 /* the packets built here are a dozen bytes   */
 
@@ -132,6 +128,8 @@ static const lora_config_t lora_cfg = {
 #define IOTDATA_NO_DUMP
 #define IOTDATA_NO_PRINT
 #define IOTDATA_NO_FLOATING
+#define IOTDATA_DIAGNOSTICS       IOTDATA_CONFIG_BLACKBOX
+#define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
 #include "iotdata.c"
 #include "iotdata_variant.h"
 #include "iotdata_node.h"
@@ -140,78 +138,13 @@ static const lora_config_t lora_cfg = {
 #include "iotdata_node_status.h"
 #include "iotdata_node_control.h"
 // config
-// diagnostics
+#define IOTDATA_BLACKBOX_IMPLEMENTATION
+static void sensor_diagnostics_emit(const char *const line) {
+    ESP_LOGI(__tag_app, "%s", line);
+}
+#include "iotdata_node_diagnostics.h"
 // content
 #include "iotdata_node_endpoint.h"
-#if IOTDATA_CONFIG_BLACKBOX
-#ifndef IOTDATA_BLACKBOX_POOL_SZ
-#define IOTDATA_BLACKBOX_POOL_SZ 1024u
-#endif
-#if IOTDATA_CONFIG_BLACKBOX >= 2
-#define BLACKBOX_PERSIST BLACKBOX_PERSIST_ESP_FLASH
-#else
-#define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
-#endif
-#define IOTDATA_BLACKBOX_IMPLEMENTATION
-#include "iotdata_blackbox.h"
-static RTC_NOINIT_ATTR char blackbox_pool[IOTDATA_BLACKBOX_POOL_SZ];
-static blackbox_handle_t blackbox;
-static const blackbox_config_t blackbox_config = {
-    .pool = blackbox_pool,
-    .pool_sz = sizeof(blackbox_pool),
-    .flush = BLACKBOX_FLUSH_MANUAL, /* flushed explicitly before sleep; a no-op under PERSIST_NONE */
-    .persist_arg = "diag",          /* ESP_FLASH: the partition label; ignored by PERSIST_NONE */
-    .enabled = true,                /* compiled in == collecting; the compile-time knob is the gate */
-};
-static bool blackbox_ready = false; /* init can fail, and the handle is then not safe to read */
-static void blackbox_start(const esp_reset_reason_t reason, const bool restarted) {
-    iotdata_blackbox_begin();
-    if (blackbox_init(&blackbox, &blackbox_config) != 0) {
-        ESP_LOGW(__tag_app, "blackbox: init failed -- diagnostics disabled");
-        return;
-    }
-    blackbox_ready = true;
-    (void)iotdata_blackbox_lifecycle(&blackbox, restarted ? IOTDATA_BB_LC_BOOT : IOTDATA_BB_LC_WAKE, (uint8_t)reason);
-}
-#define BLACKBOX_START(reason, restarted) blackbox_start((reason), (restarted))
-#define BLACKBOX_EVENT(ev, reason) \
-    do { \
-        if (blackbox_ready) \
-            (void)iotdata_blackbox_lifecycle(&blackbox, (ev), (uint8_t)(reason)); \
-    } while (0)
-#define BLACKBOX_FLUSH() \
-    do { \
-        if (blackbox_ready) \
-            (void)blackbox_flush(&blackbox); \
-    } while (0)
-static size_t sensor_node_diag(size_t *const cursor, char *const out, const size_t outsize) {
-    if (!blackbox_ready)
-        return 0;
-    const int n = blackbox_pull(&blackbox, cursor, out, outsize);
-    return (n > 0) ? strlen(out) : 0;
-}
-static bool sensor_node_control(const uint16_t station, const uint8_t key, const uint8_t *const val, const uint8_t vlen) {
-    if (!blackbox_ready)
-        return false;
-    switch (key) {
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE:
-        blackbox_enable(&blackbox, (vlen >= 1) ? (val[0] != 0u) : true);
-        ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " CONTROL - DIAGNOSTICS_ENABLE -> %s", station, ((vlen >= 1) ? (val[0] != 0u) : true) ? "true" : "false");
-        return true;
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR:
-        blackbox_clear(&blackbox);
-        ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " CONTROL - DIAGNOSTICS_CLEAR", station);
-        return true;
-    default:
-        return false;
-    }
-}
-static const uint8_t sensor_node_control_keys[] = { IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE, IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR };
-#else
-#define BLACKBOX_START(reason, restarted) ((void)0)
-#define BLACKBOX_EVENT(ev, reason)        ((void)0)
-#define BLACKBOX_FLUSH()                  ((void)0)
-#endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -225,7 +158,7 @@ typedef struct {
 
 static void sensor_node_status(const uint16_t station, iotdata_node_status_t *const out);
 static bool sensor_node_tx(const uint8_t *const packet, const size_t len);
-static void sensor_receive_window(void); /* defined below app_cycle, which opens it */
+static void sensor_receive_window(void); /* defined below app_exec, which opens it */
 
 static iotdata_version_caps_t s_caps;
 
@@ -233,12 +166,10 @@ static const idep_config_t idep_cfg = {
     .caps = &s_caps,
     .status = sensor_node_status,
     .tx = sensor_node_tx,
-#if IOTDATA_CONFIG_BLACKBOX
-    .control = sensor_node_control,
-    .control_keys = sensor_node_control_keys,
-    .control_keys_count = (uint8_t)(sizeof(sensor_node_control_keys) / sizeof(sensor_node_control_keys[0])),
-    .diag = sensor_node_diag,
-#endif
+    .control = IOTDATA_DIAGNOSTICS_CONTROL,
+    .control_keys = iotdata_diagnostics_control_keys,
+    .control_keys_count = IOTDATA_DIAGNOSTICS_CONTROL_KEYS_COUNT,
+    .diag = IOTDATA_DIAGNOSTICS_PULL,
     .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
     .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
 };
@@ -350,7 +281,6 @@ static void sensor_node_status(__attribute__((unused)) const uint16_t station, i
     out->has_heap = true;
     out->heap_free = (uint32_t)esp_get_free_heap_size();
     out->heap_min = (uint32_t)esp_get_minimum_free_heap_size();
-    /* a deep-sleeping sensor counts wake cycles, which is what a restart IS for it */
     out->has_restarts = true;
     out->restarts = (uint16_t)state.cycles;
     if (state.battery_present && state.battery_mv > 0) {
@@ -371,7 +301,7 @@ static void sensor_receive_window(void) {
     const uint32_t opened = (uint32_t)(esp_timer_get_time() / 1000);
     idep_window_begin(&idep_cfg, &state.node, opened);
     ESP_LOGI(__tag_app, "receive: window open for %ums (station=%" PRIu16 ")", (unsigned)IDEP_RECEIVE_WINDOW_MS, state.station_id);
-    BLACKBOX_EVENT(IOTDATA_BB_LC_WAKE, 0);
+    iotdata_diagnostics_event(IOTDATA_BB_LC_WAKE, 0);
     bool reboot = false;
     unsigned frames = 0, acted = 0;
     while (idep_window_active(&idep_cfg, &state.node, (uint32_t)(esp_timer_get_time() / 1000))) {
@@ -382,14 +312,15 @@ static void sensor_receive_window(void) {
             if (idep_on_frame(&idep_cfg, &state.node, buf, (size_t)len, &reboot))
                 acted++;
         }
-        __SLEEP_MS(10); /* yield and pat the watchdog: the window is long by MCU standards */
+        (void)iotdata_diagnostics_pump(); /* a DUMP that arrived in this window drains inside it */
+        __SLEEP_MS(10);                   /* yield and pat the watchdog: the window is long by MCU standards */
     }
     idep_window_end(&state.node);
     ESP_LOGI(__tag_app, "receive: window closed (%u frame(s) heard, %u for us)", frames, acted);
     if (reboot) {
         ESP_LOGW(__tag_app, "node: REBOOT commanded -- restarting");
-        BLACKBOX_EVENT(IOTDATA_BB_LC_STOP, 0);
-        BLACKBOX_FLUSH();
+        iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
+        iotdata_diagnostics_flush();
         __SLEEP_MS(CONSOLE_DRAIN_MS);
         esp_restart();
     }
@@ -398,7 +329,46 @@ static void sensor_receive_window(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool app_cycle(void) {
+void app_fail(void) {
+    ESP_LOGE(__tag_app, "failed");
+    iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
+    __SLEEP_MS(30 * 1000);
+    esp_restart();
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+bool app_init(void) {
+    iotdata_version_caps_init(&s_caps);
+    (void)iotdata_version_caps_add(&s_caps, IOTDATA_VERSION_CAP_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
+    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
+    ESP_LOGI(__tag_app, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
+    if (!iotdata_version_stamp_is_real())
+        ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
+
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    const bool restarted = (reset_reason != ESP_RST_DEEPSLEEP) || state.magic != STATE_MAGIC;
+
+    iotdata_diagnostics_emit_set(sensor_diagnostics_emit);
+    if (!iotdata_diagnostics_begin((uint8_t)reset_reason, restarted))
+        ESP_LOGW(__tag_app, "diagnostics: the recorder did not start");
+
+    if (restarted) {
+        ESP_LOGI(__tag_app, "iotdata bme280 lora sensor: %s variant, every %us", iotdata_vsuite_name(PACKET_VARIANT), (unsigned)(TX_PERIOD_MS / 1000));
+        ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
+#if defined(BENCH_BUSY_SLEEP)
+        ESP_LOGW(__tag_app, "boot: BENCH_BUSY_SLEEP -- NO DEEP SLEEP, DO NOT SHIP");
+#endif
+        state_reset();
+        state.battery_present = battery_probe();
+    }
+
+    return true;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+bool app_cycle(void) {
 
     uint8_t flags = 0;
     if (state.cycles == 0)
@@ -460,61 +430,49 @@ static bool app_cycle(void) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void app_sleep(const int64_t time_start_us) {
+void app_sleep(const int64_t time_start_us) {
 #define MAX_INT(a, b) ((a) > (b) ? (a) : (b))
     const int64_t awake_ms = (esp_timer_get_time() - time_start_us) / 1000;
     const int64_t sleep_ms = MAX_INT((int64_t)TX_PERIOD_MS - awake_ms - CONSOLE_DRAIN_MS, TX_PERIOD_MIN_MS);
-
     ESP_LOGI(__tag_app, "cycle %" PRIu32 " done: tx=%" PRIu32 " errors=%" PRIu32 " awake=%" PRId64 "ms, sleeping %" PRId64 "ms", state.cycles, state.tx_count, state.tx_errors, awake_ms, sleep_ms);
-
-    BLACKBOX_EVENT(IOTDATA_BB_LC_SLEEP, (uint8_t)(sleep_ms / 1000));
-    BLACKBOX_FLUSH();
-
+    iotdata_diagnostics_event(IOTDATA_BB_LC_SLEEP, iotdata_diagnostics_reason((uint32_t)(sleep_ms / 1000)));
+    iotdata_diagnostics_flush();
     __SLEEP_MS(CONSOLE_DRAIN_MS);
-
+#if defined(BENCH_BUSY_SLEEP)
+    __SLEEP_MS((uint32_t)sleep_ms);
+#else
     lora_hold();
-    esp_deep_sleep((uint64_t)sleep_ms * 1000);
+    esp_deep_sleep((uint64_t)sleep_ms * 1000); /* does not return */
+#endif
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+bool app_exec(void) {
+    const int64_t time_start_us = esp_timer_get_time();
+    for (int64_t time_cycle_us = time_start_us;; time_cycle_us = esp_timer_get_time()) {
+        if (!app_cycle())
+            iotdata_diagnostics_event(IOTDATA_BB_LC_ERROR, iotdata_diagnostics_reason(state.tx_errors));
+        state.cycles++;
+        app_sleep(time_cycle_us); // if deep sleep, will not return
+    }
+    return true;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void app_main(void) {
 
-    const int64_t time_start_us = esp_timer_get_time();
-
     setbuf(stdout, NULL);
 
-    iotdata_version_caps_init(&s_caps);
-    (void)iotdata_version_caps_add(&s_caps, IOTDATA_VERSION_CAP_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
-    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
-    ESP_LOGI(__tag_app, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
-    if (!iotdata_version_stamp_is_real())
-        ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
+    const esp_err_t wdt_err = esp_task_wdt_add(NULL);
+    if (wdt_err != ESP_OK)
+        ESP_LOGE(__tag_app, "task watchdog: subscribe failed: %s", esp_err_to_name(wdt_err));
+    else
+        ESP_LOGI(__tag_app, "task watchdog: subscribed (timeout=%ds)", CONFIG_ESP_TASK_WDT_TIMEOUT_S);
 
-    const esp_err_t err = esp_task_wdt_add(NULL);
-    if (err != ESP_OK)
-        ESP_LOGE(__tag_app, "task watchdog: subscribe failed: %s", esp_err_to_name(err));
-
-    const esp_reset_reason_t reset_reason = esp_reset_reason();
-    const bool restarted = (reset_reason != ESP_RST_DEEPSLEEP) || state.magic != STATE_MAGIC;
-
-    BLACKBOX_START(reset_reason, restarted);
-
-    if (restarted) {
-        ESP_LOGI(__tag_app, "iotdata bme280 lora sensor: %s variant, every %us", iotdata_vsuite_name(PACKET_VARIANT), (unsigned)(TX_PERIOD_MS / 1000));
-        ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
-        state_reset();
-        state.battery_present = battery_probe();
-        __SLEEP_MS(STARTUP_DELAY_MS);
-    }
-
-    if (!app_cycle()) {
-        ESP_LOGE(__tag_app, "cycle %" PRIu32 " incomplete", state.cycles);
-        BLACKBOX_EVENT(IOTDATA_BB_LC_ERROR, state.tx_errors);
-    }
-    state.cycles++;
-
-    app_sleep(time_start_us);
+    if (!app_init() || !app_exec())
+        app_fail();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
