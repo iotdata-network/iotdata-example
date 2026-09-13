@@ -390,10 +390,6 @@ void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
     cfg->listen_before_transmit = config_get_bool("lora-listen-before-transmit", true);
     /* Same key, same default as the read interval below: off also stops the module computing it. */
     cfg->rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT) > 0;
-    /* This host does not sleep, so the driver should not park the module for it: no sleep command,
-       no UART teardown between setup and start, and nothing issued in transparent mode at exit.
-       Not a config key -- it is a property of what a gateway is. See lora_config_t.host_sleeps. */
-    cfg->host_sleeps = false;
     cfg->rssi_packet = config_get_bool("lora-rssi-packet", true);
     _log_enabled = config_get_bool("lora-debug", false); /* app-side debug logging; the driver has no such flag */
 
