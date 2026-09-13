@@ -5,7 +5,7 @@
  * IoT Sensor Telemetry Protocol
  * Copyright(C) 2026 Matthew Gream (https://libiotdata.org)
  *
- * sensor_bme280_lora.c - BME280 weather sensor on esp32
+ * sensor_lora.c - BME280 weather sensor on esp32
  *
  * Reads a Bosch BME280 (temperature / pressure / humidity) over I2C, encodes
  * the reading as an iotdata packet using the "weather_station" variant,
@@ -71,11 +71,19 @@ static const char *__tag_app = "app";
 // TUNABLE
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define TX_PERIOD_MS        IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
-#define TX_PERIOD_MIN_MS    1000                               /* floor, if a cycle overruns the period  */
-#define CONSOLE_DRAIN_MS    100                                /* let the console flush before deep sleep    */
-#define PACKET_MAX          64                                 /* the packets built here are a dozen bytes   */
-#define PACKET_VARIANT      IOTDATA_VSUITE_WEATHER_STATION
+#define TX_PERIOD_MS         IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
+#define TX_PERIOD_MIN_MS     1000                               /* floor, if a cycle overruns the period  */
+#define CONSOLE_DRAIN_MS     100                                /* let the console flush before deep sleep    */
+#define PACKET_MAX           64                                 /* the packets built here are a dozen bytes   */
+#define PACKET_VARIANT       IOTDATA_VSUITE_WEATHER_STATION
+
+/* SOLAR carries irradiance in W/m2; the LTR390 reports lux. There is no exact conversion -- the
+   ratio is a property of the SPECTRUM -- and 126.7 lux per W/m2 is the standard luminous efficacy
+   of daylight. That is the only light an outdoor station sees, so the figure is right for this
+   sensor in this application and meaningless under artificial light. */
+#define LUX_PER_WM2_DAYLIGHT 126.7f
+#define SOLAR_IRRADIANCE_MAX 1023.0f /* the field is 10 bits */
+#define SOLAR_UV_INDEX_MAX   15.0f   /* the field is 4 bits  */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // HARDWARE
@@ -87,13 +95,13 @@ static const char *__tag_app = "app";
 // (C) VCC -> (1) VCC + (5) CSB
 // (D) GND -> (2) GND + (6) SD0
 
-#define PIN_DEVICE_UART_TX  PIN_E22_RXD
-#define PIN_DEVICE_UART_RX  PIN_E22_TXD
-#define PIN_DEVICE_LORA_AUX PIN_E22_AUX
-#define PIN_DEVICE_LORA_M0  PIN_E22_M0
-#define PIN_DEVICE_LORA_M1  PIN_E22_M1
-#define PIN_DEVICE_I2C_SDA  PIN_BME280_SDA
-#define PIN_DEVICE_I2C_SCL  PIN_BME280_SCL
+#define PIN_DEVICE_UART_TX   PIN_E22_RXD
+#define PIN_DEVICE_UART_RX   PIN_E22_TXD
+#define PIN_DEVICE_LORA_AUX  PIN_E22_AUX
+#define PIN_DEVICE_LORA_M0   PIN_E22_M0
+#define PIN_DEVICE_LORA_M1   PIN_E22_M1
+#define PIN_DEVICE_I2C_SDA   PIN_I2C_SDA
+#define PIN_DEVICE_I2C_SCL   PIN_I2C_SCL
 
 #include "d_platform_esp32.h"
 #include "d_common.h"
@@ -104,6 +112,7 @@ static const char *__tag_app = "app";
 #include "d_hardware_i2c.h"
 #include "d_interface_e22900t22.h"
 #include "d_interface_bme280.h"
+#include "d_interface_ltr390.h"
 #include "d_interface_batt.h"
 
 static const lora_config_t lora_cfg = {
@@ -181,16 +190,17 @@ static const idep_config_t idep_cfg = {
 
 typedef struct {
     uint32_t magic;
-    uint16_t station_id;    /* derived from the factory MAC: stable per board  */
-    uint16_t sequence;      /* rolling packet counter, skips the reserved 0xFFFF */
-    idep_node_t node;       /* node personality: sequence, receive window, stats */
-    uint32_t cycles;        /* wake cycles since the last restart              */
-    uint32_t tx_count;      /* packets transmitted                             */
-    uint32_t tx_errors;     /* packets the radio would not take                */
-    int16_t battery_mv;     /* last reading, for the charging trend bit        */
-    bool radio_configured;  /* E22 NVM configuration verified this power cycle */
-    bool sensor_calibrated; /* bme280_setup succeeded this power cycle         */
-    bool battery_present;   /* a divider answered the probe at restart         */
+    uint16_t station_id;  /* derived from the factory MAC: stable per board  */
+    uint16_t sequence;    /* rolling packet counter, skips the reserved 0xFFFF */
+    idep_node_t node;     /* node personality: sequence, receive window, stats */
+    uint32_t cycles;      /* wake cycles since the last restart              */
+    uint32_t tx_count;    /* packets transmitted                             */
+    uint32_t tx_errors;   /* packets the radio would not take                */
+    int16_t battery_mv;   /* last reading, for the charging trend bit        */
+    bool lora_present;    /* E22 NVM configuration verified this power cycle */
+    bool bme280_present;  /* bme280_setup succeeded this power cycle         */
+    bool ltr390_present;  /* ltr390_setup succeeded this power cycle         */
+    bool battery_present; /* a divider answered the probe at restart         */
 } state_t;
 
 static RTC_NOINIT_ATTR state_t state;
@@ -302,7 +312,8 @@ typedef struct {
     size_t len;
 } packet_t;
 
-static bool packet_build(packet_t *const out, const uint16_t station, const uint16_t sequence, const bme280_reading_t *const reading, const battery_reading_t *const battery, uint8_t flags, const bool advertise_receive) {
+static bool packet_build(packet_t *const out, const uint16_t station, const uint16_t sequence, const bme280_reading_t *const reading_environment, const ltr390_reading_t *const reading_ltr390, const battery_reading_t *const battery,
+                         uint8_t flags, const bool advertise_receive) {
 
     static iotdata_encoder_t enc;
 
@@ -315,12 +326,22 @@ static bool packet_build(packet_t *const out, const uint16_t station, const uint
     if (battery != NULL && (rc = iotdata_encode_battery(&enc, battery->percent, battery->charging)) != IOTDATA_OK)
         ESP_LOGW(__tag_app, "encode_battery: %s", iotdata_strerror(rc));
 
-    if (reading != NULL) {
-        const iotdata_float_t temperature_c100 = (iotdata_float_t)lroundf(reading->temperature_c * 100.0f);
-        const uint16_t pressure_hpa = (uint16_t)lroundf(reading->pressure_hpa);
-        const uint8_t humidity_pct = (uint8_t)lroundf(reading->humidity_pct);
+    if (reading_environment != NULL) {
+        const iotdata_float_t temperature_c100 = (iotdata_float_t)lroundf(reading_environment->temperature_c * 100.0f);
+        const uint16_t pressure_hpa = (uint16_t)lroundf(reading_environment->pressure_hpa);
+        const uint8_t humidity_pct = (uint8_t)lroundf(reading_environment->humidity_pct);
         if ((rc = iotdata_encode_environment(&enc, temperature_c100, pressure_hpa, humidity_pct)) != IOTDATA_OK) {
             ESP_LOGW(__tag_app, "encode_environment: %s", iotdata_strerror(rc));
+            flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
+        }
+    }
+
+    if (reading_ltr390 != NULL) {
+        const float wm2 = reading_ltr390->lux / LUX_PER_WM2_DAYLIGHT;
+        const uint16_t irradiance_wm2 = (uint16_t)lroundf(wm2 < 0.0f ? 0.0f : (wm2 > SOLAR_IRRADIANCE_MAX ? SOLAR_IRRADIANCE_MAX : wm2));
+        const uint8_t uv_index = (uint8_t)lroundf(reading_ltr390->uvi < 0.0f ? 0.0f : (reading_ltr390->uvi > SOLAR_UV_INDEX_MAX ? SOLAR_UV_INDEX_MAX : reading_ltr390->uvi));
+        if ((rc = iotdata_encode_solar(&enc, irradiance_wm2, uv_index)) != IOTDATA_OK) {
+            ESP_LOGW(__tag_app, "encode_solar: %s", iotdata_strerror(rc));
             flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
         }
     }
@@ -366,7 +387,7 @@ bool app_init(void) {
         ESP_LOGW(__tag_app, "diagnostics: the recorder did not start");
 
     if (restarted) {
-        ESP_LOGI(__tag_app, "iotdata bme280 lora sensor: %s variant, every %us", iotdata_vsuite_name(PACKET_VARIANT), (unsigned)(TX_PERIOD_MS / 1000));
+        ESP_LOGI(__tag_app, "iotdata bme280/ltr390 lora sensor: %s variant, every %us", iotdata_vsuite_name(PACKET_VARIANT), (unsigned)(TX_PERIOD_MS / 1000));
         ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
 #if defined(BENCH_BUSY_SLEEP)
         ESP_LOGW(__tag_app, "boot: BENCH_BUSY_SLEEP -- NO DEEP SLEEP, DO NOT SHIP");
@@ -386,47 +407,76 @@ bool app_cycle(void) {
     if (state.cycles == 0)
         flags |= (uint8_t)(1U << VSUITE_FLAG_RESTART_RECENT);
 
-    /* --- sensor --- */
-    bme280_reading_t reading;
-    bool measured = false;
-    if (!state.sensor_calibrated)
-        state.sensor_calibrated = bme280_setup(&bme280_config_default) == ESP_OK;
-    if (state.sensor_calibrated && bme280_start() == ESP_OK) {
-        measured = bme280_read(&reading, 0, NULL) == ESP_OK;
-        (void)bme280_stop();
+    /* --- sensor: bme280 (enviro) ---  */
+    if (!state.bme280_present) {
+        state.bme280_present = (bme280_setup(&bme280_config_default) == ESP_OK);
+        if (!state.bme280_present && state.cycles == 0)
+            bme280_diagnose();
     }
+    bme280_reading_t reading_bme280_, *reading_bme280 = NULL;
+    if (state.bme280_present) {
+        if (bme280_start() == ESP_OK) {
+            reading_bme280 = bme280_read(&reading_bme280_, 0, NULL) == ESP_OK ? &reading_bme280_ : NULL;
+            (void)bme280_stop();
+        }
+        if (!reading_bme280) {
+            ESP_LOGE(__tag_app, "bme280: detected, but no reading this cycle");
+            flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
+        }
+    }
+
+    /* --- sensor: ltr390 (solar) ---  */
+    if (!state.ltr390_present) {
+        state.ltr390_present = (ltr390_setup(&ltr390_config_default) == ESP_OK);
+        if (!state.ltr390_present && state.cycles == 0)
+            ltr390_diagnose();
+    }
+    ltr390_reading_t reading_ltr390_, *reading_ltr390 = NULL;
+    if (state.ltr390_present) {
+        if (ltr390_start() == ESP_OK) {
+            reading_ltr390 = ltr390_read(&reading_ltr390_, 0, NULL) == ESP_OK ? &reading_ltr390_ : NULL;
+            (void)ltr390_stop();
+        }
+        if (!reading_ltr390) {
+            ESP_LOGE(__tag_app, "ltr390: detected, but no reading this cycle");
+            flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
+        }
+    }
+
+    const bool measured = reading_bme280 != NULL || reading_ltr390 != NULL;
     if (!measured) {
-        ESP_LOGE(__tag_app, "sensor: no reading this cycle");
+        ESP_LOGE(__tag_app, "sensors: nothing answered this cycle");
         flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
     }
 
     /* --- battery --- */
-    battery_reading_t battery = { 0 };
-    bool powered = false;
+    battery_reading_t reading_battery_ = { 0 }, *reading_battery = NULL;
     if (state.battery_present) {
         if (battery_begin())
-            powered = battery_read(&battery, &state.battery_mv);
+            reading_battery = battery_read(&reading_battery_, &state.battery_mv) ? &reading_battery_ : NULL;
         battery_end();
-        if (!powered) {
+        if (!reading_battery) {
             ESP_LOGE(__tag_app, "battery: no reading this cycle");
             flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
-        } else if (battery.percent <= BATTERY_PCT_LOW)
-            flags |= (uint8_t)(1U << VSUITE_FLAG_BATTERY_DRAINING);
+        } else {
+            if (reading_battery->percent <= BATTERY_PCT_LOW)
+                flags |= (uint8_t)(1U << VSUITE_FLAG_BATTERY_DRAINING);
+        }
     }
 
     /* --- packet --- */
     packet_t packet;
     const bool advertise = idep_window_advance(&idep_cfg, &state.node, TX_PERIOD_MS);
-    if (!packet_build(&packet, state.station_id, state.sequence, measured ? &reading : NULL, powered ? &battery : NULL, flags, advertise))
+    if (!packet_build(&packet, state.station_id, state.sequence, reading_bme280, reading_ltr390, reading_battery, flags, advertise))
         return false;
     ESP_LOGI(__tag_app, "packet: variant=%s station=%" PRIu16 " sequence=%" PRIu16 " flags=0x%02" PRIX8 "%s", iotdata_vsuite_name(PACKET_VARIANT), state.station_id, state.sequence, flags, advertise ? " +receive" : "");
     state.sequence = iotdata_sequence_next(state.sequence);
 
     /* --- radio --- */
     bool transmitted = false;
-    if (!state.radio_configured)
-        state.radio_configured = lora_setup(&lora_cfg) == ESP_OK;
-    if (state.radio_configured && lora_start() == ESP_OK) {
+    if (!state.lora_present)
+        state.lora_present = lora_setup(&lora_cfg) == ESP_OK;
+    if (state.lora_present && lora_start() == ESP_OK) {
         transmitted = lora_write_complete(packet.buf, packet.len, /*wait_complete=*/true) == ESP_OK;
         if (transmitted && advertise)
             sensor_node_receive();

@@ -11,12 +11,12 @@ IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_
 ##
 
 PLATFORM = esp32c3
-NAME     = sensor-bme280
+NAME     = sensor
 VERSION  = 0.9.9
 
 ##
 
-BENCH_BUSY_SLEEP ?=
+BENCH_BUSY_SLEEP ?= 1
 
 ##
 

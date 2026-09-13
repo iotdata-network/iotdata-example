@@ -5,7 +5,7 @@
  * IoT Sensor Telemetry Protocol
  * Copyright(C) 2026 Matthew Gream (https://libiotdata.org)
  *
- * simulator_sensor_lora_esp32 - multi-sensor simulator on esp32
+ * simulator_lora_esp32 - multi-sensor simulator on esp32
  *
  * Simulates multiple sensors (a per-board palette of the variant suite, MAC-seeded so a fleet spreads the suite out) and transmits
  * iotdata-encoded packets via the E22 LoRa radio module at randomised intervals.
