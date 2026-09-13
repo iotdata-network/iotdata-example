@@ -87,6 +87,7 @@ static inline uint8_t rssi_raw_from_dbm(const int dbm) {
 #include "iotdata_down.h"
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
+#include "iotdata_node_status.h"
 #include "iotdata_node_control.h"
 
 #define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE

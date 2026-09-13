@@ -193,8 +193,8 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
 // variant
+#include "iotdata_node_status.h"
 #include "iotdata_node_control.h"
-// status
 // config
 // diagnostics
 // content

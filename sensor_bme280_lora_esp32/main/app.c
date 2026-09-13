@@ -137,8 +137,8 @@ static const lora_config_t lora_cfg = {
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
 // variant
+#include "iotdata_node_status.h"
 #include "iotdata_node_control.h"
-// status
 // config
 // diagnostics
 // content
@@ -223,7 +223,7 @@ typedef struct {
     size_t len;
 } packet_t;
 
-static void sensor_node_status(const uint16_t station, iotdata_kvr_t *const kv);
+static void sensor_node_status(const uint16_t station, iotdata_node_status_t *const out);
 static bool sensor_node_tx(const uint8_t *const packet, const size_t len);
 static void sensor_receive_window(void); /* defined below app_cycle, which opens it */
 
@@ -344,19 +344,28 @@ static uint8_t sensor_node_reason(void) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void sensor_node_status(__attribute__((unused)) const uint16_t station, iotdata_kvr_t *const kv) {
-    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_UPTIME, (uint32_t)(esp_timer_get_time() / 1000000));
-    iotdata_kvr_add_u8(kv, IOTDATA_NODE_STATUS_REASON, sensor_node_reason());
-    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_HEAP_FREE, (uint32_t)esp_get_free_heap_size());
-    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_HEAP_MIN, (uint32_t)esp_get_minimum_free_heap_size());
-    iotdata_kvr_add_u16(kv, IOTDATA_NODE_STATUS_RESTARTS, (uint16_t)state.cycles);
-    if (state.battery_present && state.battery_mv > 0)
-        iotdata_kvr_add_u16(kv, IOTDATA_NODE_STATUS_SUPPLY, (uint16_t)state.battery_mv);
+static void sensor_node_status(__attribute__((unused)) const uint16_t station, iotdata_node_status_t *const out) {
+    out->uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    out->reason = sensor_node_reason();
+    out->has_heap = true;
+    out->heap_free = (uint32_t)esp_get_free_heap_size();
+    out->heap_min = (uint32_t)esp_get_minimum_free_heap_size();
+    /* a deep-sleeping sensor counts wake cycles, which is what a restart IS for it */
+    out->has_restarts = true;
+    out->restarts = (uint16_t)state.cycles;
+    if (state.battery_present && state.battery_mv > 0) {
+        out->has_supply = true;
+        out->supply_mv = (uint16_t)state.battery_mv;
+    }
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool sensor_node_tx(const uint8_t *const packet, const size_t len) {
     return lora_write_complete(packet, len, /*wait_complete=*/true) == ESP_OK;
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void sensor_receive_window(void) {
     const uint32_t opened = (uint32_t)(esp_timer_get_time() / 1000);

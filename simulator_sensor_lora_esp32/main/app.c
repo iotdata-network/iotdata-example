@@ -103,8 +103,8 @@ static const lora_config_t lora_cfg = {
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
 // variant
+#include "iotdata_node_status.h"
 #include "iotdata_node_control.h"
-// status
 // config
 // diagnostics
 // content
@@ -198,15 +198,19 @@ static uint32_t tx_count = 0, tx_errors = 0;
 static iotsim_t g_sim;
 static idep_node_t sim_nodes[IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS];
 
-static void sim_node_status(const uint16_t station, iotdata_kvr_t *const kv) {
-    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_UPTIME, (uint32_t)(__MILLIS() / 1000));
-    iotdata_kvr_add_u8(kv, IOTDATA_NODE_STATUS_REASON, IOTDATA_NODE_REASON_UNKNOWN);
-    iotdata_kvr_add_u32(kv, IOTDATA_NODE_STATUS_HEAP_FREE, (uint32_t)esp_get_free_heap_size());
+static void sim_node_status(const uint16_t station, iotdata_node_status_t *const out) {
+    out->uptime_s = (uint32_t)(__MILLIS() / 1000);
+    out->reason = IOTDATA_NODE_REASON_UNKNOWN;
+    out->has_heap = true;
+    out->heap_free = (uint32_t)esp_get_free_heap_size();
+    out->heap_min = (uint32_t)esp_get_minimum_free_heap_size();
     for (int i = 0; i < (int)(sizeof(sim_nodes) / sizeof(sim_nodes[0])); i++)
         if (sim_nodes[i].station_id == station) {
             const iotsim_sensor_t *const s = iotsim_sensor(&g_sim, i);
-            if (s != NULL)
-                iotdata_kvr_add_u16(kv, IOTDATA_NODE_STATUS_SUPPLY, (uint16_t)(s->battery * 30u)); /* % -> a plausible mV */
+            if (s != NULL) {
+                out->has_supply = true;
+                out->supply_mv = (uint16_t)(s->battery * 30u); /* % -> a plausible mV */
+            }
             break;
         }
 }

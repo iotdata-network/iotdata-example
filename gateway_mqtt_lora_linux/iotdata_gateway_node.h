@@ -102,21 +102,16 @@ static int node_build_control(const node_state_t *st, uint8_t *buf, const size_t
     return iotdata_control_pack(&kv, &(const iotdata_control_report_t){ .tables = st->table_count != NULL, .keys = st->control_keys, .keys_count = st->control_keys_count });
 }
 
-/* `scope` is the STATUS_REQUEST value: which groups to report, 0 (absent) meaning all of them. */
 static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t size, const uint8_t scope) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
-    if (iotdata_node_status_scope_wants(scope, IOTDATA_NODE_STATUS_SCOPE_NODE)) {
-        iotdata_kvr_add_u32(&kv, IOTDATA_NODE_STATUS_UPTIME, st->stat->start_time > 0 ? (uint32_t)(time(NULL) - st->stat->start_time) : 0);
-        iotdata_kvr_add_u8(&kv, IOTDATA_NODE_STATUS_REASON, IOTDATA_NODE_REASON_UNKNOWN);
-    }
-    if (iotdata_node_status_scope_wants(scope, IOTDATA_NODE_STATUS_SCOPE_MESH) && st->status_mesh != NULL) {
-        iotdata_node_status_mesh_t m;
-        memset(&m, 0, sizeof(m));
-        st->status_mesh(&m);
-        iotdata_node_status_mesh_emit(&kv, &m); /* a no-op unless .present */
-    }
-    return kv.overflow ? -1 : (int)kv.len;
+    iotdata_node_status_t s;
+    memset(&s, 0, sizeof(s));
+    s.uptime_s = st->stat->start_time > 0 ? (uint32_t)(time(NULL) - st->stat->start_time) : 0;
+    s.reason = IOTDATA_NODE_REASON_UNKNOWN;
+    if (st->status_mesh != NULL)
+        st->status_mesh(&s.mesh);
+    return iotdata_status_pack(&kv, &s, scope);
 }
 
 static int node_build_config(const node_state_t *st, uint8_t *buf, const size_t size) {
@@ -289,6 +284,8 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
             name = snprintf_inline(namebuf, sizeof(namebuf), "0x%02X", key);
         const uint8_t width = iotdata_node_tlv_key_width(type, key);
         if (type == IOTDATA_NODE_TLV_VERSION && iotdata_version_json_key(obj, name, key, val, vlen))
+            continue;
+        if (type == IOTDATA_NODE_TLV_STATUS && iotdata_status_json_key(obj, name, key, val, vlen))
             continue;
         if (width == 1 && vlen == 1)
             cJSON_AddNumberToObject(obj, name, (double)val[0]);
