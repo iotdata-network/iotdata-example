@@ -149,26 +149,6 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 
 #include "d_interface_e22900t22.h"
 
-/*
- * raw RSSI byte -> dBm. Was get_rssi_dbm() in the depend core; kept here because the stat layer
- * stores the raw byte and converts on output, and the conversion is a pure offset so there is no
- * reason to disturb that. Carried over verbatim, comment included, because it is hard-won:
- *
- *   Both the DIP and USB datasheets specify the *channel RSSI register* formula (DIP: -(256-rssi),
- *   USB: -RSSI/2) but are silent on the per-packet RSSI byte. Empirically the USB packet RSSI is
- *   -(256-rssi), matching the DIP: same SX1262 silicon, so the byte is encoded identically. The
- *   USB "-RSSI/2" is treated as a datasheet error and -(256-rssi) is used wholesale for both
- *   modules / both cases (verified against reciprocity: co-located gateway<->relay links agree).
- */
-static inline int get_rssi_dbm(const uint8_t rssi) {
-    return -(256 - (int)rssi);
-}
-
-/* dBm back to the raw byte, for handing the driver's output to the stat layer unchanged. */
-static inline uint8_t rssi_raw_from_dbm(const int dbm) {
-    return (uint8_t)(dbm + 256);
-}
-
 /* The transmit hook the node/mesh/ctrl layers take: bool(const uint8_t *, int). */
 static bool lora_packet_write(const uint8_t *const packet, const int length) {
     return length > 0 && lora_write(packet, (size_t)length) == ESP_OK;

@@ -64,12 +64,7 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #define PIN_DEVICE_LORA_M1  GPIO_NUM_NC
 #include "d_interface_e22900t22.h"
 
-static inline int get_rssi_dbm(const uint8_t rssi) {
-    return -(256 - (int)rssi);
-}
-static inline uint8_t rssi_raw_from_dbm(const int dbm) {
-    return (uint8_t)(dbm + 256);
-}
+
 /* __sleep_ms was the depend core's delay callback; the common driver uses hw_delay_ms_yieldable
    from d_common.h, which the platform shim backs with nanosleep. */
 

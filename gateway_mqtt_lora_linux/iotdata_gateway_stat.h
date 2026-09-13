@@ -93,12 +93,11 @@ typedef struct {
     uint32_t rx_mesh_unexpected; /* mesh-variant packets received while mesh is disabled */
     uint16_t rx_size_min;
     uint16_t rx_size_max;
-    /* rssi (raw e22 0-255, converted via get_rssi_dbm on read) */
-    uint8_t rssi_packet_ema;
+    int16_t rssi_packet_ema;
     uint32_t rssi_packet_cnt;
     uint32_t rssi_packet_err;
     time_t rssi_packet_last_time;
-    uint8_t rssi_channel_ema;
+    int16_t rssi_channel_ema;
     uint32_t rssi_channel_cnt;
     uint32_t rssi_channel_err;
     time_t rssi_channel_last_time;
@@ -221,14 +220,14 @@ void stat_on_link_rx_mesh_unexpected(stat_state_t *s, uint16_t station_id) {
     s->link.rx_mesh_unexpected++;
     stat_station_find_or_create(s, station_id, time(NULL))->stat_mesh_unexpected++;
 }
-void stat_on_link_rssi_packet(stat_state_t *s, uint8_t raw) {
-    ema_update_timed(raw, &s->link.rssi_packet_ema, &s->link.rssi_packet_cnt, &s->link.rssi_packet_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
+void stat_on_link_rssi_packet(stat_state_t *s, int dbm) {
+    ema_update_timed((int16_t)dbm, &s->link.rssi_packet_ema, &s->link.rssi_packet_cnt, &s->link.rssi_packet_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
 }
 void stat_on_link_rssi_packet_error(stat_state_t *s) {
     s->link.rssi_packet_err++;
 }
-void stat_on_link_rssi_channel(stat_state_t *s, uint8_t raw) {
-    ema_update_timed(raw, &s->link.rssi_channel_ema, &s->link.rssi_channel_cnt, &s->link.rssi_channel_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
+void stat_on_link_rssi_channel(stat_state_t *s, int dbm) {
+    ema_update_timed((int16_t)dbm, &s->link.rssi_channel_ema, &s->link.rssi_channel_cnt, &s->link.rssi_channel_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
 }
 void stat_on_link_rssi_channel_error(stat_state_t *s) {
     s->link.rssi_channel_err++;
@@ -379,10 +378,10 @@ cJSON *stat_build_links_json(const stat_state_t *const s, const time_t now, cons
         cJSON_AddNumberToObject(config, "packet_rate_bps", (double)s->link.packet_rate_bps);
         cJSON_AddNumberToObject(config, "transmit_power_dbm", (double)s->link.transmit_power_dbm);
         cJSON *rssi = cJSON_AddObjectToObject(link, "rssi");
-        cJSON_AddNumberToObject(rssi, "packet_dbm", (double)get_rssi_dbm(s->link.rssi_packet_ema));
+        cJSON_AddNumberToObject(rssi, "packet_dbm", (double)s->link.rssi_packet_ema);
         cJSON_AddNumberToObject(rssi, "packet_samples", (double)s->link.rssi_packet_cnt);
         cJSON_AddNumberToObject(rssi, "packet_errors", (double)s->link.rssi_packet_err);
-        cJSON_AddNumberToObject(rssi, "channel_dbm", (double)get_rssi_dbm(s->link.rssi_channel_ema));
+        cJSON_AddNumberToObject(rssi, "channel_dbm", (double)s->link.rssi_channel_ema);
         cJSON_AddNumberToObject(rssi, "channel_samples", (double)s->link.rssi_channel_cnt);
         cJSON_AddNumberToObject(rssi, "channel_errors", (double)s->link.rssi_channel_err);
         cJSON *rx = cJSON_AddObjectToObject(link, "rx");
@@ -597,11 +596,11 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
     if (s->link.rssi_channel_cnt > 0 || s->link.rssi_packet_cnt > 0) {
         STAT_APPEND(", rssi{");
         if (s->link.rssi_channel_cnt > 0)
-            STAT_APPEND("channel=%d dBm (%" PRIu32 ")", get_rssi_dbm(s->link.rssi_channel_ema), s->link.rssi_channel_cnt);
+            STAT_APPEND("channel=%d dBm (%" PRIu32 ")", s->link.rssi_channel_ema, s->link.rssi_channel_cnt);
         if (s->link.rssi_channel_cnt > 0 && s->link.rssi_packet_cnt > 0)
             STAT_APPEND(", ");
         if (s->link.rssi_packet_cnt > 0)
-            STAT_APPEND("packet=%d dBm (%" PRIu32 ")", get_rssi_dbm(s->link.rssi_packet_ema), s->link.rssi_packet_cnt);
+            STAT_APPEND("packet=%d dBm (%" PRIu32 ")", s->link.rssi_packet_ema, s->link.rssi_packet_cnt);
         STAT_APPEND("}");
     }
     if (mesh && mesh->enabled) {

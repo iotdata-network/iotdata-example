@@ -43,7 +43,7 @@ bool ddup_check_sensor_packet(process_state_t *st, uint16_t station_id, uint16_t
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-// packet_rssi is the raw byte the radio appends to each received packet; 0 means the radio did
+// packet_rssi_dbm is dBm as the driver reports it; LORA_RSSI_NONE means the radio did
 // not supply one (RSSI capture off, or a mesh-relayed packet that this gateway never heard over
 // the air). It is a property of THIS hop's reception, not of the sensor, hence 'rssi_packet'.
 /*
@@ -74,7 +74,7 @@ static bool process_packet_decodes(process_state_t *const st, const uint8_t *con
     return iotdata_decode(buf, (size_t)len, &st->_iotdata_dec) == IOTDATA_OK;
 }
 
-void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, const char *via, uint8_t packet_rssi) {
+void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, int packet_length, uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, const char *via, int packet_rssi_dbm) {
     // Network-table tracking (per-path counts, dups, sequence gaps) is done by the caller at the
     // dedup point (netw_note_receive), so it also sees suppressed duplicates — which never reach here.
     const iotdata_variant_def_t *vdef;
@@ -97,8 +97,8 @@ void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, in
     // Keeping it out of the codec means every variant gains the field for free and none of them
     // has to carry a field that only a gateway can know.
     const char *payload = json;
-    if (st->capture_rssi_packet && packet_rssi > 0 && json[0] == '{') {
-        const int n = snprintf(st->_buffer_mqtt_message, sizeof(st->_buffer_mqtt_message), "{\"rssi_packet\":%d,%s", get_rssi_dbm(packet_rssi), json + 1);
+    if (st->capture_rssi_packet && packet_rssi_dbm != LORA_RSSI_NONE && json[0] == '{') {
+        const int n = snprintf(st->_buffer_mqtt_message, sizeof(st->_buffer_mqtt_message), "{\"rssi_packet\":%d,%s", packet_rssi_dbm, json + 1);
         if (n > 0 && n < (int)sizeof(st->_buffer_mqtt_message))
             payload = st->_buffer_mqtt_message;
         else
@@ -116,7 +116,7 @@ void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, in
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int packet_length, __attribute__((unused)) uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, uint8_t packet_rssi) {
+void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int packet_length, __attribute__((unused)) uint8_t variant_id, uint16_t station_id, uint16_t sequence, const char *topic_prefix, int packet_rssi_dbm) {
     const time_t now = time(NULL);
     const uint8_t ctrl_type = iotdata_mesh_peek_ctrl_type(packet_buffer, packet_length);
     if (st->state_mesh->debug)
@@ -149,7 +149,7 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
                        handed to the telemetry path alone and never reach the node topic. Addressed
                        by the ORIGIN, not the relay that carried it. */
                     (void)node_on_packet(st->state_node, fw.inner_packet, (size_t)fw.inner_len, fw.origin_station);
-                    process_sensor_packet(st, fw.inner_packet, fw.inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi);
+                    process_sensor_packet(st, fw.inner_packet, fw.inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi_dbm);
                 } else {
                     PRINTF_ERROR("exec: mesh FORWARD inner packet peek failed (len=%d)\n", fw.inner_len);
                     stat_on_link_rx_drop(st->state_stat);
@@ -163,7 +163,7 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
         iotdata_mesh_beacon_t b;
         if (mesh_receive_beacon_r(st->state_mesh, packet_buffer, packet_length, &b)) {
             stat_on_peer(st->state_stat, b.gateway_id, b.generation, b.cost, b.flags);
-            netw_note_beacon(&st->network, station_id, b.flags, b.cost, b.generation, b.gateway_id, (st->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, now);
+            netw_note_beacon(&st->network, station_id, b.flags, b.cost, b.generation, b.gateway_id, (st->capture_rssi_packet && packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0, now);
         }
         break;
     }
@@ -341,17 +341,16 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
             st->rx_held = buffer_acquire(st->pool);
         if (st->rx_held != BUFFER_NONE) {
             (void)buffer_reset(st->pool, st->rx_held);
-            int packet_rssi_dbm = 0, packet_length;
+            int packet_rssi_dbm = LORA_RSSI_NONE, packet_length;
             uint8_t *rxbuf = buffer_data(st->pool, st->rx_held);
             if (lora_read(rxbuf, buffer_room(st->pool, st->rx_held), &packet_length, &packet_rssi_dbm, LORA_READ_TIMEOUT_MS) == ESP_OK && packet_length > 0) {
                 buffer_set_len(st->pool, st->rx_held, (uint16_t)packet_length);
-                const uint8_t packet_rssi = packet_rssi_dbm != 0 ? rssi_raw_from_dbm(packet_rssi_dbm) : 0;
                 stat_on_link_rx_packet(st->state_stat, (uint16_t)packet_length);
                 if (st->debug_data)
                     debug_hexdump("data: ", rxbuf, (size_t)packet_length);
                 if (st->capture_rssi_packet) {
-                    if (packet_rssi > 0)
-                        stat_on_link_rssi_packet(st->state_stat, packet_rssi);
+                    if (packet_rssi_dbm != LORA_RSSI_NONE)
+                        stat_on_link_rssi_packet(st->state_stat, packet_rssi_dbm);
                     else
                         stat_on_link_rssi_packet_error(st->state_stat);
                 }
@@ -367,7 +366,7 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
                         PRINTF_INFO("exec: FILTERED from=%04" PRIX16 " var=%u len=%d (blocked)\n", station_id, (unsigned)variant_id, packet_length);
                 } else if (variant_id == IOTDATA_MESH_VARIANT) {
                     if (st->state_mesh->enabled)
-                        process_mesh_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, packet_rssi);
+                        process_mesh_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, packet_rssi_dbm);
                     else {
                         stat_on_link_rx_mesh_unexpected(st->state_stat, station_id);
                         PRINTF_INFO("exec: mesh packet unexpected from station=%04" PRIX16 " while not enabled\n", station_id);
@@ -381,9 +380,9 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
                     (void)node_on_packet(st->state_node, rxbuf, (size_t)packet_length, station_id);
                     if (process_packet_decodes(st, rxbuf, packet_length)) {
                         const bool is_new = ddup_check_sensor_packet(st, station_id, sequence);
-                        netw_note_receive(&st->network, station_id, variant_id, sequence, NETW_PATH_DIRECT, is_new, (st->capture_rssi_packet && packet_rssi > 0) ? get_rssi_dbm(packet_rssi) : 0, 0, time(NULL));
+                        netw_note_receive(&st->network, station_id, variant_id, sequence, NETW_PATH_DIRECT, is_new, (st->capture_rssi_packet && packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0, 0, time(NULL));
                         if (is_new)
-                            process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, "direct", packet_rssi);
+                            process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, "direct", packet_rssi_dbm);
                     } else {
                         stat_on_link_rx_drop(st->state_stat);
                         PRINTF_ERROR("exec: undecodable frame from station=%04" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station_id, sequence, packet_length,
@@ -404,7 +403,7 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
         if (*running && st->capture_rssi_channel && intervalable_and_initial(st->interval_rssi_channel, &st->interval_rssi_channel_last)) {
             int channel_rssi_dbm;
             if (lora_read_channel_rssi(&channel_rssi_dbm) == ESP_OK)
-                stat_on_link_rssi_channel(st->state_stat, rssi_raw_from_dbm(channel_rssi_dbm));
+                stat_on_link_rssi_channel(st->state_stat, channel_rssi_dbm);
             else
                 stat_on_link_rssi_channel_error(st->state_stat);
         }

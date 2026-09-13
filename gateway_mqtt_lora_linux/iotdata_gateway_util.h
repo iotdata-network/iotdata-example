@@ -42,13 +42,13 @@ void debug_hexdump(const char *prefix, const uint8_t *data, size_t length) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 /* Time-weighted EMA: alpha = 1 - exp(-dt / tau). First sample initialises. */
-void ema_update_timed(uint8_t value, uint8_t *value_ema, uint32_t *value_cnt, time_t *value_last_time, time_t now, float tau_secs) {
+void ema_update_timed(int16_t value, int16_t *value_ema, uint32_t *value_cnt, time_t *value_last_time, time_t now, float tau_secs) {
     if ((*value_cnt)++ == 0 || *value_last_time == 0) {
         *value_ema = value;
         *value_last_time = now;
     } else {
         const float alpha = 1.0f - expf(-((float)(now - *value_last_time)) / tau_secs);
-        *value_ema = (uint8_t)((alpha * (float)value + (1.0f - alpha) * (float)(*value_ema)) + 0.5f);
+        *value_ema = (int16_t)((alpha * (float)value + (1.0f - alpha) * (float)(*value_ema)) + (value < 0 ? -0.5f : 0.5f));
         *value_last_time = now;
     }
 }
