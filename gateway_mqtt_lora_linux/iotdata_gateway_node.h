@@ -2,8 +2,6 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define NODE_KV_MAX 200 /* a kvr payload we build; a TLV caps at 255 anyway */
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -56,7 +54,7 @@ typedef struct {
     /* stats */
     uint32_t stat_rx, stat_requests, stat_reports, stat_commands, stat_unknown;
 
-    uint8_t _buffer_kv[NODE_KV_MAX];
+    uint8_t _buffer_kv[IOTDATA_MAX_PACKET_SIZE];
     iotdata_encoder_t _iotdata_enc;
     iotdata_decoder_t _iotdata_dec;
     buffer_pool_t *pool;
@@ -127,32 +125,37 @@ static int node_build_config(const node_state_t *st, uint8_t *buf, const size_t 
     return kv.overflow ? -1 : (int)kv.len;
 }
 
-/* Records are pulled until the packet is full; the cursor lets the caller resume where this
-   stopped. blackbox_pull() ADVANCES the cursor before we know whether the record fits, so a record
-   that does not fit is put back by rewinding -- otherwise one record is silently lost at every
-   packet boundary. A record too large for a KV value can never fit any packet, so it is skipped
-   rather than rewound: rewinding would stall the stream on it forever. */
-static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t size, size_t *cursor) {
+static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t size, iotdata_partial_t *partial) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
     iotdata_kvr_add_u8(&kv, IOTDATA_NODE_DIAGNOSTICS_TYPE, IOTDATA_NODE_DIAG_BLACKBOX);
-    size_t prev = *cursor;
-    while (blackbox_pull(&st->bbox->handle, cursor, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
+    size_t cursor = (partial != NULL) ? (size_t)partial->cursor : 0u;
+    size_t prev = cursor;
+    uint8_t packed = 0;
+    bool more = false;
+    while (blackbox_pull(&st->bbox->handle, &cursor, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
         const size_t n = strlen(st->_buffer_blackbox_rec);
         if (n <= 255u) { /* a KV value length is one byte; larger is unreachable today, and skipped */
             if (kv.len + 2u + n > size) {
-                *cursor = prev; /* does not fit THIS packet: put it back for the next one */
+                cursor = prev; /* does not fit THIS packet: put it back for the next one */
+                more = true;
                 break;
             }
             iotdata_kvr_add(&kv, IOTDATA_NODE_DIAGNOSTICS_DATA, st->_buffer_blackbox_rec, (uint8_t)n);
+            packed++;
         }
-        prev = *cursor;
+        prev = cursor;
+    }
+    if (partial != NULL) {
+        partial->cursor = more ? (uint32_t)cursor : 0u;
+        partial->chunk = packed;
+        partial->more = more;
+        partial->total = (uint8_t)(partial->index + packed + (more ? 1u : 0u));
     }
     return kv.overflow ? -1 : (int)kv.len;
 }
 
-/* As many rows as fit, after the whole table's count -- see iotdata_node.h. */
-static int node_build_table(node_state_t *st, const uint8_t type, uint8_t *buf, const size_t size) {
+static int node_build_table(node_state_t *st, const uint8_t type, uint8_t *buf, const size_t size, iotdata_partial_t *partial) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
     const uint8_t row_size = iotdata_node_table_row_size(type);
@@ -160,16 +163,30 @@ static int node_build_table(node_state_t *st, const uint8_t type, uint8_t *buf, 
         return -1;
     const uint8_t count = st->table_count(type);
     iotdata_kvr_add_u8(&kv, IOTDATA_NODE_TABLE_COUNT, count);
-    for (uint8_t i = 0; i < count && (kv.len + 2u + (size_t)row_size > size); i++) {
+    uint8_t i = (partial != NULL) ? (uint8_t)partial->cursor : 0u;
+    uint8_t packed = 0;
+    bool more = false;
+    for (; i < count; i++) {
         uint8_t row[IOTDATA_NODE_TABLE_ROW_MAX] = { 0x00 };
-        if (st->table_row(type, i, row))
+        if (kv.len + 2u + (size_t)row_size > size) {
+            more = true;
+            break;
+        }
+        if (st->table_row(type, i, row)) {
             iotdata_kvr_add(&kv, IOTDATA_NODE_TABLE_ROW, row, row_size);
+            packed++;
+        }
+    }
+    if (partial != NULL) {
+        partial->total = count;
+        partial->chunk = packed;
+        partial->more = more;
+        partial->cursor = more ? (uint32_t)i : 0u;
     }
     return kv.overflow ? -1 : (int)kv.len;
 }
 
-static int node_build(node_state_t *st, const uint8_t type, uint8_t *buf, const size_t size, const uint8_t scope) {
-    size_t cursor = 0;
+static int node_build(node_state_t *st, const uint8_t type, uint8_t *buf, const size_t size, const uint8_t scope, iotdata_partial_t *partial) {
     switch (type) {
     case IOTDATA_NODE_TLV_VERSION:
         return node_build_version(st, buf, size);
@@ -184,9 +201,9 @@ static int node_build(node_state_t *st, const uint8_t type, uint8_t *buf, const 
     case IOTDATA_NODE_TLV_MESH_STATIONS:
     case IOTDATA_NODE_TLV_MESH_PEERS:
     case IOTDATA_NODE_TLV_MESH_FILTERS:
-        return node_build_table(st, type, buf, size);
+        return node_build_table(st, type, buf, size, partial);
     case IOTDATA_NODE_TLV_DIAGNOSTICS:
-        return node_build_diagnostics(st, buf, size, &cursor);
+        return node_build_diagnostics(st, buf, size, partial);
     default:
         return -1; /* nothing we can say about this type */
     }
@@ -195,14 +212,6 @@ static int node_build(node_state_t *st, const uint8_t type, uint8_t *buf, const 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/*
- * A table report as JSON: the rows decoded into named fields, not left as hex.
- *
- * The generic renderer below would print each row as a hex string, which is true but unusable --
- * the whole point of a table over MQTT rather than a console dump is that something downstream can
- * read it. The row layouts live in iotdata_node.h and are read back with its accessors, so this
- * cannot drift from what a node writes.
- */
 static const char *node_json_table_kind(const uint8_t k) {
     switch (k) {
     case IOTDATA_NODE_TABLE_KIND_GATEWAY:
@@ -264,8 +273,6 @@ static void node_json_table(cJSON *const obj, const uint8_t type, const uint8_t 
     }
 }
 
-/* Is this value printable text, or bytes? A NUL or a control byte means bytes -- and bytes must not
-   go through a string conversion that stops at the first NUL. */
 static bool node_json_value_is_text(const uint8_t *const val, const uint8_t vlen) {
     for (uint8_t i = 0; i < vlen; i++)
         if (val[i] < 0x20 || val[i] > 0x7E)
@@ -296,11 +303,7 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
         else if (vlen == 0)
             cJSON_AddBoolToObject(obj, name, true); /* a flag: present, no value */
         else if (!node_json_value_is_text(val, vlen)) {
-            /* Binary: hex, not a string. iotdata_kvr_str stops at the first NUL, so a value with
-               one in it silently loses its tail -- which is how a mesh table row, rendered by this
-               path before it had a renderer of its own, came out as two characters. Any key wider
-               than 4 bytes that is not text lands here. */
-            char hex[2 * IOTDATA_TLV_DATA_MAX + 1];
+            char hex[2 * IOTDATA_TLV_DATA_MAX + 1]; // XXX
             size_t h = 0;
             for (uint8_t i = 0; i < vlen && h + 2 < sizeof(hex); i++)
                 h += (size_t)snprintf(hex + h, sizeof(hex) - h, "%02X", val[i]);
@@ -323,13 +326,21 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
     }
 }
 
-static void node_publish_from(node_state_t *st, const uint16_t station, const uint8_t type, const uint8_t *kvbuf, const size_t kvlen) {
+static void node_publish_from(node_state_t *st, const uint16_t station, const uint8_t type, const uint8_t *kvbuf, const size_t kvlen, const iotdata_partial_t *partial) {
     cJSON *root = cJSON_CreateObject();
     if (root) {
         char buf[4 + 1];
         cJSON_AddStringToObject(root, "resp", "node"); /* shares a topic with the other responses */
         cJSON_AddStringToObject(root, "station", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, station));
         cJSON_AddStringToObject(root, "tlv", iotdata_node_tlv_name(type) ? iotdata_node_tlv_name(type) : "?");
+        if (partial != NULL) {
+            cJSON *const jp = cJSON_AddObjectToObject(root, "_partial");
+            if (jp != NULL) {
+                cJSON_AddNumberToObject(jp, "id", partial->id);
+                cJSON_AddNumberToObject(jp, "total", partial->total);
+                cJSON_AddNumberToObject(jp, "index", partial->index);
+            }
+        }
         cJSON *data = cJSON_AddObjectToObject(root, "data");
         if (data != NULL) {
             if (iotdata_node_tlv_is_table(type))
@@ -347,15 +358,20 @@ static void node_publish_from(node_state_t *st, const uint16_t station, const ui
     }
 }
 
-/* `scope` only means anything to STATUS; 0 is "every group", which is what every caller that is
-   not answering an explicit request wants. */
-static bool node_report_scoped(node_state_t *st, const uint8_t type, const uint8_t scope) {
-    const int kvlen = node_build(st, type, st->_buffer_kv, sizeof(st->_buffer_kv), scope);
+static bool node_report_paged(node_state_t *st, const uint8_t type, const uint8_t scope, iotdata_partial_t *partial) {
+    iotdata_partial_begin(partial, st->sequence);
+    const int kvlen = node_build(st, type, st->_buffer_kv, sizeof(st->_buffer_kv), scope, partial);
     if (kvlen < 0) /* not 0: an empty payload is a legitimate report */
         return false;
     st->stat_reports++;
-    node_publish_from(st, st->station_id, type, st->_buffer_kv, (uint8_t)kvlen);
+    node_publish_from(st, st->station_id, type, st->_buffer_kv, (size_t)kvlen, iotdata_partial_needed(partial) ? partial : NULL);
+    iotdata_partial_sent(partial);
     return true;
+}
+
+static bool node_report_scoped(node_state_t *st, const uint8_t type, const uint8_t scope) {
+    iotdata_partial_t partial = { 0 };
+    return node_report_paged(st, type, scope, &partial);
 }
 
 static bool node_report(node_state_t *st, const uint8_t type) {
@@ -373,8 +389,6 @@ static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const s
         const uint8_t want = iotdata_node_tlv_control_type(key);
         if (want != IOTDATA_NODE_TLV_NONE) { /* a request: send the corresponding report */
             st->stat_requests++;
-            /* STATUS is the one request with a value: which groups to report. Anything else that
-               carries a value is answered in full, as if it had carried none. */
             const uint8_t scope = (want == IOTDATA_NODE_TLV_STATUS && vlen >= 1) ? val[0] : 0u;
             if (!node_report_scoped(st, want, scope))
                 PRINTF_INFO("node: request for %s -- nothing to report\n", iotdata_node_tlv_name(want) ? iotdata_node_tlv_name(want) : "?");
@@ -484,11 +498,14 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
         } else
             for (uint8_t i = 0; i < st->_iotdata_dec.tlv_count; i++) {
                 const iotdata_decoder_tlv_t *const t = &st->_iotdata_dec.tlv[i];
-                if (iotdata_tlv_type_is_system(t->type) && t->format == IOTDATA_TLV_FMT_RAW) {
-                    st->stat_rx++;
-                    node_publish_from(st, station, t->type, t->raw, t->length);
-                    ok = true;
-                }
+                if (!iotdata_partial_is(t))
+                    if (iotdata_tlv_type_is_system(t->type) && t->format == IOTDATA_TLV_FMT_RAW) {
+                        st->stat_rx++;
+                        iotdata_partial_t p;
+                        const bool paged = iotdata_partial_of(&st->_iotdata_dec, i, &p);
+                        node_publish_from(st, station, t->type, t->raw, t->length, paged ? &p : NULL);
+                        ok = true;
+                    }
             }
     }
     return ok;

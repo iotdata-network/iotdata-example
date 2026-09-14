@@ -170,6 +170,7 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #define IOTDATA_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
 #include "iotdata_down.h"
 #include "iotdata_node.h"
+#include "iotdata_node_partial.h"
 #include "iotdata_node_version.h"
 // variant
 #include "iotdata_node_status.h"

@@ -149,6 +149,7 @@ static const lora_config_t lora_cfg = {
 #include "iotdata.c"
 #include "iotdata_variant.h"
 #include "iotdata_node.h"
+#include "iotdata_node_partial.h"
 #include "iotdata_node_version.h"
 // variant
 #include "iotdata_node_status.h"
@@ -180,6 +181,7 @@ static const idep_config_t idep_cfg = {
     .diag = IOTDATA_DIAGNOSTICS_PULL,
     .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
     .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
+    .packet_max = LORA_PACKET_SIZE_MAX, /* what OUR radio carries; the framework sizes for the protocol */
 };
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -282,7 +284,7 @@ static void sensor_node_receive(void) {
     bool reboot = false;
     unsigned frames = 0, acted = 0;
     while (idep_window_active(&idep_cfg, &state.node, (uint32_t)(esp_timer_get_time() / 1000))) {
-        uint8_t buf[IDEP_PACKET_MAX];
+        uint8_t buf[IOTDATA_MAX_PACKET_SIZE]; // XXX
         int len = 0, rssi_dbm = 0;
         if (lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) == ESP_OK && len > 0) {
             frames++;

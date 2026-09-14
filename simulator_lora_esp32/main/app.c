@@ -101,6 +101,7 @@ static const lora_config_t lora_cfg = {
 #include "iotdata_variant_simulator.c"
 #include "iotdata.c"
 #include "iotdata_node.h"
+#include "iotdata_node_partial.h"
 #include "iotdata_node_version.h"
 // variant
 #include "iotdata_node_status.h"
@@ -190,6 +191,7 @@ static const idep_config_t sim_cfg = {
     .receive_always = (SIMULATE_RECEIVE_ALWAYS != 0),
     .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
     .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
+    .packet_max = LORA_PACKET_SIZE_MAX, /* what OUR radio carries; the framework sizes for the protocol */
 };
 
 static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
@@ -200,7 +202,7 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
     if (!any_open)
         return;
 
-    uint8_t buf[IDEP_PACKET_MAX];
+    uint8_t buf[IOTDATA_MAX_PACKET_SIZE];
     int len = 0, rssi_dbm = 0;
     /* 0ms first-byte timeout: this is a poll from the main loop, not a blocking receive. */
     while (lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) == ESP_OK && len > 0) {

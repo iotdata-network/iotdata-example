@@ -87,6 +87,7 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 #include "iotdata_node_diagnostics.h"
+#include "iotdata_node_partial.h"
 
 typedef struct {
     blackbox_handle_t handle;
