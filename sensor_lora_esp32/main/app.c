@@ -117,11 +117,10 @@ static const lora_config_t lora_cfg = {
 #define IOTDATA_NO_DUMP
 #define IOTDATA_NO_PRINT
 #define IOTDATA_NO_FLOATING
+#include "iotdata_variant.h"
 #include "iotdata.h"
 #include "iotdata.c"
 #include "iotdata_node.h"
-
-#include "iotdata_variant.h"
 
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"

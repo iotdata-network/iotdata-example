@@ -461,8 +461,8 @@ void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t st
         iotsim_sensor_t *s = &sim->sensors[i];
         memset(s, 0, sizeof(*s));
         s->variant = pool[i % palette_n];
-        /* station_base lets multiple boards occupy disjoint ID ranges (0 → 1-based). */
-        s->station_id = (uint16_t)(station_base + i + 1);
+        const uint32_t sid = ((uint32_t)station_base + (uint32_t)i) % IOTDATA_STATION_ASSIGNABLE_MAX;
+        s->station_id = (uint16_t)(sid == 0u ? IOTDATA_STATION_ASSIGNABLE_MAX : sid);
 
         _init_sensor(sim, s);
 
@@ -481,8 +481,11 @@ bool iotsim_poll(iotsim_t *sim, uint32_t time_now_ms, iotsim_packet_t *out) {
 
         _drift_sensor(sim, s);
 
-        if (!_encode_sensor(sim, s, out, time_now_ms))
+        if (!_encode_sensor(sim, s, out, time_now_ms)) {
+            s->tx_interval_ms = (uint32_t)_rng_range(sim, IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS, IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS);
+            s->next_tx_ms = time_now_ms + s->tx_interval_ms;
             continue;
+        }
 
         out->sensor_index = (uint8_t)i;
 

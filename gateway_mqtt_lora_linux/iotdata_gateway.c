@@ -171,12 +171,11 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 // IOTDATA
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#include "iotdata_variant.h"
 #include "iotdata.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
 #include "iotdata_node.h"
-
-#include "iotdata_variant.h"
 
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
