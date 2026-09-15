@@ -63,11 +63,6 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static const char *__tag_app = "app";
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
 #define PIN_DEVICE_UART_TX  PIN_E22_RXD
 #define PIN_DEVICE_UART_RX  PIN_E22_TXD
 #define PIN_DEVICE_LORA_AUX PIN_E22_AUX
@@ -109,31 +104,38 @@ static const lora_config_t lora_cfg = {
 #define IOTDATA_NO_DUMP
 #define IOTDATA_NO_PRINT
 #define IOTDATA_NO_FLOATING
-#include "iotdata_variant_simulator.h"
-#include "iotdata_variant_simulator.c"
+#include "iotdata.h"
 #include "iotdata.c"
 #include "iotdata_node.h"
+
+#include "iotdata_variant.h"
+
+#include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
 #include "iotdata_node_version.h"
-// variant
+// #include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
+// #include "iotdata_node_config.h"
 #include "iotdata_node_control.h"
-// config
 #define IOTDATA_DIAGNOSTICS       IOTDATA_CONFIG_BLACKBOX
 #define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 static void _node_diagnostics_emit(const char *const line) {
-    ESP_LOGI(__tag_app, "%s", line);
+    ESP_LOGI("app", "%s", line); // XXX
 }
 #include "iotdata_node_diagnostics.h"
-// content
-/* One block per virtual station, so the table must hold them all -- plus room to grow. */
+// #include "iotdata_node_content.h"
 #define IOTDATA_STATE_BLOCKS_MAX (IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS + 4)
 #include "iotdata_node_state.h"
-#include "iotdata_node_endpoint.h"
+#include "iotdata_node_platform.h"
+
+#include "iotdata_variant_simulator.h"
+#include "iotdata_variant_simulator.c"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
+
+static const char *__tag_app = "app";
 
 static uint32_t tx_count = 0, tx_errors = 0;
 

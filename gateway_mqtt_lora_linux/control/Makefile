@@ -1,9 +1,9 @@
 
 ##
-## iotdata gateway command — install only
+## iotdata gateway control — install only
 ##
 
-TARGET=iotdata_gateway_command
+TARGET=iotdata_gateway_control
 SCRIPT=$(TARGET).js
 
 all: node_modules
@@ -35,9 +35,9 @@ remove-dev:
 
 ##
 
-INSTALL=iotdata-gateway-command
+INSTALL=iotdata-gateway-control
 DIR_INSTALL=/usr/local/bin
-DIR_LIB=/usr/local/lib/iotdata-gateway-command
+DIR_LIB=/usr/local/lib/iotdata-gateway-control
 install_target: $(SCRIPT) node_modules
 	install -d $(DIR_LIB)
 	install -m 755 $(SCRIPT) $(DIR_LIB)/$(INSTALL)

@@ -41,7 +41,7 @@ SOURCES_DEPEND=\
     $(IOTDATA_SRC_COMMON)/include/device/d_interface_e22900t22.h \
     $(IOTDATA_SRC_COMMON)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
     $(IOTDATA_SRC_COMMON)/include/iotdata_node_diagnostics.h $(IOTDATA_SRC_DEPEND_BLACKBOX)/blackbox.h \
-    $(IOTDATA_SRC_COMMON)/include/iotdata_station_filter.h \
+    $(IOTDATA_SRC_COMMON)/include/iotdata_node_stations.h \
     $(IOTDATA_SRC_COMMON)/include/iotdata_node_version.h \
     $(IOTDATA_SRC_COMMON)/include/device/d_module_buffers.h \
     $(IOTDATA_SRC_COMMON)/include/device/d_format.h \

@@ -1,0 +1,12 @@
+{
+  "name": "iotdata-mesh-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CLI to drive iotdata node control over MQTT",
+  "bin": {
+    "control": "./iotdata_gateway_control.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.0"
+  }
+}

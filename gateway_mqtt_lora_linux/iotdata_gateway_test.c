@@ -78,7 +78,7 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #include "iotdata_variant.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
-#include "iotdata_down.h"
+#include "iotdata_node_down.h"
 #include "iotdata_node.h"
 #include "iotdata_node_version.h"
 #include "iotdata_node_status.h"
@@ -102,7 +102,7 @@ typedef struct {
    inserts and touches, which is all the mesh does with it. */
 #include "device/d_module_datastore_linux.h"
 #include "iotdata_node_state.h"
-#include "iotdata_node_endpoint.h"
+#include "iotdata_node_platform.h"
 #define STATE_NODE_TAG 0xB1E28004UL
 /* The station's identity, shared by the mesh exactly as iotdata_gateway.c shares it. No datastore
    behind it: an unpersisted node still counts, it just starts from 0 after a restart. */
@@ -111,7 +111,7 @@ static idep_node_t t_inode;
    distinct station, so they cannot share one node. */
 static idep_node_t t_inodes[8];
 
-#include "iotdata_station_filter.h"
+#include "iotdata_node_stations.h"
 #include "iotdata_gateway_mesh.h"
 #include "iotdata_gateway_ddup.h"
 #include "iotdata_gateway_stat.h"

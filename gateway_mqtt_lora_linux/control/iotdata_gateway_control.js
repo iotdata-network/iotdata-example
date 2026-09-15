@@ -3,7 +3,7 @@
 // ------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------
 //
-// iotdata_gateway_command.js - drive iotdata node CONTROL commands over MQTT.
+// iotdata_gateway_control.js - drive iotdata node CONTROL commands over MQTT.
 //
 // Publishes a JSON management request to <prefix>/manage/req; the gateway
 // (iotdata_gateway_ctrl.h) turns it into a node CONTROL payload, executed locally when it
@@ -29,11 +29,11 @@
 // (stations/peers/filters) prints on the target's own console, so watch that via esp32-tool.
 //
 // Usage:
-//   ./iotdata_gateway_command.js [options] <command> [args]
-//   ./iotdata_gateway_command.js status --target all
-//   ./iotdata_gateway_command.js status --target 0x5BF,0x537,0x538      (one frame each)
-//   ./iotdata_gateway_command.js status --target 0x5BF --broker mqtt://192.168.0.61:1883
-//   ./iotdata_gateway_command.js raw '{"cmd":"status","target":"all"}'
+//   ./iotdata_gateway_control.js [options] <command> [args]
+//   ./iotdata_gateway_control.js status --target all
+//   ./iotdata_gateway_control.js status --target 0x5BF,0x537,0x538      (one frame each)
+//   ./iotdata_gateway_control.js status --target 0x5BF --broker mqtt://192.168.0.61:1883
+//   ./iotdata_gateway_control.js raw '{"cmd":"status","target":"all"}'
 //
 // Setup:  npm install        (in this dir; pulls in mqtt)
 //
@@ -225,8 +225,8 @@ function buildRequest(name, args) {
 // ------------------------------------------------------------------------------------------------------------------------
 
 function usage() {
-    display.log('iotdata_gateway_command.js - drive iotdata node CONTROL commands over MQTT\n');
-    display.log('Usage: iotdata_gateway_command.js [options] <command> [args]\n');
+    display.log('iotdata_gateway_control.js - drive iotdata node CONTROL commands over MQTT\n');
+    display.log('Usage: iotdata_gateway_control.js [options] <command> [args]\n');
     display.log('Options:');
     display.log(`  --broker <url>   MQTT broker      (default: ${DEFAULTS.broker}, or $MQTT_BROKER)`);
     display.log(`  --prefix <p>     topic prefix     (default: ${DEFAULTS.prefix}, or $IOTDATA_PREFIX)`);

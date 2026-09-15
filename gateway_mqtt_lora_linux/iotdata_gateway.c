@@ -55,6 +55,12 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#include "iotdata_config.h"
+#include "iotdata_hardware.h"
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 #define MQTT_CONNECT_TIMEOUT    60
 #define MQTT_PUBLISH_QOS        0
 #define MQTT_PUBLISH_RETAIN     false
@@ -165,25 +171,29 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 // IOTDATA
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#include "iotdata_config.h"
-#include "iotdata_variant.h"
+#include "iotdata.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
-#define IOTDATA_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
-#include "iotdata_down.h"
 #include "iotdata_node.h"
+
+#include "iotdata_variant.h"
+
+#include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
 #include "iotdata_node_version.h"
-// variant
+// #include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
+// #include "iotdata_node_config.h"
 #include "iotdata_node_control.h"
-// config
+#define IOTDATA_DIAGNOSTICS IOTDATA_CONFIG_BLACKBOX
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 #include "iotdata_node_diagnostics.h"
-// content
-#include "iotdata_station_filter.h"
+// #include "iotdata_node_content.h"
 #include "iotdata_node_state.h"
-#include "iotdata_node_endpoint.h"
+#define IOTDATA_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
+#include "iotdata_node_down.h"
+#include "iotdata_node_stations.h"
+#include "iotdata_node_platform.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
