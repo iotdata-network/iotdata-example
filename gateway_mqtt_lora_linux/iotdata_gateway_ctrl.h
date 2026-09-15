@@ -51,7 +51,7 @@ static const char *ctrl_tag_name(const uint8_t tag) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
-    uint16_t station_id;
+    idep_node_t *inode;
     char topic_req[128];
     buffer_pool_t *pool;
     /* Staging queue: produced by the mqtt-thread callback, drained by the main loop. Everything
@@ -104,7 +104,7 @@ static ctrl_state_t *g_ctrl = NULL;
 static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
     if (root != NULL) {
         char idbuf[4 + 1];
-        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%04" PRIX16, st->station_id));
+        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%04" PRIX16, idep_station(st->inode)));
         char *const out = cJSON_PrintUnformatted(root);
         if (out != NULL) {
             (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
@@ -199,7 +199,7 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
                     ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "busy: %u staged, no room for %u more", (unsigned)buffer_queue_count(&st->queue), (unsigned)args.targets_count));
                     st->stat_req_bad++;
                 } else {
-                    const uint32_t now_ms = (uint32_t)__ticks_ms();
+                    const uint32_t now_ms = hw_time_ms();
                     unsigned staged = 0;
                     for (uint8_t i = 0; i < args.targets_count; i++) {
                         const buffer_handle_t h = buffer_acquire(st->pool);
@@ -273,7 +273,7 @@ static bool ctrl_from_iotdata(const uint8_t key, const uint8_t *const val, const
 
     case IOTDATA_NODE_CONTROL_MESH_STATIONS_DUMP:
         PRINTF_INFO("exec: CONTROL - MESH_STATIONS_DUMP\n");
-        netw_report(&st->network, st->state_mesh->station_id);
+        netw_report(&st->network, idep_station(st->state_mesh->inode));
         return true;
 
     case IOTDATA_NODE_CONTROL_MESH_PEERS_DUMP:
@@ -362,7 +362,7 @@ static bool ctrl_from_iotdata(const uint8_t key, const uint8_t *const val, const
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
-    const uint32_t now_ms = (uint32_t)__ticks_ms();
+    const uint32_t now_ms = hw_time_ms();
     const uint16_t stale = buffer_queue_expire(&st->queue, now_ms);
     if (stale > 0)
         PRINTF_WARN("ctrl: %u staged command(s) expired unsent\n", (unsigned)stale);
@@ -381,10 +381,10 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, uint16_t station_id, bbox_state_t *bbox, buffer_pool_t *pool) {
+bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, bbox_state_t *bbox, buffer_pool_t *pool) {
     assert(st && bbox && pool);
     memset(st, 0, sizeof(*st));
-    st->station_id = station_id;
+    st->inode = inode;
     st->bbox = bbox;
     st->pool = pool;
     buffer_queue_init(&st->queue, st->queue_slot, CTRL_QUEUE_MAX, pool);
@@ -396,7 +396,7 @@ bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, uint16_t station_id,
         PRINTF_ERROR("ctrl: subscribe to '%s' failed\n", st->topic_req);
         return false;
     }
-    PRINTF_INFO("ctrl: station=%04" PRIX16 ", request-topic='%s'\n", station_id, st->topic_req);
+    PRINTF_INFO("ctrl: station=%04" PRIX16 ", request-topic='%s'\n", idep_station(st->inode), st->topic_req);
     return true;
 }
 

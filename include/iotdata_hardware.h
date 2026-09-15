@@ -11,8 +11,8 @@
 #define PIN_E22_AUX     GPIO_NUM_7  /* E22 pin (5) */
 #define PIN_E22_VCC                 /* E22 pin (6) */
 #define PIN_E22_GND                 /* E22 pin (7) */
-#define PIN_I2C_SDA  GPIO_NUM_5  /* I2C header pin (3) */
-#define PIN_I2C_SCL  GPIO_NUM_6  /* I2C header pin (4) */
+#define PIN_I2C_SDA     GPIO_NUM_5  /* I2C header pin (3) */
+#define PIN_I2C_SCL     GPIO_NUM_6  /* I2C header pin (4) */
 #define PIN_BATTERY_ADC GPIO_NUM_3  /* patch header — divider midpoint (ADC1_CH3) */
 #define PIN_BATTERY_EN  GPIO_NUM_1  /* patch header — divider enable, high = on    */
 
@@ -26,8 +26,8 @@
 #define PIN_E22_AUX     GPIO_NUM_9 /* E22 pin (5) */
 #define PIN_E22_VCC                /* E22 pin (6) */
 #define PIN_E22_GND                /* E22 pin (7) */
-#define PIN_I2C_SDA  GPIO_NUM_3
-#define PIN_I2C_SCL  GPIO_NUM_4
+#define PIN_I2C_SDA     GPIO_NUM_3
+#define PIN_I2C_SCL     GPIO_NUM_4
 #define PIN_BATTERY_ADC GPIO_NUM_0 /* divider midpoint (ADC1_CH0) */
 #define PIN_BATTERY_EN  GPIO_NUM_1 /* divider enable, high = on   */
 

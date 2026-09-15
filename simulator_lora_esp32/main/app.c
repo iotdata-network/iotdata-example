@@ -28,11 +28,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "esp_log.h"
-#include "esp_mac.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
 #pragma GCC diagnostic pop
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -47,7 +42,23 @@
 
 #define POLL_INTERVAL_MS   100 /* simulator poll granularity */
 #define STATUS_EVERY_N_TX  50  /* print status every N transmissions */
+#define TRANSMIT_DELAY_MS  5
+#define CONSOLE_DRAIN_MS   100 /* let the console flush before deep sleep    */
 #define TEST_FIXED_PAYLOAD 0   /* PHY-crack scaffold, DISABLED. Set to 1 to bypass the simulator and transmit a fixed known 16-byte ramp (see app_exec) — useful for sniffing/decoding the raw LoRa PHY. */
+#define RESTART_MS         30000
+
+/*
+ * A simulator is a test instrument, so it listens all the time: a command aimed at one of its
+ * sensors is acted on when it is sent, not six hours later. Nothing is advertised -- a DOWN frame
+ * is transmitted before it is held, so an always-listening node needs no invitation.
+ *
+ * SIMULATE_RECEIVE_ALWAYS=0 (see the Makefile) makes a board imitate a real sleeping sensor
+ * instead, windows and advertisements and all, which is the only way to exercise that path on the
+ * bench. When CONFIG becomes settable over the air this stops being a build-time choice.
+ */
+#ifndef SIMULATE_RECEIVE_ALWAYS
+#define SIMULATE_RECEIVE_ALWAYS 1
+#endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -68,6 +79,7 @@ static const char *__tag_app = "app";
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"
 #include "d_interface_e22900t22.h"
+#include "d_module_datastore_esp32.h"
 
 static const lora_config_t lora_cfg = {
     .e22_address = IOTDATA_CONFIG_LORA_ADDRESS,
@@ -110,11 +122,14 @@ static const lora_config_t lora_cfg = {
 #define IOTDATA_DIAGNOSTICS       IOTDATA_CONFIG_BLACKBOX
 #define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
-static void sim_diagnostics_emit(const char *const line) {
+static void _node_diagnostics_emit(const char *const line) {
     ESP_LOGI(__tag_app, "%s", line);
 }
 #include "iotdata_node_diagnostics.h"
 // content
+/* One block per virtual station, so the table must hold them all -- plus room to grow. */
+#define IOTDATA_STATE_BLOCKS_MAX (IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS + 4)
+#include "iotdata_node_state.h"
 #include "iotdata_node_endpoint.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -136,16 +151,29 @@ static uint32_t tx_count = 0, tx_errors = 0;
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static iotsim_t g_sim;
-static idep_node_t sim_nodes[IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS];
+static idep_node_t s_nodes[IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS];
+
+static datastore_t s_datastore;
+static iotdata_node_state_t s_state;
+
+/*
+ * A block per virtual station, TAGGED BY STATION rather than by array index.
+ *
+ * The station ids come from this board's MAC (see app_init), so an index-derived tag would restore
+ * one board's sequence onto a different board's station the moment the same image is flashed
+ * elsewhere. Keyed by station, a foreign record simply finds no home and that sensor starts clean.
+ * Stations are 12-bit, so this is unique and stable per station.
+ */
+#define SIM_STATE_TAG(station) (0x53490000UL | (uint32_t)(station)) /* "SI" + station */
 
 static void sim_node_status(const uint16_t station, iotdata_node_status_t *const out) {
-    out->uptime_s = (uint32_t)(__MILLIS() / 1000);
+    out->uptime_s = (uint32_t)(hw_time_ms() / 1000);
     out->reason = IOTDATA_NODE_REASON_UNKNOWN;
     out->has_heap = true;
     out->heap_free = (uint32_t)esp_get_free_heap_size();
     out->heap_min = (uint32_t)esp_get_minimum_free_heap_size();
-    for (int i = 0; i < (int)(sizeof(sim_nodes) / sizeof(sim_nodes[0])); i++)
-        if (sim_nodes[i].station_id == station) {
+    for (int i = 0; i < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])); i++)
+        if (idep_station(&s_nodes[i]) == station) {
             const iotsim_sensor_t *const s = iotsim_sensor(&g_sim, i);
             if (s != NULL) {
                 out->has_supply = true;
@@ -167,20 +195,7 @@ static bool sim_node_tx(const uint8_t *const packet, const size_t len) {
 
 static iotdata_version_caps_t s_caps;
 
-/*
- * A simulator is a test instrument, so it listens all the time: a command aimed at one of its
- * sensors is acted on when it is sent, not six hours later. Nothing is advertised -- a DOWN frame
- * is transmitted before it is held, so an always-listening node needs no invitation.
- *
- * SIMULATE_RECEIVE_ALWAYS=0 (see the Makefile) makes a board imitate a real sleeping sensor
- * instead, windows and advertisements and all, which is the only way to exercise that path on the
- * bench. When CONFIG becomes settable over the air this stops being a build-time choice.
- */
-#ifndef SIMULATE_RECEIVE_ALWAYS
-#define SIMULATE_RECEIVE_ALWAYS 1
-#endif
-
-static const idep_config_t sim_cfg = {
+static const idep_config_t s_conf = {
     .caps = &s_caps,
     .status = sim_node_status,
     .tx = sim_node_tx,
@@ -194,11 +209,14 @@ static const idep_config_t sim_cfg = {
     .packet_max = LORA_PACKET_SIZE_MAX, /* what OUR radio carries; the framework sizes for the protocol */
 };
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
+    const uint32_t now = hw_time_ms();
+
     bool any_open = false;
-    const uint32_t now = __MILLIS();
-    for (int i = 0; i < (int)(sizeof(sim_nodes) / sizeof(sim_nodes[0])) && !any_open; i++)
-        any_open = idep_window_active(&sim_cfg, &sim_nodes[i], now);
+    for (int i = 0; i < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])) && !any_open; i++)
+        any_open = idep_window_active(&s_conf, &s_nodes[i], now);
     if (!any_open)
         return;
 
@@ -206,25 +224,25 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
     int len = 0, rssi_dbm = 0;
     /* 0ms first-byte timeout: this is a poll from the main loop, not a blocking receive. */
     while (lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) == ESP_OK && len > 0) {
-        for (int i = 0; i < (int)(sizeof(sim_nodes) / sizeof(sim_nodes[0])); i++)
-            if (idep_window_active(&sim_cfg, &sim_nodes[i], __MILLIS())) {
+        for (int i = 0; i < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])); i++)
+            if (idep_window_active(&s_conf, &s_nodes[i], hw_time_ms())) {
                 bool reboot = false;
-                if (idep_on_frame(&sim_cfg, &sim_nodes[i], buf, (size_t)len, &reboot))
-                    ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " acted on a downstream command", sim_nodes[i].station_id);
+                if (idep_on_frame(&s_conf, &s_nodes[i], buf, (size_t)len, &reboot))
+                    ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " acted on a downstream command", idep_station(&s_nodes[i]));
                 if (reboot) {
-                    ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " REBOOT commanded -- restarting", sim_nodes[i].station_id);
+                    ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " REBOOT commanded -- restarting", idep_station(&s_nodes[i]));
                     iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
-                    __SLEEP_MS(200);
+                    hw_delay_ms_yieldable(CONSOLE_DRAIN_MS);
                     esp_restart();
                 }
             }
         len = 0;
     }
 
-    for (int i = 0; i < (int)(sizeof(sim_nodes) / sizeof(sim_nodes[0])); i++)
-        if (sim_nodes[i].window_open && !idep_window_active(&sim_cfg, &sim_nodes[i], __MILLIS())) {
-            idep_window_end(&sim_nodes[i]);
-            ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " receive window closed", sim_nodes[i].station_id);
+    for (int i = 0; i < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])); i++)
+        if (s_nodes[i].window_open && !idep_window_active(&s_conf, &s_nodes[i], hw_time_ms())) {
+            idep_window_end(&s_nodes[i]);
+            ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " receive window closed", idep_station(&s_nodes[i]));
         }
 }
 
@@ -246,17 +264,19 @@ static void transmit_packet(const iotsim_packet_t *pkt) {
 
 static void transmit_packets(iotsim_t *const sim) {
     iotsim_packet_t pkt;
-    while (iotsim_poll(sim, __MILLIS(), &pkt)) {
+    while (iotsim_poll(sim, hw_time_ms(), &pkt)) {
         transmit_packet(&pkt);
-        __SLEEP_MS(5);
+        hw_delay_ms_yieldable(TRANSMIT_DELAY_MS);
         const int idx = pkt.sensor_index;
-        if (idx >= 0 && idx < (int)(sizeof(sim_nodes) / sizeof(sim_nodes[0])) && idep_window_pending(&sim_nodes[idx])) {
-            sim_nodes[idx].sequence = (uint16_t)(pkt.sequence + 1u);
-            if (idep_receive_announce(&sim_cfg, &sim_nodes[idx])) {
-                idep_window_begin(&sim_cfg, &sim_nodes[idx], __MILLIS());
-                ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " receive window open for %ums", sim_nodes[idx].station_id, (unsigned)IDEP_RECEIVE_WINDOW_MS);
+        if (idx >= 0 && idx < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])))
+            idep_sequence_used(&s_nodes[idx]); /* in lockstep with the engine's own advance */
+        if (idx >= 0 && idx < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])) && idep_window_pending(&s_nodes[idx])) {
+            s_nodes[idx].sequence = (uint16_t)(pkt.sequence + 1u);
+            if (idep_receive_announce(&s_conf, &s_nodes[idx])) {
+                idep_window_begin(&s_conf, &s_nodes[idx], hw_time_ms());
+                ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " receive window open for %ums", idep_station(&s_nodes[idx]), (unsigned)IDEP_RECEIVE_WINDOW_MS);
             }
-            __SLEEP_MS(5);
+            hw_delay_ms_yieldable(TRANSMIT_DELAY_MS);
         }
     }
 }
@@ -264,26 +284,23 @@ static void transmit_packets(iotsim_t *const sim) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void app_fail(void) {
-        ESP_LOGE(__tag_app, "failed");
-        iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
-        __SLEEP_MS(30 * 1000);
-        esp_restart();
-}
-
 bool app_init(void) {
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    const bool restarted = (reset_reason != ESP_RST_DEEPSLEEP);
 
     ESP_LOGI(__tag_app, "iotdata multi-sensor simulator transmitter");
+    ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
+
+    iotdata_diagnostics_emit_set(_node_diagnostics_emit);
+    if (!iotdata_diagnostics_begin((uint8_t)reset_reason, restarted))
+        ESP_LOGW(__tag_app, "diagnostics: the recorder did not start");
+
     iotdata_version_caps_init(&s_caps);
+
     char vbuf[IOTDATA_VERSION_STR_MAX + 1];
     ESP_LOGI(__tag_app, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
     if (!iotdata_version_stamp_is_real())
         ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
-    const esp_reset_reason_t reset_reason = esp_reset_reason();
-    ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
-    iotdata_diagnostics_emit_set(sim_diagnostics_emit);
-    if (!iotdata_diagnostics_begin((uint8_t)reset_reason, true))
-        ESP_LOGW(__tag_app, "diagnostics: the recorder did not start");
 
     /* --- Hardware init --- */
     esp_err_t lerr;
@@ -311,18 +328,34 @@ bool app_init(void) {
     const uint32_t seed = mac32 ? mac32 : 0xDEADBEEFU;
     const uint16_t nbands = (uint16_t)(IOTDATA_STATION_ASSIGNABLE_MAX / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS); /* 4094/8 = 511 */
     const uint16_t station_base = (uint16_t)((mac32 % nbands) * (uint32_t)IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
-    iotsim_init(&g_sim, seed, __MILLIS(), station_base);
+    iotsim_init(&g_sim, seed, hw_time_ms(), station_base);
     ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed,
              (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS));
     ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS, IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES, (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS / 1000),
              (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS / 1000));
-    for (int i = 0; i < (int)(sizeof(sim_nodes) / sizeof(sim_nodes[0])); i++) {
+    if (datastore_open(&s_datastore, "iotdata"))
+        iotdata_state_init(&s_state, &s_datastore, "state");
+    else
+        ESP_LOGW(__tag_app, "state: persistence disabled (no datastore)");
+
+    /* Each node registers its own sequence as it comes up; the load afterwards fills them all in
+       one pass, and nothing may register after it. */
+    for (int i = 0; i < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])); i++) {
         const iotsim_sensor_t *s = iotsim_sensor(&g_sim, i);
-        idep_node_init(&sim_nodes[i], s->station_id);
-        sim_nodes[i].elapsed_ms = (uint32_t)((uint64_t)IDEP_RECEIVE_EVERY_MS * (uint32_t)i / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
+        idep_node_init(&s_nodes[i], s->station_id, &s_state, SIM_STATE_TAG(s->station_id));
+        s_nodes[i].elapsed_ms = (uint32_t)((uint64_t)IDEP_RECEIVE_EVERY_MS * (uint32_t)i / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
         ESP_LOGI(__tag_app, "  [%2d] %-18s stn=%-4" PRIu16 " bat=%" PRIu8 "%%", i, iotdata_vsuite_name(s->variant), s->station_id, s->battery);
     }
-    if (sim_cfg.receive_always)
+
+    /* The node is the source of truth; the engine is seeded from it and then advances in lockstep
+       (iotsim_poll bumps its own, transmit_packets calls idep_sequence_used on the node). The
+       engine keeping a counter at all is the remaining wart -- properly it would be handed the
+       sequence per packet, which means changing iotsim's encode signature. */
+    const bool restored = iotdata_state_load(&s_state);
+    for (int i = 0; i < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])); i++)
+        iotsim_sensor_sequence_set(&g_sim, i, idep_sequence(&s_nodes[i]));
+    ESP_LOGI(__tag_app, "state: %u block(s), %s", (unsigned)s_state.count, restored ? "restored" : "defaulted");
+    if (s_conf.receive_always)
         ESP_LOGI(__tag_app, "node: receiver always on (no advertisement needed), per sensor");
     else
         ESP_LOGI(__tag_app, "node: receive window %us every %uh, per sensor", (unsigned)(IDEP_RECEIVE_WINDOW_MS / 1000), (unsigned)(IDEP_RECEIVE_EVERY_MS / 3600000u));
@@ -332,25 +365,35 @@ bool app_init(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool app_exec(void) {
-    const uint32_t t0 = __MILLIS();
-    uint32_t tx_count_last = 0, window_last_ms = __MILLIS();
-    for (;;) {
-        const uint32_t now = __MILLIS(), delta = now - window_last_ms;
-        window_last_ms = now;
-        for (int i = 0; i < (int)(sizeof(sim_nodes) / sizeof(sim_nodes[0])); i++)
-            (void)idep_window_advance(&sim_cfg, &sim_nodes[i], delta);
+    const uint32_t start_ms = hw_time_ms();
+    uint32_t tx_count_last = 0, window_last_ms = hw_time_ms();
+    do {
+        const uint32_t delta = hw_time_ms() - window_last_ms;
+        window_last_ms = hw_time_ms();
+        for (int i = 0; i < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])); i++)
+            (void)idep_window_advance(&s_conf, &s_nodes[i], delta);
 
         transmit_packets(&g_sim);
         receive_packets(&g_sim);
         (void)iotdata_diagnostics_pump(); /* drains a DUMP a chunk per pass, so the loop keeps time */
+        (void)iotdata_state_tick(&s_state, hw_time_ms());
 
         if (tx_count >= tx_count_last + STATUS_EVERY_N_TX) {
             tx_count_last = tx_count;
-            ESP_LOGI(__tag_app, "status: tx=%" PRIu32 " errors=%" PRIu32 " uptime=%" PRIu32 "s", tx_count, tx_errors, (__MILLIS() - t0) / 1000);
+            ESP_LOGI(__tag_app, "status: tx=%" PRIu32 " errors=%" PRIu32 " uptime=%" PRIu32 "s", tx_count, tx_errors, (hw_time_ms() - start_ms) / 1000);
         }
-        __SLEEP_MS(POLL_INTERVAL_MS);
-    }
+        hw_delay_ms_yieldable(POLL_INTERVAL_MS);
+    } while (true);
     return true;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+void app_fail(void) {
+    ESP_LOGE(__tag_app, "failed");
+    iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
+    hw_delay_ms_yieldable(RESTART_MS);
+    esp_restart();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -365,7 +408,7 @@ void app_main(void) {
     else
         ESP_LOGI(__tag_app, "task watchdog: subscribed (timeout=%ds)", CONFIG_ESP_TASK_WDT_TIMEOUT_S);
 
-    if (!app_init() || !app_exec()) 
+    if (!app_init() || !app_exec())
         app_fail();
 }
 

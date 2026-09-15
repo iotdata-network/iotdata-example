@@ -486,7 +486,7 @@ bool iotsim_poll(iotsim_t *sim, uint32_t time_now_ms, iotsim_packet_t *out) {
 
         out->sensor_index = (uint8_t)i;
 
-        s->sequence++;
+        s->sequence = iotdata_sequence_next(s->sequence);
         s->tx_count++;
         s->tx_interval_ms = (uint32_t)_rng_range(sim, IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS, IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS);
         s->next_tx_ms = time_now_ms + s->tx_interval_ms;
@@ -501,6 +501,13 @@ const iotsim_sensor_t *iotsim_sensor(const iotsim_t *sim, int index) {
     if (index < 0 || index >= IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS)
         return NULL;
     return &sim->sensors[index];
+}
+
+bool iotsim_sensor_sequence_set(iotsim_t *sim, int index, uint16_t sequence) {
+    if (sim == NULL || index < 0 || index >= IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS || sequence > IOTDATA_SEQUENCE_ASSIGNABLE_MAX)
+        return false;
+    sim->sensors[index].sequence = sequence;
+    return true;
 }
 
 /* =========================================================================

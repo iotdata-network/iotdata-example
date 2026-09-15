@@ -96,6 +96,21 @@ typedef struct {
     char path[512];
 } bbox_state_t;
 
+/* The real state store, not a stub: mesh_begin registers a block in it, so a stub would be
+   testing a different mesh_begin than the one that ships. STATE_MESH_TAG has to match what
+   iotdata_gateway.c declares. No datastore behind it -- a store with no backing still accepts
+   inserts and touches, which is all the mesh does with it. */
+#include "device/d_module_datastore_linux.h"
+#include "iotdata_node_state.h"
+#include "iotdata_node_endpoint.h"
+#define STATE_NODE_TAG 0xB1E28004UL
+/* The station's identity, shared by the mesh exactly as iotdata_gateway.c shares it. No datastore
+   behind it: an unpersisted node still counts, it just starts from 0 after a restart. */
+static idep_node_t t_inode;
+/* Several cases stand up MORE THAN ONE simulated gateway (cross-gateway dedup), and each is a
+   distinct station, so they cannot share one node. */
+static idep_node_t t_inodes[8];
+
 #include "iotdata_station_filter.h"
 #include "iotdata_gateway_mesh.h"
 #include "iotdata_gateway_ddup.h"
@@ -192,7 +207,7 @@ static bool test_mesh_begin_disabled(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = false;
-    ASSERT(mesh_begin(&ms, &t_pool, test_packet_handler, test_dedup_handler, NULL));
+    ASSERT(mesh_begin(&ms, &t_inode, &t_pool, test_packet_handler, test_dedup_handler, NULL));
     ASSERT(ms.packet_handler == NULL);
     ASSERT(ms.dedup_handler == NULL);
     return true;
@@ -203,9 +218,10 @@ static bool test_mesh_begin_enabled(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.station_id = 0x0042;
+    idep_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
+    ms.inode = &t_inode;
     ms.beacon_interval = 60;
-    ASSERT(mesh_begin(&ms, &t_pool, test_packet_handler, test_dedup_handler, NULL));
+    ASSERT(mesh_begin(&ms, &t_inode, &t_pool, test_packet_handler, test_dedup_handler, NULL));
     ASSERT(ms.packet_handler == test_packet_handler);
     ASSERT(ms.dedup_handler == test_dedup_handler);
     return true;
@@ -216,7 +232,7 @@ static bool test_mesh_begin_no_packet_handler(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ASSERT(mesh_begin(&ms, &t_pool, NULL, test_dedup_handler, NULL));
+    ASSERT(mesh_begin(&ms, &t_inode, &t_pool, NULL, test_dedup_handler, NULL));
     ASSERT(ms.packet_handler == NULL);
     return true;
 }
@@ -231,7 +247,8 @@ static bool test_mesh_transmit_beacon_ok(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.station_id = 0x0042;
+    idep_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
+    ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
     mesh_transmit_beacon(&ms);
@@ -239,7 +256,7 @@ static bool test_mesh_transmit_beacon_ok(void) {
     ASSERT_EQ_INT(packet_handler_calls, 1);
     ASSERT_EQ_INT(captured_lengths[0], IOTDATA_MESH_BEACON_SIZE);
     ASSERT_EQ_INT(ms.stat_beacons_tx, 1u);
-    ASSERT_EQ_INT(ms.mesh_seq, 1u);
+    ASSERT_EQ_INT(idep_sequence(&t_inode), 1u);
 
     iotdata_mesh_beacon_t b;
     ASSERT(iotdata_mesh_unpack_beacon(captured_packets[0], captured_lengths[0], &b));
@@ -256,7 +273,8 @@ static bool test_mesh_transmit_beacon_fail(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.station_id = 0x0042;
+    idep_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
+    ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler_fail;
 
     mesh_transmit_beacon(&ms);
@@ -271,7 +289,8 @@ static bool test_mesh_beacon_generation_wraps(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.station_id = 0x0001;
+    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
     ms.beacon_generation = (uint16_t)(IOTDATA_MESH_GENERATION_MOD - 1);
 
@@ -291,7 +310,8 @@ static bool test_mesh_transmit_ack_ok(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.station_id = 0x0001;
+    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
     mesh_transmit_ack(&ms, 0x0002, 100);
@@ -321,7 +341,8 @@ static bool test_mesh_receive_forward_new(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.station_id = 0x0001;
+    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
     uint8_t inner[8] = { 0x10, 0x42, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD };
@@ -346,7 +367,8 @@ static bool test_mesh_receive_forward_too_short(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.station_id = 0x0001;
+    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
     uint8_t short_buf[4] = { 0xF0, 0x05, 0x00, 0x32 };
@@ -381,7 +403,8 @@ static void fwd_test_state(process_state_t *ps, mesh_state_t *ms, stat_state_t *
     memset(ss, 0, sizeof(*ss));
     ms->pool = &t_pool;
     ms->enabled = enabled;
-    ms->station_id = 0x0001;
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ms->inode = &t_inode;
     ms->packet_handler = test_packet_handler;
     ms->dedup_handler = test_dedup_handler;
     dedup_handler_result = dedup_says_new;
@@ -531,17 +554,18 @@ static bool test_mesh_seq_increments(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.station_id = 0x0001;
+    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
     mesh_transmit_beacon(&ms);
-    ASSERT_EQ_INT(ms.mesh_seq, 1u);
+    ASSERT_EQ_INT(idep_sequence(&t_inode), 1u);
 
     mesh_transmit_ack(&ms, 0x0002, 1);
-    ASSERT_EQ_INT(ms.mesh_seq, 2u);
+    ASSERT_EQ_INT(idep_sequence(&t_inode), 2u);
 
     mesh_transmit_beacon(&ms);
-    ASSERT_EQ_INT(ms.mesh_seq, 3u);
+    ASSERT_EQ_INT(idep_sequence(&t_inode), 3u);
     return true;
 }
 
@@ -879,7 +903,7 @@ static bool test_ddup_begin_disabled(void) {
     ds.enabled = false;
     iotdata_mesh_dedup_ring_t ring;
 
-    ASSERT(ddup_begin(&ds, 0x0001, &ring, NULL));
+    ASSERT(ddup_begin(&ds, &t_inode, &ring, NULL));
     return true;
 }
 
@@ -947,7 +971,8 @@ static bool test_ddup_peers_send_batching(void) {
     memset(&ds, 0, sizeof(ds));
     ds.enabled = true;
     ds.port = 19010;
-    ds.gateway_id = 0x0001;
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ds.inode = &t_inode;
     iotdata_mesh_dedup_ring_t ring;
     iotdata_mesh_dedup_init(&ring);
     ds.ddup_ring = &ring;
@@ -1020,7 +1045,8 @@ static bool test_ddup_peer_communication(void) {
     sa.enabled = true;
     sa.port = 19001;
     sa.delay_ms = 5;
-    sa.gateway_id = 0x0001;
+    idep_node_init(&t_inodes[0], 0x0001, NULL, 0u);
+    sa.inode = &t_inodes[0];
     sa.running = &test_running;
     iotdata_mesh_dedup_ring_t ring_a;
     iotdata_mesh_dedup_init(&ring_a);
@@ -1036,7 +1062,8 @@ static bool test_ddup_peer_communication(void) {
     sb.enabled = true;
     sb.port = 19002;
     sb.delay_ms = 5;
-    sb.gateway_id = 0x0002;
+    idep_node_init(&t_inodes[1], 0x0002, NULL, 0u);
+    sb.inode = &t_inodes[1];
     sb.running = &test_running;
     iotdata_mesh_dedup_ring_t ring_b;
     iotdata_mesh_dedup_init(&ring_b);
@@ -1089,7 +1116,8 @@ static bool test_ddup_bidirectional_sync(void) {
     sa.enabled = true;
     sa.port = 19003;
     sa.delay_ms = 5;
-    sa.gateway_id = 0x0001;
+    idep_node_init(&t_inodes[0], 0x0001, NULL, 0u);
+    sa.inode = &t_inodes[0];
     sa.running = &test_running;
     iotdata_mesh_dedup_ring_t ring_a;
     iotdata_mesh_dedup_init(&ring_a);
@@ -1102,7 +1130,8 @@ static bool test_ddup_bidirectional_sync(void) {
     sb.enabled = true;
     sb.port = 19004;
     sb.delay_ms = 5;
-    sb.gateway_id = 0x0002;
+    idep_node_init(&t_inodes[1], 0x0002, NULL, 0u);
+    sb.inode = &t_inodes[1];
     sb.running = &test_running;
     iotdata_mesh_dedup_ring_t ring_b;
     iotdata_mesh_dedup_init(&ring_b);
@@ -1162,7 +1191,8 @@ static bool test_ddup_three_gateway_sync(void) {
         states[i].enabled = true;
         states[i].port = ports[i];
         states[i].delay_ms = 5;
-        states[i].gateway_id = (uint16_t)(i + 1);
+        idep_node_init(&t_inodes[i], (uint16_t)(i + 1), NULL, 0u);
+        states[i].inode = &t_inodes[i];
         states[i].running = &test_running;
         iotdata_mesh_dedup_init(&rings[i]);
         states[i].ddup_ring = &rings[i];
@@ -1446,7 +1476,8 @@ static bool test_stat_mesh_peer_fill_and_evict(void) {
 
 static void ctrl_test_state(ctrl_state_t *const st) {
     memset(st, 0, sizeof(*st));
-    st->station_id = CTRL_TEST_STATION;
+    idep_node_init(&t_inode, CTRL_TEST_STATION, NULL, 0u);
+    st->inode = &t_inode;
     st->pool = &t_pool;
     buffer_queue_init(&st->queue, st->queue_slot, CTRL_QUEUE_MAX, &t_pool);
     g_ctrl = st;
@@ -1457,23 +1488,23 @@ static void ctrl_test_state(ctrl_state_t *const st) {
    peek() is the right tool here precisely because this queue has one thread in the test: the
    handle cannot go stale under us the way it could on a queue another thread takes from. */
 static bool ctrl_staged(const ctrl_state_t *const st) {
-    return buffer_queue_peek(&st->queue, (uint32_t)__ticks_ms(), NULL, NULL) != BUFFER_NONE;
+    return buffer_queue_peek(&st->queue, hw_time_ms(), NULL, NULL) != BUFFER_NONE;
 }
 
 static uint16_t ctrl_staged_target(const ctrl_state_t *const st) {
     uint32_t key = 0;
-    return buffer_queue_peek(&st->queue, (uint32_t)__ticks_ms(), NULL, &key) != BUFFER_NONE ? (uint16_t)key : 0;
+    return buffer_queue_peek(&st->queue, hw_time_ms(), NULL, &key) != BUFFER_NONE ? (uint16_t)key : 0;
 }
 
 static uint16_t ctrl_staged_len(const ctrl_state_t *const st) {
-    const buffer_handle_t h = buffer_queue_peek(&st->queue, (uint32_t)__ticks_ms(), NULL, NULL);
+    const buffer_handle_t h = buffer_queue_peek(&st->queue, hw_time_ms(), NULL, NULL);
     return h != BUFFER_NONE ? buffer_len(st->pool, h) : 0;
 }
 
 /* drain one the way ctrl_tick does, so a test can check what comes out and in what order */
 static bool ctrl_test_take(ctrl_state_t *const st, uint8_t *const key0, uint16_t *const target) {
     uint32_t k = 0;
-    const buffer_handle_t h = buffer_queue_take(&st->queue, (uint32_t)__ticks_ms(), NULL, &k);
+    const buffer_handle_t h = buffer_queue_take(&st->queue, hw_time_ms(), NULL, &k);
     if (h == BUFFER_NONE)
         return false;
     const uint8_t *const data = buffer_data(st->pool, h);
@@ -1487,7 +1518,7 @@ static bool ctrl_test_take(ctrl_state_t *const st, uint8_t *const key0, uint16_t
 
 static const uint8_t *ctrl_staged_bytes(const ctrl_state_t *const st) {
     static const uint8_t none[8] = { 0 }; /* so a FAIL print on an empty queue is not a crash */
-    const buffer_handle_t h = buffer_queue_peek(&st->queue, (uint32_t)__ticks_ms(), NULL, NULL);
+    const buffer_handle_t h = buffer_queue_peek(&st->queue, hw_time_ms(), NULL, NULL);
     const uint8_t *const p = h != BUFFER_NONE ? buffer_data(st->pool, h) : NULL;
     return p ? p : none;
 }
@@ -1700,6 +1731,8 @@ static bool test_table_report_json(void) {
     static node_state_t ns;
     static stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
@@ -1760,6 +1793,8 @@ static bool test_text_values_still_render_as_strings(void) {
     static node_state_t ns;
     static stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
 
@@ -1788,6 +1823,8 @@ static bool test_version_report_as_the_monitor_sees_it(void) {
     node_state_t ns;
     stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
 
@@ -1877,17 +1914,21 @@ static bool test_ctrl_mesh_update_entry_shape(void) {
 static bool test_ctrl_response_topic_is_shared(void) {
     node_state_t ns;
     memset(&ns, 0, sizeof(ns));
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ns.inode = &t_inode;
     stat_state_t ss;
     memset(&ss, 0, sizeof(ss));
     bbox_state_t bb;
     memset(&bb, 0, sizeof(bb));
-    ASSERT(node_begin(&ns, 0x0001, NULL, &ss, &bb, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ASSERT(node_begin(&ns, &t_inode, NULL, &ss, &bb, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
 
     ctrl_state_t st;
     ctrl_test_state(&st);
     /* ctrl_begin sets the topics before it subscribes, so the (expected) subscribe failure with no
        broker does not stop us checking them */
-    (void)ctrl_begin(&st, "pre", 0x0001, &bb, &t_pool);
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    (void)ctrl_begin(&st, "pre", &t_inode, &bb, &t_pool);
 
     ASSERT(strcmp(st.topic_req, "pre/manage/req") == 0);
     ASSERT(strcmp(st.topic_resp, "pre/manage/resp") == 0);
@@ -2002,7 +2043,7 @@ static bool test_ctrl_staged_command_expires(void) {
     ctrl_test_state(&st);
     ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
-    const uint32_t now_ms = (uint32_t)__ticks_ms();
+    const uint32_t now_ms = hw_time_ms();
     ASSERT_EQ_INT(buffer_queue_expire(&st.queue, now_ms + CTRL_QUEUE_TTL_MS - 1000), 0u); /* not yet */
     ASSERT_EQ_INT(buffer_queue_expire(&st.queue, now_ms + CTRL_QUEUE_TTL_MS + 1000), 1u);
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 0u);
@@ -2163,6 +2204,7 @@ static bool test_mesh_node_control_keys_are_all_handled(void) {
     static bbox_state_t bb;
     memset(&cs, 0, sizeof(cs));
     memset(&bb, 0, sizeof(bb));
+    cs.inode = ms.inode; /* same station: the accessors dereference this, a zeroed state cannot */
     /* a real recorder, in RAM: blackbox_enable/clear/pull walk the handle, so a zeroed one is a
        crash rather than a no-op. BLACKBOX_PERSIST_NONE (set at the top of this file) keeps it off
        any filesystem. */
@@ -2330,6 +2372,8 @@ static bool test_control_report_is_published(void) {
     static node_state_t ns;
     static stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
@@ -2347,6 +2391,8 @@ static bool test_down_echo_is_not_published(void) {
     static node_state_t ns;
     static stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
@@ -2408,7 +2454,8 @@ static bool test_control_over_the_air_reaches_the_same_handler(void) {
     static stat_state_t ss;
     mesh_node_test_state(&ps, &ms, &ss);
     node_state_t *const ns = ps.state_node;
-    ns->station_id = 0x0001;
+    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    ns->inode = &t_inode;
 
     /* another gateway addresses a CONTROL at ours: a DOWN frame whose station field is US */
     uint8_t kv[16], frame[TEST_FRAME_MAX];

@@ -74,7 +74,7 @@ typedef struct {
     iotdata_mesh_dedup_entry_t pending[DDUP_PENDING_MAX];
     int pending_count;
     struct timespec pending_first;
-    uint16_t gateway_id;
+    idep_node_t *inode;
     iotdata_mesh_dedup_ring_t *ddup_ring;
     volatile bool *running;
     bool debug;
@@ -229,7 +229,7 @@ void ddup_peers_send(ddup_state_t *st, int send_fd, iotdata_mesh_dedup_entry_t *
     int send_offset = 0;
     while (send_offset < send_count) {
         const int entry_count = DDUP_MIN(send_count - send_offset, DDUP_PKT_BATCH_SIZE);
-        ddup_packet_set_gateway_id(st->_buffer_packet, st->gateway_id);
+        ddup_packet_set_gateway_id(st->_buffer_packet, idep_station(st->inode));
         ddup_packet_set_entry_count(st->_buffer_packet, entry_count);
         for (int entry_index = 0; entry_index < entry_count; entry_index++) {
             ddup_packet_set_entry_station(st->_buffer_packet, entry_index, send_entries[send_offset + entry_index].station_id);
@@ -299,7 +299,7 @@ bool ddup_insert(ddup_state_t *st, uint16_t station_id, uint16_t sequence) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool ddup_begin(ddup_state_t *st, uint16_t gateway_id, iotdata_mesh_dedup_ring_t *ddup_ring, volatile bool *running) {
+bool ddup_begin(ddup_state_t *st, idep_node_t *inode, iotdata_mesh_dedup_ring_t *ddup_ring, volatile bool *running) {
     assert(st && ddup_ring);
     // XXX, mesh code uses the dedup ring as well.
     st->ddup_ring = ddup_ring;
@@ -308,8 +308,8 @@ bool ddup_begin(ddup_state_t *st, uint16_t gateway_id, iotdata_mesh_dedup_ring_t
         return true;
     }
     st->running = running;
-    st->gateway_id = gateway_id;
-    PRINTF_INFO("ddup: enabled, port=%" PRIu16 ", peers=%d, gateway_id=%04" PRIX16 ", delay=%" PRIu32 "ms\n", st->port, st->peers_count, st->gateway_id, st->delay_ms);
+    st->inode = inode;
+    PRINTF_INFO("ddup: enabled, port=%" PRIu16 ", peers=%d, gateway_id=%04" PRIX16 ", delay=%" PRIu32 "ms\n", st->port, st->peers_count, idep_station(st->inode), st->delay_ms);
     ddup_peers_resolve(st);
     pthread_mutex_init(&st->mutex, NULL);
     if (pthread_create(&st->thread, NULL, ddup_thread_func, st) != 0) {

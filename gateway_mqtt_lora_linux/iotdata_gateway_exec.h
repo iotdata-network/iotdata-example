@@ -284,7 +284,7 @@ static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t
             return false;
         const stat_peer_t *const e = &st->state_stat->peers[slot];
         iotdata_node_table_put_u16(row, 0, e->station_id);
-        iotdata_node_table_put_u16(row, 2, st->state_mesh->station_id); /* we ARE the gateway */
+        iotdata_node_table_put_u16(row, 2, idep_station(st->state_mesh->inode)); /* we ARE the gateway */
         row[4] = e->cost;
         iotdata_node_table_put_u16(row, 5, e->generation);
         row[7] = 0; /* this peer table is built from beacons, which carry no RSSI of their own */
@@ -311,7 +311,7 @@ static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *state_ctrl, volatile bool *running) {
+bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *state_ctrl, volatile bool *running) {
     assert(st && state_node && state_mesh && state_ddup && state_stat && state_ctrl && running);
 
     g_exec = st;
@@ -332,7 +332,7 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
         PRINTF_INFO("exec: variant[%d] = \"%s\" (pres_bytes=%" PRIu8 ") -> %s/%s/<station>\n", i, vdef->name, vdef->num_pres_bytes, st->mqtt_topic_prefix, vdef->name);
     }
     if (st->state_mesh->enabled)
-        PRINTF_INFO("exec: variant[15] = mesh control (gateway station=%04" PRIX16 ")\n", st->state_mesh->station_id);
+        PRINTF_INFO("exec: variant[15] = mesh control (gateway station=%04" PRIX16 ")\n", idep_station(st->state_mesh->inode));
 
     while (*running) {
 
@@ -426,7 +426,11 @@ bool process_run(process_state_t *st, node_state_t *state_node, mesh_state_t *st
 
         // network / stations table
         if (*running && st->stat_netw_interval > 0 && intervalable(st->stat_netw_interval, &st->stat_netw_interval_last) > 0)
-            netw_report(&st->network, st->state_mesh->station_id);
+            netw_report(&st->network, idep_station(st->state_mesh->inode));
+
+        // state
+        if (*running)
+            iotdata_state_tick(state_store, hw_time_ms());
     }
 
     if (st->rx_held != BUFFER_NONE) {

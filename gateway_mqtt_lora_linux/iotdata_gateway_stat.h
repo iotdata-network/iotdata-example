@@ -131,7 +131,7 @@ typedef struct {
 typedef struct {
     char mqtt_topic[STAT_TOPIC_STR_MAX];
     const char *version;
-    uint16_t station_id;
+    idep_node_t *inode;
     time_t start_time;
     stat_link_t link;
     stat_station_t stations[STAT_MAX_STATIONS];
@@ -448,7 +448,7 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         cJSON *m = cJSON_AddObjectToObject(root, "mesh");
         cJSON_AddBoolToObject(m, "enabled", mesh->enabled);
         char buf[4 + 1];
-        cJSON_AddStringToObject(m, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, mesh->station_id));
+        cJSON_AddStringToObject(m, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, idep_station(mesh->inode)));
         cJSON_AddNumberToObject(m, "beacons_tx", (double)mesh->stat_beacons_tx);
         /* per frame type: only types actually seen are emitted, so the object stays small on a
            quiet link but gains a key the first time a new type appears */
@@ -547,7 +547,7 @@ cJSON *stat_build_stat_json(const stat_state_t *const s, const mesh_state_t *con
     const time_t now = time(NULL);
     cJSON *root = cJSON_CreateObject();
     char buf[4 + 1];
-    cJSON_AddStringToObject(root, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, s->station_id));
+    cJSON_AddStringToObject(root, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, idep_station(s->inode)));
     cJSON_AddStringToObject(root, "version", s->version ? s->version : "");
     cJSON_AddNumberToObject(root, "time", (double)now);
     cJSON_AddNumberToObject(root, "uptime_secs", (double)(now - s->start_time));
@@ -643,7 +643,7 @@ void stat_publish(stat_state_t *const s, const mesh_state_t *const mesh, const d
         char *json = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
         if (json) {
-            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s/%04" PRIX16, s->mqtt_topic, s->station_id), json, (int)strlen(json));
+            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s/%04" PRIX16, s->mqtt_topic, idep_station(s->inode)), json, (int)strlen(json));
             free(json);
         }
     }
@@ -658,12 +658,12 @@ void stat_display(stat_state_t *const s, const mesh_state_t *const mesh, const d
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, uint16_t station_id, const char *const version, const lora_config_t *const lora_config, const buffer_pool_t *const pool) {
+bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, idep_node_t *const inode, const char *const version, const lora_config_t *const lora_config, const buffer_pool_t *const pool) {
     assert(topic_prefix && version && lora_config);
 
     s->pool = pool;
     s->version = version;
-    s->station_id = station_id;
+    s->inode = inode;
     s->start_time = time(NULL);
     s->link.name = "e22-900t22";
     s->link.type = "lora";
@@ -675,7 +675,7 @@ bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic
     s->link.packet_rate_bps = lora_config->air_data_rate;
     s->link.transmit_power_dbm = lora_config->transmit_power;
 
-    PRINTF_INFO("stat: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", s->station_id, s->link.name, s->link.channel, s->link.frequency_khz);
+    PRINTF_INFO("stat: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", idep_station(s->inode), s->link.name, s->link.channel, s->link.frequency_khz);
 
     return true;
 }

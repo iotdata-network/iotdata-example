@@ -111,4 +111,8 @@ bool iotsim_poll(iotsim_t *sim, uint32_t time_now_ms, iotsim_packet_t *out);
 /* Get sensor info (for debug/display) */
 const iotsim_sensor_t *iotsim_sensor(const iotsim_t *sim, int index);
 
+/* Restore a sensor's sequence after iotsim_init (which assigns the station ids, and zeroes these).
+   Refuses the reserved DOWN sentinel. */
+bool iotsim_sensor_sequence_set(iotsim_t *sim, int index, uint16_t sequence);
+
 #endif /* IOTDATA_SIMULATOR_H */

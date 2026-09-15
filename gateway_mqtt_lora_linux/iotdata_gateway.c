@@ -65,6 +65,7 @@
 #define IOTDATA_VERSION_HAS_BLACKBOX
 
 #define CONFIG_FILE_DEFAULT           "iotdata_gateway.cfg"
+#define STATE_PATH_DEFAULT            "/var/lib/iotdata"
 
 #define SERIAL_PORT_DEFAULT           "/dev/e22900t22u"
 #define SERIAL_RATE_DEFAULT           9600
@@ -148,11 +149,12 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #define PIN_DEVICE_LORA_M1  GPIO_NUM_NC
 
 #include "d_interface_e22900t22.h"
-
 /* The transmit hook the node/mesh/ctrl layers take: bool(const uint8_t *, int). */
 static bool lora_packet_write(const uint8_t *const packet, const int length) {
     return length > 0 && lora_write(packet, (size_t)length) == ESP_OK;
 }
+
+#include "d_module_datastore_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -180,16 +182,96 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_node_diagnostics.h"
 // content
 #include "iotdata_station_filter.h"
+#include "iotdata_node_state.h"
+#include "iotdata_node_endpoint.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
+typedef struct {
+    bool enabled;
+    const char *directory;
+    int max_records, max_seconds, max_bytes;
+    int generations;
+} bbox_conf_t;
 typedef struct {
     blackbox_handle_t handle;
     blackbox_config_t config;
     char pool[IOTDATA_BLACKBOX_POOL_SZ];
     char path[512];
 } bbox_state_t;
+
+static void gateway_blackbox_begin(bbox_state_t *state, const bbox_conf_t *conf) {
+    state->config = (blackbox_config_t){
+        .pool = state->pool,
+        .pool_sz = sizeof(state->pool),
+        .flush = (conf->max_seconds > 0) ? BLACKBOX_FLUSH_BATCH_TIME : BLACKBOX_FLUSH_WRITE_THROUGH,
+        .flush_ms = (conf->max_seconds > 0) ? (uint32_t)conf->max_seconds * 1000u : 0u,
+        .max_records = (conf->max_records > 0) ? (uint32_t)conf->max_records : 0u,
+        .max_bytes = (conf->max_bytes > 0) ? (uint32_t)conf->max_bytes : 0u,
+        .generations = (uint8_t)((conf->generations < 0)     ? 0
+                                 : (conf->generations > 255) ? 255
+                                                             : conf->generations),
+        .persist_arg = snprintf_inline(state->path, sizeof(state->path), "%s/iotdata_gateway_blackbox.csv", conf->directory),
+        .enabled = conf->enabled,
+    };
+    if (blackbox_init(&state->handle, &state->config) == 0) {
+        (void)iotdata_blackbox_lifecycle(&state->handle, IOTDATA_BB_LC_START, 0);
+        PRINTF_INFO("blackbox: %s (path=%s, flush=%s)\n", conf->enabled ? "enabled" : "disabled (default)", state->path, (conf->max_seconds > 0) ? "ram-cache/batched" : "write-through");
+    } else
+        PRINTF_ERROR("blackbox: init failed (path=%s)\n", state->path);
+}
+
+static void gateway_blackbox_end(bbox_state_t *state) {
+    if (state->handle.cfg != NULL) {
+        (void)iotdata_blackbox_lifecycle(&state->handle, IOTDATA_BB_LC_STOP, 0);
+        (void)blackbox_flush(&state->handle);
+        blackbox_deinit(&state->handle);
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+typedef struct {
+    const char *directory;
+} store_conf_t;
+typedef struct {
+    datastore_t datastore;
+    iotdata_node_state_t node;
+    bool opened;
+} store_state_t;
+
+#define STATE_NODE_TAG 0xB1E28004UL
+
+static void gateway_state_begin(store_state_t *state, const store_conf_t *conf) {
+    if (datastore_open(&state->datastore, conf->directory)) {
+        iotdata_state_init(&state->node, &state->datastore, "state");
+        state->opened = true;
+        if (!datastore_persistent(&state->datastore))
+            PRINTF_WARN("state: '%s' is a tmpfs -- -- nothing will persist across a reboot\n", conf->directory);
+        else
+            PRINTF_INFO("state: '%s'\n", conf->directory);
+    } else
+        PRINTF_ERROR("state: cannot open '%s' (%s) -- nothing will persist across a restart\n", conf->directory, strerror(errno));
+}
+
+static void gateway_state_restore(store_state_t *state) {
+    if (state->opened) {
+        const bool restored = iotdata_state_load(&state->node);
+        PRINTF_INFO("state: %u block(s), %s\n", (unsigned)state->node.count, restored ? "restored" : "defaulted");
+    }
+}
+
+static void gateway_state_end(store_state_t *state) {
+    if (state->opened) {
+        if (state->node.count > 0)
+            (void)iotdata_state_flush(&state->node);
+        datastore_close(&state->datastore);
+        state->opened = false;
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 #include "iotdata_gateway_util.h"
 #include "iotdata_gateway_mesh.h"
@@ -260,6 +342,8 @@ const struct option config_options [] = {
     {"blackbox-file-max-bytes",         required_argument, 0, 0},
     {"blackbox-file-generations",       required_argument, 0, 0},
     //
+    {"state",                           required_argument, 0, 0},
+    //
     {"debug",                           required_argument, 0, 0},
     {"debug-data",                      required_argument, 0, 0},
     {0, 0, 0, 0}
@@ -317,6 +401,9 @@ const config_option_help_t config_options_help [] = {
     {"blackbox-file-directory",         "CSV file directory (default: '.')"},
     {"blackbox-file-max-bytes",         "CSV file maximum bytes, rotates past this (0 = unbounded, default: 0)"},
     {"blackbox-file-generations",       "CSV file maximum rotated generations to keep (<file>.1 .. .N; 0 = overwrite/no backup, default: 10)"},
+    //
+    {"state",                           "Persistent state directory (default: '" STATE_PATH_DEFAULT "')"},
+    //
     {"debug",                           "Debug output (true/false)"},
     {"debug-data",                      "Debug data (hex dump of received packet data) output (true/false)"},
 };
@@ -423,15 +510,10 @@ void mesh_config_populate(mesh_state_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
     cfg->enabled = config_get_bool("mesh-enable", false);
-    cfg->station_id = (uint16_t)config_get_integer("mesh-station-id", GATEWAY_STATION_ID_DEFAULT);
-    if (!iotdata_station_is_assignable(cfg->station_id)) {
-        PRINTF_ERROR("config: mesh-station-id %u is reserved (must be 1..%u) -- using %u\n", (unsigned)cfg->station_id, (unsigned)IOTDATA_STATION_ASSIGNABLE_MAX, (unsigned)GATEWAY_STATION_ID_DEFAULT);
-        cfg->station_id = GATEWAY_STATION_ID_DEFAULT;
-    }
     cfg->beacon_interval = (time_t)config_get_integer("mesh-beacon-interval", INTERVAL_BEACON_DEFAULT);
     cfg->debug = config_get_bool("mesh-debug", false);
 
-    PRINTF_INFO("config: mesh: enabled=%c, station-id=%04" PRIX16 ", beacon-interval=%" PRIu32 "s, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->station_id, (uint32_t)cfg->beacon_interval, cfg->debug ? "on" : "off");
+    PRINTF_INFO("config: mesh: enabled=%c, beacon-interval=%" PRIu32 "s, debug=%s\n", cfg->enabled ? 'y' : 'n', (uint32_t)cfg->beacon_interval, cfg->debug ? "on" : "off");
 }
 
 void ddup_config_populate(ddup_state_t *cfg) {
@@ -450,10 +532,8 @@ void ddup_config_populate(ddup_state_t *cfg) {
 void stat_config_populate(stat_state_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
-    const char *topic = config_get_string("stat-publish-mqtt-topic-prefix", STAT_MQTT_TOPIC_DEFAULT);
-    strncpy(cfg->mqtt_topic, topic, sizeof(cfg->mqtt_topic) - 1);
-    cfg->mqtt_topic[sizeof(cfg->mqtt_topic) - 1] = '\0';
-    size_t len = strlen(cfg->mqtt_topic);
+    snprintf(cfg->mqtt_topic, sizeof(cfg->mqtt_topic), "%s", config_get_string("stat-publish-mqtt-topic-prefix", STAT_MQTT_TOPIC_DEFAULT));
+    const size_t len = strlen(cfg->mqtt_topic);
     if (len > 0 && cfg->mqtt_topic[len - 1] == '/')
         cfg->mqtt_topic[len - 1] = '\0';
 
@@ -480,6 +560,7 @@ void process_config_populate(process_state_t *cfg) {
 BUFFER_POOL_DECLARE(s_pool, BUFFER_SLOTS_TOTAL, BUFFER_LENGTH_TOTAL);
 
 typedef struct {
+    iotdata_version_caps_t iotd_caps;
     const char *lora_port;
     lora_config_t lora_config;
     mqtt_config_t mqtt_config;
@@ -489,13 +570,13 @@ typedef struct {
     node_state_t node_state;
     ctrl_state_t ctrl_state;
     bbox_state_t bbox_state;
+    store_state_t store_state;
+    idep_node_t inode;
     process_state_t process_state;
     volatile bool running;
 } system_t;
 
 static system_t system_state;
-
-static iotdata_version_caps_t s_caps;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -533,70 +614,47 @@ void signal_handler(const int sig __attribute__((unused))) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void gateway_blackbox_begin(bbox_state_t *state) {
-    const bool enabled = config_get_bool("blackbox-enabled", false);
-    const int max_records = (int)config_get_integer("blackbox-ram-max-records", 0);
-    const int max_seconds = (int)config_get_integer("blackbox-ram-max-seconds", 0);
-    const int max_bytes = (int)config_get_integer("blackbox-file-max-bytes", 0);
-    const char *const dir = config_get_string("blackbox-file-directory", ".");
-    const int gens = (int)config_get_integer("blackbox-file-generations", 10);
-    snprintf(state->path, sizeof(state->path), "%s/iotdata_gateway_blackbox.csv", dir);
-    state->config = (blackbox_config_t){
-        .pool = state->pool,
-        .pool_sz = sizeof(state->pool),
-        .flush = (max_seconds > 0) ? BLACKBOX_FLUSH_BATCH_TIME : BLACKBOX_FLUSH_WRITE_THROUGH,
-        .flush_ms = (max_seconds > 0) ? (uint32_t)max_seconds * 1000u : 0u,
-        .max_records = (max_records > 0) ? (uint32_t)max_records : 0u,
-        .max_bytes = (max_bytes > 0) ? (uint32_t)max_bytes : 0u,
-        .generations = (uint8_t)((gens < 0)     ? 0
-                                 : (gens > 255) ? 255
-                                                : gens),
-        .persist_arg = state->path,
-        .enabled = enabled,
-    };
-    if (blackbox_init(&state->handle, &state->config) != 0) {
-        PRINTF_ERROR("blackbox: init failed (path=%s)\n", state->path);
-        return;
-    }
-    (void)iotdata_blackbox_lifecycle(&state->handle, IOTDATA_BB_LC_START, 0);
-    PRINTF_INFO("blackbox: %s (path=%s, flush=%s)\n", enabled ? "enabled" : "disabled (default)", state->path, (max_seconds > 0) ? "ram-cache/batched" : "write-through");
+static uint16_t gateway_station_config(void) {
+    const uint16_t id = (uint16_t)config_get_integer("mesh-station-id", GATEWAY_STATION_ID_DEFAULT);
+    if (iotdata_station_is_assignable(id))
+        return id;
+    PRINTF_ERROR("config: mesh-station-id %u is reserved (must be 1..%u) -- using %u\n", (unsigned)id, (unsigned)IOTDATA_STATION_ASSIGNABLE_MAX, (unsigned)GATEWAY_STATION_ID_DEFAULT);
+    return GATEWAY_STATION_ID_DEFAULT;
 }
-
-static void gateway_blackbox_end(bbox_state_t *state) {
-    if (state->handle.cfg != NULL) {
-        (void)iotdata_blackbox_lifecycle(&state->handle, IOTDATA_BB_LC_STOP, 0);
-        (void)blackbox_flush(&state->handle);
-        blackbox_deinit(&state->handle);
-    }
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
 int main(int argc, char *argv[]) {
 
     int ret = EXIT_FAILURE;
 
     setbuf(stdout, NULL);
-    PRINTF_INFO("starting (iotdata gateway: variants=%d, features=mesh,dedup,stats,mqtt)\n", IOTDATA_VARIANT_MAPS_COUNT);
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
     system_t *state = &system_state;
 
+    PRINTF_INFO("starting (iotdata gateway: variants=%d, features=mesh,dedup,stats,mqtt)\n", IOTDATA_VARIANT_MAPS_COUNT);
+
     if (!system_config(state, argc, argv))
         return ret;
-    const uint16_t station_id = state->mesh_state.station_id; // from config
 
-    iotdata_version_caps_init(&s_caps); /* seeds the build-time features */
-    (void)iotdata_version_caps_add(&s_caps, IOTDATA_VERSION_CAP_RADIO, state->lora_config.module == LORA_MODULE_USB ? IOTDATA_VERSION_RADIO_E22_USB : IOTDATA_VERSION_RADIO_E22_DIP);
+    iotdata_version_caps_init(&state->iotd_caps);
+    iotdata_version_caps_add(&state->iotd_caps, IOTDATA_VERSION_CAP_RADIO, state->lora_config.module == LORA_MODULE_USB ? IOTDATA_VERSION_RADIO_E22_USB : IOTDATA_VERSION_RADIO_E22_DIP);
+
     char vbuf[IOTDATA_VERSION_STR_MAX + 1];
-    PRINTF_INFO("version: %s\n", iotdata_version_str(vbuf, sizeof(vbuf), &s_caps));
+    PRINTF_INFO("version: %s\n", iotdata_version_str(vbuf, sizeof(vbuf), &state->iotd_caps));
     if (!iotdata_version_stamp_is_real())
         PRINTF_WARN("version: build stamp is unset -- this binary cannot say when it was built\n");
 
     BUFFER_POOL_INIT(s_pool, BUFFER_SLOTS_TOTAL, BUFFER_LENGTH_TOTAL, BUFFER_LENGTH_PREFIX);
-
-    gateway_blackbox_begin(&state->bbox_state);
+    gateway_blackbox_begin(&state->bbox_state, &(const bbox_conf_t){ .enabled = config_get_bool("blackbox-enabled", false),
+                                                                     .directory = config_get_string("blackbox-file-directory", "."),
+                                                                     .max_records = (int)config_get_integer("blackbox-ram-max-records", 0),
+                                                                     .max_seconds = (int)config_get_integer("blackbox-ram-max-seconds", 0),
+                                                                     .max_bytes = (int)config_get_integer("blackbox-file-max-bytes", 0),
+                                                                     .generations = (int)config_get_integer("blackbox-file-generations", 10) });
+    gateway_state_begin(&state->store_state, &(const store_conf_t){ .directory = config_get_string("state", STATE_PATH_DEFAULT) });
+    idep_node_init(&state->inode, gateway_station_config(), &state->store_state.node, STATE_NODE_TAG);
+    PRINTF_INFO("node: station=%04" PRIX16 "\n", idep_station(&state->inode));
 
     // DEVICE (LORA)
     hw_uart_set_device(state->lora_port);
@@ -619,20 +677,21 @@ int main(int argc, char *argv[]) {
 
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
     (void)netw_begin(&state->process_state.network);
-    if (!node_begin(&state->node_state, station_id, &s_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row, ctrl_from_iotdata_keys,
-                    (uint8_t)(sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0])), state->process_state.mqtt_topic_prefix))
+    if (!node_begin(&state->node_state, &state->inode, &state->iotd_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row,
+                    ctrl_from_iotdata_keys, (uint8_t)(sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0])), state->process_state.mqtt_topic_prefix))
         goto end_mqtt;
-    if (!mesh_begin(&state->mesh_state, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
+    if (!mesh_begin(&state->mesh_state, &state->inode, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
         goto end_node;
-    if (!ddup_begin(&state->ddup_state, station_id, &state->mesh_state.dedup_ring, &state->running))
+    if (!ddup_begin(&state->ddup_state, &state->inode, &state->mesh_state.dedup_ring, &state->running))
         goto end_mesh;
-    if (!ctrl_begin(&state->ctrl_state, state->process_state.mqtt_topic_prefix, station_id, &state->bbox_state, &s_pool))
+    if (!ctrl_begin(&state->ctrl_state, state->process_state.mqtt_topic_prefix, &state->inode, &state->bbox_state, &s_pool))
         goto end_ddup;
 
     // PROCESS
-    stat_begin(&state->stat_state, state->process_state.mqtt_topic_prefix, station_id, IOTDATA_GATEWAY_VERSION, &state->lora_config, &s_pool);
+    gateway_state_restore(&state->store_state);
+    stat_begin(&state->stat_state, state->process_state.mqtt_topic_prefix, &state->inode, IOTDATA_GATEWAY_VERSION, &state->lora_config, &s_pool);
     state->process_state.pool = &s_pool;
-    ret = process_run(&state->process_state, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
+    ret = process_run(&state->process_state, &state->store_state.node, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
     stat_end(&state->stat_state);
 
     ctrl_end(&state->ctrl_state);
@@ -645,8 +704,9 @@ end_node:
 end_mqtt:
     mqtt_end();
 end_device:
-    (void)lora_stop();
+    lora_stop();
 end_all:
+    gateway_state_end(&state->store_state);
     gateway_blackbox_end(&state->bbox_state);
     return ret;
 }

@@ -22,8 +22,7 @@ typedef uint8_t (*node_table_count_handler_t)(uint8_t type);
 typedef bool (*node_table_row_handler_t)(uint8_t type, uint8_t index, uint8_t *out_row);
 
 typedef struct {
-    uint16_t station_id; /* our own station: a request is "for us" if it matches, or is broadcast */
-    uint16_t sequence;   /* our packet sequence for reports we originate */
+    idep_node_t *inode;
 
     /* CONFIG: reporting cadence, indexed by TLV type. 0 = do not send periodically. */
     uint16_t period[IOTDATA_NODE_TLV_SYSTEM_COUNT];
@@ -359,12 +358,12 @@ static void node_publish_from(node_state_t *st, const uint16_t station, const ui
 }
 
 static bool node_report_paged(node_state_t *st, const uint8_t type, const uint8_t scope, iotdata_partial_t *partial) {
-    iotdata_partial_begin(partial, st->sequence);
+    iotdata_partial_begin(partial, idep_sequence(st->inode));
     const int kvlen = node_build(st, type, st->_buffer_kv, sizeof(st->_buffer_kv), scope, partial);
     if (kvlen < 0) /* not 0: an empty payload is a legitimate report */
         return false;
     st->stat_reports++;
-    node_publish_from(st, st->station_id, type, st->_buffer_kv, (size_t)kvlen, iotdata_partial_needed(partial) ? partial : NULL);
+    node_publish_from(st, idep_station(st->inode), type, st->_buffer_kv, (size_t)kvlen, iotdata_partial_needed(partial) ? partial : NULL);
     iotdata_partial_sent(partial);
     return true;
 }
@@ -416,7 +415,7 @@ static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const s
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool node_addressed_to_us(const node_state_t *st, const uint16_t station) {
-    return station == st->station_id || station == IOTDATA_STATION_BROADCAST;
+    return station == idep_station(st->inode) || station == IOTDATA_STATION_BROADCAST;
 }
 
 static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t kvlen, const uint16_t target) {
@@ -428,7 +427,7 @@ static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t 
         ok = iotdata_encode_begin(&st->_iotdata_enc, buf, buffer_room(st->pool, h), 0, target, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK && iotdata_encode_tlv(&st->_iotdata_enc, IOTDATA_NODE_TLV_CONTROL, kvbuf, (uint8_t)kvlen) == IOTDATA_OK &&
              iotdata_encode_end(&st->_iotdata_enc, &len) == IOTDATA_OK;
         if (ok) {
-            const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, h, (uint32_t)__ticks_ms());
+            const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, h, hw_time_ms());
             PRINTF_INFO("node: down -> %04" PRIX16 " (%zu bytes, %s)\n", target, len, iotdata_down_ev_name(ev));
             ok = st->tx(buf, (int)len);
         }
@@ -483,7 +482,7 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
              * echo would double-count and double-report every broadcast we send. Idempotence makes
              * that harmless rather than correct, so it waits for a way to tell them apart.
              */
-            if (station == st->station_id)
+            if (station == idep_station(st->inode))
                 for (uint8_t i = 0; i < st->_iotdata_dec.tlv_count; i++) {
                     const iotdata_decoder_tlv_t *const t = &st->_iotdata_dec.tlv[i];
                     if (t->type == IOTDATA_NODE_TLV_CONTROL && t->format == IOTDATA_TLV_FMT_RAW) {
@@ -516,7 +515,7 @@ static void node_on_mqtt(node_state_t *const st, const uint8_t *kvbuf, const siz
         st->stat_rx++;
         node_process_control(st, kvbuf, kvlen);
     }
-    if (target != st->station_id)
+    if (target != idep_station(st->inode))
         (void)node_send_down(st, kvbuf, kvlen, target);
 }
 
@@ -525,7 +524,7 @@ static void node_on_mqtt(node_state_t *const st, const uint8_t *kvbuf, const siz
 
 static void node_tick(node_state_t *const st) {
     const time_t now = time(NULL);
-    const int stale = iotdata_down_tick(&st->down, (uint32_t)__ticks_ms());
+    const int stale = iotdata_down_tick(&st->down, hw_time_ms());
     if (stale > 0)
         PRINTF_INFO("node: %d held command(s) expired unclaimed (ttl=%" PRIu32 "s)\n", stale, iotdata_down_ttl_ms(&st->down) / 1000u);
     if (!st->startup_done) {
@@ -555,10 +554,10 @@ static void node_tick(node_state_t *const st) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool node_begin(node_state_t *st, const uint16_t station_id, const iotdata_version_caps_t *caps, const stat_state_t *stat, bbox_state_t *bbox, buffer_pool_t *pool, node_tx_handler_t tx, node_control_handler_t control,
+static bool node_begin(node_state_t *st, idep_node_t *const inode, const iotdata_version_caps_t *caps, const stat_state_t *stat, bbox_state_t *bbox, buffer_pool_t *pool, node_tx_handler_t tx, node_control_handler_t control,
                        node_status_mesh_handler_t status_mesh, node_table_count_handler_t table_count, node_table_row_handler_t table_row, const uint8_t *control_keys, const uint8_t control_keys_count, const char *topic_prefix) {
     assert(stat && bbox && pool && tx && topic_prefix);
-    st->station_id = station_id;
+    st->inode = inode;
     st->caps = caps;
     st->stat = stat;
     st->bbox = bbox;
@@ -572,7 +571,7 @@ static bool node_begin(node_state_t *st, const uint16_t station_id, const iotdat
     st->control_keys_count = control_keys_count;
     iotdata_down_init(&st->down, pool);
     snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_MQTT_MANAGE_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
-    PRINTF_INFO("node: station=%04" PRIX16 ", responses on %s\n", station_id, st->topic_resp);
+    PRINTF_INFO("node: station=%04" PRIX16 ", responses on %s\n", idep_station(st->inode), st->topic_resp);
     return true;
 }
 
