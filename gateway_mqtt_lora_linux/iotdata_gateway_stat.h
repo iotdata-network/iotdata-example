@@ -40,7 +40,6 @@ typedef struct {
 } stat_ring_t;
 
 typedef struct {
-    bool valid;
     uint16_t station_id;
     time_t first_seen;
     time_t last_seen;
@@ -111,7 +110,6 @@ typedef struct {
 } stat_totals_t;
 
 typedef struct {
-    bool valid;
     uint16_t station_id;
     uint16_t generation;
     uint8_t cost;
@@ -171,28 +169,18 @@ static inline void stat_ring_count(const stat_ring_t *r, time_t now, uint32_t co
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint16_t station_id, const time_t now) {
-    int slot_free = -1, slot_oldest = -1;
-    for (int i = 0, c = 0; i < (int)(sizeof(s->stations) / sizeof(s->stations[0])) && !(c == s->stations_count && slot_free >= 0); i++) { /* UPSERT */
-        stat_station_t *const e = &s->stations[i];
-        if (e->valid) {
-            c++;
-            if (e->station_id == station_id) {
-                e->last_seen = now;
-                return e;
-            } else if (s->stations_count == (int)(sizeof(s->stations) / sizeof(s->stations[0])) && (slot_oldest < 0 || e->last_seen < s->stations[slot_oldest].last_seen))
-                slot_oldest = i;
-        } else if (slot_free < 0)
-            slot_free = i;
+    int slot_oldest = 0;
+    for (int i = 0; i < s->stations_count; i++) { /* the match, and the entry to recycle if there is none */
+        if (s->stations[i].station_id == station_id) {
+            s->stations[i].last_seen = now;
+            return &s->stations[i];
+        }
+        if (s->stations[i].last_seen < s->stations[slot_oldest].last_seen)
+            slot_oldest = i;
     }
-    int slot;
-    if (slot_free >= 0) {
-        slot = slot_free;
-        s->stations_count++;
-    } else
-        slot = (slot_oldest >= 0) ? slot_oldest : 0;
+    const int slot = (s->stations_count < (int)(sizeof(s->stations) / sizeof(s->stations[0]))) ? s->stations_count++ : slot_oldest;
     stat_station_t *e = &s->stations[slot];
     memset(e, 0, sizeof(*e));
-    e->valid = true;
     e->station_id = station_id;
     e->first_seen = now;
     return e;
@@ -302,28 +290,18 @@ void stat_on_packet_process_error(stat_state_t *s, uint16_t station_id, uint8_t 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void stat_on_peer(stat_state_t *s, uint16_t station_id, uint16_t generation, uint8_t cost, uint8_t flags) {
-    int slot = -1, slot_free = -1, slot_oldest = -1;
-    for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && !(c == s->peers_count && slot_free >= 0); i++) { /* UPSERT: match, free slot and stalest in one pass */
-        const stat_peer_t *const e = &s->peers[i];
-        if (e->valid) {
-            c++;
-            if (e->station_id == station_id) {
-                slot = i;
-                break;
-            } else if (s->peers_count == (int)(sizeof(s->peers) / sizeof(s->peers[0])) && (slot_oldest < 0 || e->last_seen < s->peers[slot_oldest].last_seen))
-                slot_oldest = i;
-        } else if (slot_free < 0)
-            slot_free = i;
+    int slot = -1, slot_oldest = 0;
+    for (int i = 0; i < s->peers_count; i++) { /* the match, and the entry to recycle if there is none */
+        if (s->peers[i].station_id == station_id) {
+            slot = i;
+            break;
+        }
+        if (s->peers[i].last_seen < s->peers[slot_oldest].last_seen)
+            slot_oldest = i;
     }
-    if (slot < 0) {
-        if (slot_free >= 0) {
-            slot = slot_free;
-            s->peers_count++;
-        } else
-            slot = (slot_oldest >= 0) ? slot_oldest : 0;
-    }
+    if (slot < 0)
+        slot = (s->peers_count < (int)(sizeof(s->peers) / sizeof(s->peers[0]))) ? s->peers_count++ : slot_oldest;
     stat_peer_t *const e = &s->peers[slot];
-    e->valid = true;
     e->station_id = station_id;
     e->generation = generation;
     e->cost = cost;
@@ -332,17 +310,13 @@ void stat_on_peer(stat_state_t *s, uint16_t station_id, uint16_t generation, uin
 }
 
 bool stat_mesh_peer_remove(stat_state_t *const s, const uint16_t station_id) {
-    for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && c < s->peers_count; i++) {
-        stat_peer_t *const e = &s->peers[i];
-        if (e->valid) {
-            c++;
-            if (e->station_id == station_id) {
-                memset(e, 0, sizeof(*e));
-                s->peers_count--;
-                return true;
-            }
+    for (int i = 0; i < s->peers_count; i++)
+        if (s->peers[i].station_id == station_id) {
+            s->peers[i] = s->peers[s->peers_count - 1];
+            memset(&s->peers[s->peers_count - 1], 0, sizeof(s->peers[0]));
+            s->peers_count--;
+            return true;
         }
-    }
     return false;
 }
 
@@ -407,42 +381,44 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "count", (double)s->stations_count);
     cJSON *arr = cJSON_AddArrayToObject(root, "stations");
-    for (int i = 0, c = 0; i < (int)(sizeof(s->stations) / sizeof(s->stations[0])) && c < s->stations_count; i++) { /* LOOKUP */
-        const stat_station_t *st = &s->stations[i];
-        if (st->valid) {
-            c++;
-            cJSON *o = cJSON_CreateObject();
-            char buf[4 + 1];
-            cJSON_AddStringToObject(o, "id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, st->station_id));
-            cJSON_AddNumberToObject(o, "first_seen", (double)st->first_seen);
-            cJSON_AddNumberToObject(o, "last_seen", (double)st->last_seen);
-            cJSON_AddNumberToObject(o, "age_secs", (double)(now - st->last_seen));
-            cJSON_AddNumberToObject(o, "packets", (double)st->packet_count);
-            cJSON_AddNumberToObject(o, "bytes", (double)st->bytes_rx);
-            cJSON_AddNumberToObject(o, "missed", (double)st->stat_missed);
-            cJSON_AddNumberToObject(o, "mesh_unexpected", (double)st->stat_mesh_unexpected);
-            cJSON_AddNumberToObject(o, "decode_errors", (double)st->decode_errors);
-            cJSON_AddNumberToObject(o, "process_errors", (double)st->process_errors);
-            if (st->last_link_valid)
-                cJSON_AddNumberToObject(o, "link_rssi", (double)st->last_link_rssi);
-            if (st->link_rssi_cnt > 0)
-                cJSON_AddNumberToObject(o, "link_rssi_avg", (double)st->link_rssi_sum / (double)st->link_rssi_cnt);
-            if (st->last_battery_valid) {
-                cJSON *bat = cJSON_AddObjectToObject(o, "battery");
-                cJSON_AddNumberToObject(bat, "level", (double)st->last_battery_level);
-                cJSON_AddBoolToObject(bat, "charging", st->last_battery_charging);
-            }
-            cJSON *vs = cJSON_AddObjectToObject(o, "variants");
-            for (int v = 0; v < (int)(sizeof(st->variant_count) / sizeof(st->variant_count[0])); v++)
-                if (st->variant_count[v] > 0) {
-                    const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)v);
-                    cJSON *vo = cJSON_AddObjectToObject(vs, vdef ? vdef->name : "?");
-                    cJSON_AddNumberToObject(vo, "count", (double)st->variant_count[v]);
-                    cJSON_AddNumberToObject(vo, "last_seen", (double)st->variant_last[v]);
-                }
-            cJSON_AddItemToObject(o, "windows", stat_json_windows(&st->ring, now));
-            cJSON_AddItemToArray(arr, o);
+    /* by station id: a station keeps its line between two snapshots (iotdata_node_utils.h) */
+    iotdata_order_t ord[sizeof(s->stations) / sizeof(s->stations[0])];
+    int ordered = 0;
+    for (int i = 0; i < s->stations_count; i++)
+        ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->stations[i].station_id, (uint16_t)i);
+    for (int k = 0; k < ordered; k++) {
+        const stat_station_t *st = &s->stations[ord[k].slot];
+        cJSON *o = cJSON_CreateObject();
+        char buf[4 + 1];
+        cJSON_AddStringToObject(o, "id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, st->station_id));
+        cJSON_AddNumberToObject(o, "first_seen", (double)st->first_seen);
+        cJSON_AddNumberToObject(o, "last_seen", (double)st->last_seen);
+        cJSON_AddNumberToObject(o, "age_secs", (double)(now - st->last_seen));
+        cJSON_AddNumberToObject(o, "packets", (double)st->packet_count);
+        cJSON_AddNumberToObject(o, "bytes", (double)st->bytes_rx);
+        cJSON_AddNumberToObject(o, "missed", (double)st->stat_missed);
+        cJSON_AddNumberToObject(o, "mesh_unexpected", (double)st->stat_mesh_unexpected);
+        cJSON_AddNumberToObject(o, "decode_errors", (double)st->decode_errors);
+        cJSON_AddNumberToObject(o, "process_errors", (double)st->process_errors);
+        if (st->last_link_valid)
+            cJSON_AddNumberToObject(o, "link_rssi", (double)st->last_link_rssi);
+        if (st->link_rssi_cnt > 0)
+            cJSON_AddNumberToObject(o, "link_rssi_avg", (double)st->link_rssi_sum / (double)st->link_rssi_cnt);
+        if (st->last_battery_valid) {
+            cJSON *bat = cJSON_AddObjectToObject(o, "battery");
+            cJSON_AddNumberToObject(bat, "level", (double)st->last_battery_level);
+            cJSON_AddBoolToObject(bat, "charging", st->last_battery_charging);
         }
+        cJSON *vs = cJSON_AddObjectToObject(o, "variants");
+        for (int v = 0; v < (int)(sizeof(st->variant_count) / sizeof(st->variant_count[0])); v++)
+            if (st->variant_count[v] > 0) {
+                const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)v);
+                cJSON *vo = cJSON_AddObjectToObject(vs, vdef ? vdef->name : "?");
+                cJSON_AddNumberToObject(vo, "count", (double)st->variant_count[v]);
+                cJSON_AddNumberToObject(vo, "last_seen", (double)st->variant_last[v]);
+            }
+        cJSON_AddItemToObject(o, "windows", stat_json_windows(&st->ring, now));
+        cJSON_AddItemToArray(arr, o);
     }
     if (mesh) {
         cJSON *m = cJSON_AddObjectToObject(root, "mesh");
@@ -475,19 +451,21 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         cJSON_AddNumberToObject(m, "tx_errors", (double)mesh->stat_errors_tx);
         cJSON_AddNumberToObject(m, "tx_bytes", (double)mesh->stat_bytes_tx);
         cJSON *peers = cJSON_AddArrayToObject(m, "peers");
-        for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && c < s->peers_count; i++) { /* LOOKUP */
-            const stat_peer_t *const e = &s->peers[i];
-            if (e->valid) {
-                c++;
-                cJSON *p = cJSON_CreateObject();
-                cJSON_AddStringToObject(p, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, e->station_id));
-                cJSON_AddNumberToObject(p, "generation", (double)e->generation);
-                cJSON_AddNumberToObject(p, "cost", (double)e->cost);
-                cJSON_AddNumberToObject(p, "flags", (double)e->flags);
-                cJSON_AddNumberToObject(p, "last_seen", (double)e->last_seen);
-                cJSON_AddNumberToObject(p, "age_secs", (double)(now - e->last_seen));
-                cJSON_AddItemToArray(peers, p);
-            }
+        /* by station id, as everywhere else (iotdata_node_utils.h) */
+        iotdata_order_t ord_peer[sizeof(s->peers) / sizeof(s->peers[0])];
+        int ordered_peer = 0;
+        for (int i = 0; i < s->peers_count; i++)
+            ordered_peer = iotdata_order_insert(ord_peer, ordered_peer, (int)(sizeof(ord_peer) / sizeof(ord_peer[0])), s->peers[i].station_id, (uint16_t)i);
+        for (int k = 0; k < ordered_peer; k++) {
+            const stat_peer_t *const e = &s->peers[ord_peer[k].slot];
+            cJSON *p = cJSON_CreateObject();
+            cJSON_AddStringToObject(p, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, e->station_id));
+            cJSON_AddNumberToObject(p, "generation", (double)e->generation);
+            cJSON_AddNumberToObject(p, "cost", (double)e->cost);
+            cJSON_AddNumberToObject(p, "flags", (double)e->flags);
+            cJSON_AddNumberToObject(p, "last_seen", (double)e->last_seen);
+            cJSON_AddNumberToObject(p, "age_secs", (double)(now - e->last_seen));
+            cJSON_AddItemToArray(peers, p);
         }
     }
     if (ddup) {

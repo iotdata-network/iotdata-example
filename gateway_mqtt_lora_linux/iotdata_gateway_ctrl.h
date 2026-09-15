@@ -238,23 +238,25 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
 
 static void ctrl_report_peers(const stat_state_t *const s) {
     PRINTF_INFO("exec: peers - %d\n", s->peers_count);
-    for (int i = 0, c = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])) && c < s->peers_count; i++) {
-        const stat_peer_t *const e = &s->peers[i];
-        if (e->valid) {
-            c++;
-            PRINTF_INFO("exec:   %04" PRIX16 " cost=%u gen=%u flags=0x%02" PRIX8 " age=%lds\n", e->station_id, (unsigned)e->cost, (unsigned)e->generation, e->flags, (long)(time(NULL) - e->last_seen));
-        }
+    iotdata_order_t ord[sizeof(s->peers) / sizeof(s->peers[0])];
+    int ordered = 0;
+    for (int i = 0; i < s->peers_count; i++)
+        ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->peers[i].station_id, (uint16_t)i);
+    for (int k = 0; k < ordered; k++) {
+        const stat_peer_t *const e = &s->peers[ord[k].slot];
+        PRINTF_INFO("exec:   %04" PRIX16 " cost=%u gen=%u flags=0x%02" PRIX8 " age=%lds\n", e->station_id, (unsigned)e->cost, (unsigned)e->generation, e->flags, (long)(time(NULL) - e->last_seen));
     }
 }
 
 static void ctrl_report_filter(const filter_t *const f) {
     PRINTF_INFO("exec: filters - %d\n", filter_count(f));
-    for (int i = 0, c = 0; i < (int)(sizeof(f->e) / sizeof(f->e[0])) && c < f->count; i++) {
-        const filter_entry_t *const e = &f->e[i];
-        if (e->valid) {
-            c++;
-            PRINTF_INFO("exec:   %04" PRIX16 " %s (%s)\n", e->station, e->action == FILTER_ALLOW ? "allow" : "block", e->source == FILTER_AUTO ? "auto" : "manual");
-        }
+    iotdata_order_t ord[sizeof(f->e) / sizeof(f->e[0])];
+    int ordered = 0;
+    for (int i = 0; i < f->count; i++)
+        ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), f->e[i].station, (uint16_t)i);
+    for (int k = 0; k < ordered; k++) {
+        const filter_entry_t *const e = &f->e[ord[k].slot];
+        PRINTF_INFO("exec:   %04" PRIX16 " %s (%s)\n", e->station, e->action == FILTER_ALLOW ? "allow" : "block", e->source == FILTER_AUTO ? "auto" : "manual");
     }
 }
 

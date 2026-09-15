@@ -80,6 +80,7 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #include "iotdata_mesh.h"
 #include "iotdata_node_down.h"
 #include "iotdata_node.h"
+#include "iotdata_node_utils.h"
 #include "iotdata_node_version.h"
 #include "iotdata_node_status.h"
 #include "iotdata_node_control.h"
@@ -1243,21 +1244,32 @@ static bool test_ddup_three_gateway_sync(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // netw + stat table tests.
 //
-// Both tables keep a hand-maintained `count` of their valid slots that the scan loops use to stop at
-// the last one. That invariant is not compiler-checkable and is updated wherever an entry is created,
-// so each test re-derives the true number of valid slots the slow way and compares (ASSERT_COUNT_*).
-// Entries in these tables are never invalidated -- a full table evicts by overwrite -- so the counts
-// only ever rise to the cap. The tables are large, hence the statics.
+// Both tables are DENSE: entries live at [0..count-1] with no holes and carry no valid flag, so
+// `count` is the scan bound everywhere. That invariant is not compiler-checkable -- count is
+// hand-maintained wherever an entry is appended, recycled or removed -- so each test re-derives it
+// the slow way (ASSERT_COUNT_*): every live entry names a station, no station appears twice, and
+// nothing survives past count. The last of those is what catches a swap-remove that forgot to
+// clear the tail it moved from. Station 0 is never assignable, so a zero id means "empty".
+// A full table here evicts by overwrite, so the counts only ever rise to the cap; the one removal
+// is stat_mesh_peer_remove(). The tables are large, hence the statics.
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static int netw_valid_slots(const netw_t *n) {
-    int c = 0;
-    for (int i = 0; i < NETW_MAX; i++)
-        if (n->s[i].valid)
-            c++;
-    return c;
+static bool netw_is_dense(const netw_t *n) {
+    if (n->count < 0 || n->count > NETW_MAX)
+        return false;
+    for (int i = 0; i < n->count; i++) {
+        if (n->s[i].station == 0)
+            return false;
+        for (int j = i + 1; j < n->count; j++)
+            if (n->s[i].station == n->s[j].station)
+                return false;
+    }
+    for (int i = n->count; i < NETW_MAX; i++)
+        if (n->s[i].station != 0)
+            return false;
+    return true;
 }
-#define ASSERT_COUNT_NETW(n) ASSERT((n)->count == netw_valid_slots(n))
+#define ASSERT_COUNT_NETW(n) ASSERT(netw_is_dense(n))
 
 static bool test_netw_upsert_on_empty(void) {
     static netw_t net;
@@ -1288,7 +1300,7 @@ static bool test_netw_sequential_upserts(void) {
     static netw_t net;
     netw_begin(&net);
     (void)netw_upsert(&net, 0x111, 1000);
-    (void)netw_upsert(&net, 0x222, 1001); /* the free slot lies past the valid entries */
+    (void)netw_upsert(&net, 0x222, 1001); /* appended after the first */
     (void)netw_upsert(&net, 0x333, 1002);
     ASSERT_EQ_INT(netw_count(&net), 3);
     ASSERT_COUNT_NETW(&net);
@@ -1320,8 +1332,8 @@ static bool test_netw_all_locatable(void) {
     for (int i = 0; i < NETW_MAX; i++)
         (void)netw_upsert(&net, (uint16_t)(0x500 + i), 1000 + i);
     int found = 0; /* a scan bound that cut short would lose the later entries */
-    for (int i = 0; i < NETW_MAX; i++)
-        if (net.s[i].valid && netw_locate(&net, net.s[i].station) == i)
+    for (int i = 0; i < net.count; i++)
+        if (netw_locate(&net, net.s[i].station) == i)
             found++;
     ASSERT_EQ_INT(found, NETW_MAX);
     ASSERT_COUNT_NETW(&net);
@@ -1332,38 +1344,46 @@ static bool test_netw_all_locatable(void) {
 
 /* find_or_create() creates on miss, so it can never answer "is this present?" -- scan instead */
 static bool stat_station_present(const stat_state_t *s, uint16_t station_id) {
-    for (int i = 0; i < (int)(sizeof(s->stations) / sizeof(s->stations[0])); i++)
-        if (s->stations[i].valid && s->stations[i].station_id == station_id)
+    for (int i = 0; i < s->stations_count; i++)
+        if (s->stations[i].station_id == station_id)
             return true;
     return false;
 }
 
 static bool stat_peer_present(const stat_state_t *s, uint16_t station_id) {
-    for (int i = 0; i < (int)(sizeof(s->peers) / sizeof(s->peers[0])); i++)
-        if (s->peers[i].valid && s->peers[i].station_id == station_id)
+    for (int i = 0; i < s->peers_count; i++)
+        if (s->peers[i].station_id == station_id)
             return true;
     return false;
 }
 
-static int stat_valid_stations(const stat_state_t *s) {
-    int c = 0;
-    for (int i = 0; i < STAT_MAX_STATIONS; i++)
-        if (s->stations[i].valid)
-            c++;
-    return c;
+/* the same dense audit as netw_is_dense(), for both of stat's tables */
+static bool stat_is_dense(const stat_state_t *s) {
+    if (s->stations_count < 0 || s->stations_count > STAT_MAX_STATIONS || s->peers_count < 0 || s->peers_count > STAT_MESH_PEERS_MAX)
+        return false;
+    for (int i = 0; i < s->stations_count; i++) {
+        if (s->stations[i].station_id == 0)
+            return false;
+        for (int j = i + 1; j < s->stations_count; j++)
+            if (s->stations[i].station_id == s->stations[j].station_id)
+                return false;
+    }
+    for (int i = s->stations_count; i < STAT_MAX_STATIONS; i++)
+        if (s->stations[i].station_id != 0)
+            return false;
+    for (int i = 0; i < s->peers_count; i++) {
+        if (s->peers[i].station_id == 0)
+            return false;
+        for (int j = i + 1; j < s->peers_count; j++)
+            if (s->peers[i].station_id == s->peers[j].station_id)
+                return false;
+    }
+    for (int i = s->peers_count; i < STAT_MESH_PEERS_MAX; i++)
+        if (s->peers[i].station_id != 0)
+            return false;
+    return true;
 }
-static int stat_valid_peers(const stat_state_t *s) {
-    int c = 0;
-    for (int i = 0; i < STAT_MESH_PEERS_MAX; i++)
-        if (s->peers[i].valid)
-            c++;
-    return c;
-}
-#define ASSERT_COUNT_STAT(s) \
-    do { \
-        ASSERT((s)->stations_count == stat_valid_stations(s)); \
-        ASSERT((s)->peers_count == stat_valid_peers(s)); \
-    } while (0)
+#define ASSERT_COUNT_STAT(s) ASSERT(stat_is_dense(s))
 
 static bool test_stat_station_create_and_find(void) {
     static stat_state_t s;
@@ -1373,7 +1393,7 @@ static bool test_stat_station_create_and_find(void) {
     ASSERT_EQ_INT(s.stations_count, 1);
     ASSERT(stat_station_find_or_create(&s, 0x111, time(NULL)) == a); /* find, not re-create */
     ASSERT_EQ_INT(s.stations_count, 1);                              /* must NOT double-count */
-    (void)stat_station_find_or_create(&s, 0x222, time(NULL));        /* free slot lies past the valid entries */
+    (void)stat_station_find_or_create(&s, 0x222, time(NULL));        /* appended after the first */
     (void)stat_station_find_or_create(&s, 0x333, time(NULL));
     ASSERT_EQ_INT(s.stations_count, 3);
     ASSERT_COUNT_STAT(&s);
@@ -1409,8 +1429,8 @@ static bool test_stat_station_all_findable(void) {
     for (int i = 0; i < STAT_MAX_STATIONS; i++)
         (void)stat_station_find_or_create(&s, (uint16_t)(0x600 + i), time(NULL));
     int found = 0; /* a scan bound that cut short would re-create instead of finding */
-    for (int i = 0; i < STAT_MAX_STATIONS; i++)
-        if (s.stations[i].valid && stat_station_find_or_create(&s, s.stations[i].station_id, time(NULL)) == &s.stations[i])
+    for (int i = 0; i < s.stations_count; i++)
+        if (stat_station_find_or_create(&s, s.stations[i].station_id, time(NULL)) == &s.stations[i])
             found++;
     ASSERT_EQ_INT(found, STAT_MAX_STATIONS);
     ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);
@@ -1427,7 +1447,7 @@ static bool test_stat_mesh_peer_create_and_update(void) {
     stat_on_peer(&s, 0xAAA, 2, 1, 0); /* same gateway -> update in place */
     ASSERT_EQ_INT(s.peers_count, 1);
     ASSERT_COUNT_STAT(&s);
-    stat_on_peer(&s, 0xBBB, 1, 1, 0); /* second peer takes the next free slot */
+    stat_on_peer(&s, 0xBBB, 1, 1, 0); /* second peer is appended */
     ASSERT_EQ_INT(s.peers_count, 2);
     ASSERT_COUNT_STAT(&s);
     return true;
@@ -1456,6 +1476,42 @@ static bool test_stat_mesh_peer_fill_and_evict(void) {
 
     stat_on_peer(&s, 0xB00, 7, 2, 3); /* existing -> update in place, no growth */
     ASSERT_EQ_INT(s.peers_count, STAT_MESH_PEERS_MAX);
+    ASSERT_COUNT_STAT(&s);
+    return true;
+}
+
+/* The only removal in either table, and so the only way an entry can MOVE: the last peer is
+   swapped into the hole. Three things can go wrong and none is visible from the count alone --
+   the tail is left behind as a ghost, the moved entry arrives as an id without its payload, or
+   removing the last entry (where the swap is a self-move) corrupts it. */
+static bool test_stat_mesh_peer_remove_compacts(void) {
+    static stat_state_t s;
+    memset(&s, 0, sizeof(s));
+    stat_on_peer(&s, 0xAAA, 1, 1, 0);
+    stat_on_peer(&s, 0xBBB, 2, 2, 0);
+    stat_on_peer(&s, 0xCCC, 3, 3, 0);
+    ASSERT_EQ_INT(s.peers_count, 3);
+    ASSERT_COUNT_STAT(&s);
+
+    ASSERT(stat_mesh_peer_remove(&s, 0xBBB));
+    ASSERT_EQ_INT(s.peers_count, 2);
+    ASSERT_COUNT_STAT(&s); /* no ghost past the count */
+    ASSERT(!stat_peer_present(&s, 0xBBB));
+    ASSERT(stat_peer_present(&s, 0xAAA) && stat_peer_present(&s, 0xCCC));
+    ASSERT_EQ_INT((int)s.peers[1].station_id, 0xCCC); /* moved down from the end */
+    ASSERT_EQ_INT((int)s.peers[1].generation, 3);     /* the WHOLE entry moved, not just its id */
+    ASSERT_EQ_INT((int)s.peers[1].cost, 3);
+
+    ASSERT(!stat_mesh_peer_remove(&s, 0xBBB)); /* gone, and a second removal is a no-op */
+    ASSERT_EQ_INT(s.peers_count, 2);
+
+    ASSERT(stat_mesh_peer_remove(&s, 0xCCC)); /* the LAST entry: the swap is a self-move */
+    ASSERT_EQ_INT(s.peers_count, 1);
+    ASSERT_COUNT_STAT(&s);
+    ASSERT(stat_peer_present(&s, 0xAAA));
+
+    ASSERT(stat_mesh_peer_remove(&s, 0xAAA)); /* down to empty */
+    ASSERT_EQ_INT(s.peers_count, 0);
     ASSERT_COUNT_STAT(&s);
     return true;
 }
@@ -1703,7 +1759,10 @@ static bool test_mesh_node_table_report(void) {
 
 /* Removal leaves a hole, and a dense report index must skip it -- otherwise the Nth row is the Nth
    slot and a removed entry makes the report short or repeats one. */
-static bool test_mesh_node_table_skips_holes(void) {
+/* A removal must show up in the dump, and the dump must stay walkable 0..count-1 across it. There
+   are no holes to skip any more -- stat_mesh_peer_remove() compacts -- and the rows come out in
+   station-id order regardless of where the survivors ended up in storage. */
+static bool test_mesh_node_table_after_remove(void) {
     process_state_t ps;
     mesh_state_t ms;
     static stat_state_t ss;
@@ -1711,14 +1770,14 @@ static bool test_mesh_node_table_skips_holes(void) {
     stat_on_peer(&ss, 0x0501, 1, 1, 0);
     stat_on_peer(&ss, 0x0502, 1, 1, 0);
     stat_on_peer(&ss, 0x0503, 1, 1, 0);
-    ASSERT(stat_mesh_peer_remove(&ss, 0x0502)); /* a hole in the middle */
+    ASSERT(stat_mesh_peer_remove(&ss, 0x0502)); /* from the middle: 0x0503 moves down into its place */
     ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_TLV_MESH_PEERS), 2);
 
     uint8_t row[IOTDATA_NODE_TABLE_ROW_MAX];
     ASSERT(exec_node_table_row(IOTDATA_NODE_TLV_MESH_PEERS, 0, row));
     ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 0), 0x0501);
     ASSERT(exec_node_table_row(IOTDATA_NODE_TLV_MESH_PEERS, 1, row));
-    ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 0), 0x0503); /* not the hole */
+    ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 0), 0x0503); /* the survivor, wherever it now sits */
     ASSERT(!exec_node_table_row(IOTDATA_NODE_TLV_MESH_PEERS, 2, row));
     g_exec = NULL;
     return true;
@@ -2554,6 +2613,7 @@ int main(void) {
     RUN_TEST(stat_station_all_findable);
     RUN_TEST(stat_mesh_peer_create_and_update);
     RUN_TEST(stat_mesh_peer_fill_and_evict);
+    RUN_TEST(stat_mesh_peer_remove_compacts);
 
     printf("\n=== Node report routing Tests ===\n\n");
 
@@ -2582,7 +2642,7 @@ int main(void) {
     RUN_TEST(version_report_as_the_monitor_sees_it);
     RUN_TEST(control_over_the_air_reaches_the_same_handler);
     RUN_TEST(mesh_node_table_report);
-    RUN_TEST(mesh_node_table_skips_holes);
+    RUN_TEST(mesh_node_table_after_remove);
     RUN_TEST(mesh_node_status_absent_when_mesh_off);
     RUN_TEST(mesh_node_filter_update_blocks_rx);
     RUN_TEST(mesh_node_block_drops_peer);

@@ -243,16 +243,25 @@ static uint8_t exec_node_table_count(const uint8_t type) {
     }
 }
 
-/* Map a dense report index onto a sparse slot: every one of these tables leaves holes. */
-#define EXEC_TABLE_NTH(arr, idx, out) \
+/* The idx-th row BY STATION ID, so a table that goes out over the air arrives in the order a
+   report would print it (iotdata_node_utils.h). Ranking rather than sorting: the node layer calls
+   the row callback once per index and the callback keeps no state between calls, so each call
+   counts how many entries sort ahead of the candidate and takes the one whose rank is idx. Ties
+   cannot arise -- these tables are keyed by station -- but position breaks them anyway, so the
+   index-to-entry mapping stays one-to-one whatever the table holds. */
+#define EXEC_TABLE_NTH(arr, cnt, key, idx, out) \
     do { \
-        int _c = 0; \
         (out) = -1; \
-        for (int _i = 0; _i < (int)((sizeof(arr)) / sizeof((arr)[0])); _i++) \
-            if ((arr)[_i].valid && _c++ == (int)(idx)) { \
+        for (int _i = 0; _i < (cnt); _i++) { \
+            int _rank = 0; \
+            for (int _j = 0; _j < (cnt); _j++) \
+                if ((arr)[_j].key < (arr)[_i].key || ((arr)[_j].key == (arr)[_i].key && _j < _i)) \
+                    _rank++; \
+            if (_rank == (int)(idx)) { \
                 (out) = _i; \
                 break; \
             } \
+        } \
     } while (0)
 
 static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t *const row) {
@@ -263,7 +272,7 @@ static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t
     int slot = -1;
     switch (type) {
     case IOTDATA_NODE_TLV_MESH_STATIONS: {
-        EXEC_TABLE_NTH(st->network.s, index, slot);
+        EXEC_TABLE_NTH(st->network.s, st->network.count, station, index, slot);
         if (slot < 0)
             return false;
         const netw_station_t *const e = &st->network.s[slot];
@@ -279,7 +288,7 @@ static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t
         return true;
     }
     case IOTDATA_NODE_TLV_MESH_PEERS: {
-        EXEC_TABLE_NTH(st->state_stat->peers, index, slot);
+        EXEC_TABLE_NTH(st->state_stat->peers, st->state_stat->peers_count, station_id, index, slot);
         if (slot < 0)
             return false;
         const stat_peer_t *const e = &st->state_stat->peers[slot];
@@ -294,7 +303,7 @@ static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t
         return true;
     }
     case IOTDATA_NODE_TLV_MESH_FILTERS: {
-        EXEC_TABLE_NTH(st->filter.e, index, slot);
+        EXEC_TABLE_NTH(st->filter.e, filter_count(&st->filter), station, index, slot);
         if (slot < 0)
             return false;
         const filter_entry_t *const e = &st->filter.e[slot];
