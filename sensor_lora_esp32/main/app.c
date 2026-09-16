@@ -49,13 +49,16 @@
 // TUNABLE
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define TX_PERIOD_MS        IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
-#define TX_PERIOD_MIN_MS    1000                               /* floor, if a cycle overruns the period  */
-#define CONSOLE_DRAIN_MS    100                                /* let the console flush before deep sleep    */
-#define RECEIVE_WINDOW_MS   10
-#define RESTART_MS          30000
-#define PACKET_MAX          64 /* the packets built here are a dozen bytes   */
-#define PACKET_VARIANT      IOTDATA_VSUITE_WEATHER_STATION
+#define TX_PERIOD_MS      IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
+#define TX_PERIOD_MIN_MS  1000                               /* floor, if a cycle overruns the period  */
+#define CONSOLE_DRAIN_MS  100                                /* let the console flush before deep sleep    */
+#define RECEIVE_WINDOW_MS 10
+#define RESTART_MS        30000
+#define PACKET_MAX        64 /* the packets built here are a dozen bytes   */
+#define PACKET_VARIANT    IOTDATA_VSUITE_WEATHER_STATION
+#if defined(BENCH_BUSY_SLEEP) && !defined(BENCH_BATTERY_SELFTEST_MS)
+#define BENCH_BATTERY_SELFTEST_MS 0
+#endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // HARDWARE
@@ -80,12 +83,13 @@
 #include "d_format.h"
 #include "d_readings.h"
 #include "d_hardware_gpio.h"
+#include "d_hardware_adc.h"
 #include "d_hardware_uart.h"
 #include "d_hardware_i2c.h"
 #include "d_interface_e22900t22.h"
 #include "d_interface_bme280.h"
 #include "d_interface_ltr390.h"
-#include "d_interface_batt.h" // XXX does not use d_hardware_adc.h
+#include "d_interface_batt.h"
 #include "d_module_datastore_esp32.h"
 
 static const lora_config_t lora_cfg = {
@@ -362,9 +366,10 @@ size_t app_transmit_gather(uint8_t *const buf, const size_t len, bool advertise)
     /* --- battery --- */
     battery_reading_t reading_battery_ = { 0 }, *reading_battery = NULL;
     if (app_state.operating->battery_present) {
-        if (battery_begin())
+        if (battery_begin()) {
             reading_battery = battery_read(&reading_battery_, &app_state.operating->battery_mv) ? &reading_battery_ : NULL;
-        battery_end();
+            battery_end();
+        }
         if (!reading_battery) {
             ESP_LOGE(__tag_app, "battery: no reading this cycle");
             flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
@@ -398,9 +403,11 @@ void app_cycle(void) {
             app_state.operating->lora_present = lora_setup(&lora_cfg) == ESP_OK;
         const bool lora_started = app_state.operating->lora_present && lora_start() == ESP_OK;
         if (lora_started && transmit && lora_write_complete(buf, transmit, /*wait_complete=*/true) == ESP_OK) {
+            ESP_LOGI(__tag_app, "packet: transmit success (%d bytes)", transmit);
             idep_sequence_used(&app_state.operating->node);
             app_state.operating->tx_count++;
         } else {
+            ESP_LOGI(__tag_app, "packet: transmit failed", transmit);
             app_state.operating->tx_errors++;
             iotdata_diagnostics_event(IOTDATA_BB_LC_ERROR, iotdata_diagnostics_reason(app_state.operating->tx_errors));
         }
@@ -428,6 +435,10 @@ bool app_init(void) {
     if (!iotdata_diagnostics_begin((uint8_t)reset_reason, restarted))
         ESP_LOGW(__tag_app, "diag: the recorder did not start");
     iotdata_diagnostics_flush();
+
+#if BENCH_BATTERY_SELFTEST_MS > 0
+    (void)battery_test(BENCH_BATTERY_SELFTEST_MS);
+#endif
 
     if (!_RTC_DATA_VALID(app_state.operating, STATE_MAGIC)) {
         _RTC_DATA_INIT(app_state.operating, STATE_MAGIC);
