@@ -472,10 +472,8 @@ static uint8_t _lora_power_dbm_from_index(const int idx) {
 }
 
 void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-
+    *cfg = (lora_config_t){ 0 };
     *cfg_port = config_get_string("lora-port", SERIAL_PORT_DEFAULT);
-
     cfg->module = LORA_MODULE_USB; /* this gateway is the USB dongle: no GPIO, software mode switch */
     cfg->e22_address = (uint16_t)config_get_integer("lora-address", IOTDATA_CONFIG_LORA_ADDRESS);
     cfg->e22_network = (uint8_t)config_get_integer("lora-network", IOTDATA_CONFIG_LORA_NETWORK);
@@ -491,7 +489,7 @@ void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
     _log_enabled = config_get_bool("lora-debug", false); /* app-side debug logging; the driver has no such flag */
 
     PRINTF_INFO("config: lora: port=%s, module=USB, "
-                "address=0x%04" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", "
+                "address=0x%03" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", "
                 "packet-size=%" PRIu8 "B, air-rate=%" PRIu16 "bps, transmit-power=%" PRIu8 "dBm, "
                 "listen-before-transmit=%s, rssi-channel=%s, rssi-packet=%s\n",
                 *cfg_port, cfg->e22_address, cfg->e22_network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->air_data_rate, cfg->transmit_power, cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
@@ -501,8 +499,7 @@ void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void mqtt_config_populate(mqtt_config_t *cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-
+    *cfg = (mqtt_config_t){ 0 };
     cfg->client = config_get_string("mqtt-client", MQTT_CLIENT_DEFAULT);
     cfg->server = config_get_string("mqtt-server", MQTT_SERVER_DEFAULT);
     cfg->tls_insecure = config_get_bool("mqtt-tls-insecure", MQTT_TLS_DEFAULT);
@@ -516,8 +513,7 @@ void mqtt_config_populate(mqtt_config_t *cfg) {
 }
 
 void mesh_config_populate(mesh_state_t *cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-
+    *cfg = (mesh_state_t){ 0 };
     cfg->enabled = config_get_bool("mesh-enable", false);
     cfg->beacon_interval = (time_t)config_get_integer("mesh-beacon-interval", INTERVAL_BEACON_DEFAULT);
     cfg->debug = config_get_bool("mesh-debug", false);
@@ -526,8 +522,7 @@ void mesh_config_populate(mesh_state_t *cfg) {
 }
 
 void ddup_config_populate(ddup_state_t *cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-
+    *cfg = (ddup_state_t){ 0 };
     cfg->enabled = config_get_bool("ddup-enable", false);
     cfg->port = (uint16_t)config_get_integer("ddup-port", DDUP_PORT_DEFAULT);
     const char *peers = config_get_string("ddup-peers", "");
@@ -539,8 +534,7 @@ void ddup_config_populate(ddup_state_t *cfg) {
 }
 
 void stat_config_populate(stat_state_t *cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-
+    *cfg = (stat_state_t){ 0 };
     snprintf(cfg->mqtt_topic, sizeof(cfg->mqtt_topic), "%s", config_get_string("stat-publish-mqtt-topic-prefix", STAT_MQTT_TOPIC_DEFAULT));
     const size_t len = strlen(cfg->mqtt_topic);
     if (len > 0 && cfg->mqtt_topic[len - 1] == '/')
@@ -550,8 +544,7 @@ void stat_config_populate(stat_state_t *cfg) {
 }
 
 void process_config_populate(process_state_t *cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-
+    *cfg = (process_state_t){ 0 };
     cfg->mqtt_topic_prefix = config_get_string("mqtt-topic-prefix", MQTT_TOPIC_PREFIX_DEFAULT);
     cfg->interval_rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT); /* same key, same default as the module flag above */
     cfg->capture_rssi_channel = (cfg->interval_rssi_channel > 0);
@@ -627,7 +620,7 @@ static uint16_t gateway_station_config(void) {
     const uint16_t id = (uint16_t)config_get_integer("mesh-station-id", GATEWAY_STATION_ID_DEFAULT);
     if (iotdata_station_is_assignable(id))
         return id;
-    PRINTF_ERROR("config: mesh-station-id %u is reserved (must be 1..%u) -- using %u\n", (unsigned)id, (unsigned)IOTDATA_STATION_ASSIGNABLE_MAX, (unsigned)GATEWAY_STATION_ID_DEFAULT);
+    PRINTF_ERROR("config: station-id %" PRIu16 " is reserved (must be 1..%" PRIu16 ") -- using %" PRIu16 "\n", id, IOTDATA_STATION_ASSIGNABLE_MAX, GATEWAY_STATION_ID_DEFAULT);
     return GATEWAY_STATION_ID_DEFAULT;
 }
 
@@ -663,7 +656,7 @@ int main(int argc, char *argv[]) {
                                                                      .generations = (int)config_get_integer("blackbox-file-generations", 10) });
     gateway_state_begin(&state->store_state, &(const store_conf_t){ .directory = config_get_string("state", STATE_PATH_DEFAULT) });
     idep_node_init(&state->inode, gateway_station_config(), &state->store_state.node, STATE_NODE_TAG);
-    PRINTF_INFO("node: station=%04" PRIX16 "\n", idep_station(&state->inode));
+    PRINTF_INFO("node: station=%03" PRIX16 "\n", idep_station(&state->inode));
 
     // DEVICE (LORA)
     hw_uart_set_device(state->lora_port);

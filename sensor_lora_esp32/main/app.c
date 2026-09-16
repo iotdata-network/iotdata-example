@@ -286,7 +286,7 @@ static void app_receive(void) {
     const idep_config_t *const c = &app_state.running->idep_cfg;
     idep_node_t *const n = &app_state.operating->node;
 
-    ESP_LOGI(__tag_app, "receive: window opening for %us (station=%" PRIu16 ")", (unsigned)(IDEP_RECEIVE_WINDOW_MS / 1000), idep_station(n));
+    ESP_LOGI(__tag_app, "receive: window opening for %us (station=%03" PRIX16 ")", (unsigned)(IDEP_RECEIVE_WINDOW_MS / 1000), idep_station(n));
     idep_window_begin(c, n, (uint32_t)hw_time_ms());
     iotdata_diagnostics_event(IOTDATA_BB_LC_WAKE, 0);
     bool reboot = false;
@@ -381,7 +381,7 @@ size_t app_transmit_gather(uint8_t *const buf, const size_t len, bool advertise)
 
     size_t out;
     if (packet_build(buf, len, &out, idep_station(&app_state.operating->node), idep_sequence(&app_state.operating->node), reading_bme280, reading_ltr390, reading_battery, flags, advertise)) {
-        ESP_LOGI(__tag_app, "packet: variant=%s station=%" PRIu16 " sequence=%" PRIu16 " flags=0x%02" PRIX8 "%s", iotdata_vsuite_name(PACKET_VARIANT), idep_station(&app_state.operating->node), idep_sequence(&app_state.operating->node),
+        ESP_LOGI(__tag_app, "packet: variant=%s station=%03" PRIX16 " sequence=%" PRIu16 " flags=0x%02" PRIX8 "%s", iotdata_vsuite_name(PACKET_VARIANT), idep_station(&app_state.operating->node), idep_sequence(&app_state.operating->node),
                  flags, advertise ? " +receive" : "");
         return out;
     }

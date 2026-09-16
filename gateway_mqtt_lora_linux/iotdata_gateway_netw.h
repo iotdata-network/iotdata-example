@@ -133,7 +133,7 @@ netw_station_t *netw_upsert(netw_t *n, uint16_t station, time_t now) {
     if (slot < 0) {
         slot = (n->count < (int)(sizeof(n->s) / sizeof(n->s[0]))) ? n->count++ : slot_oldest;
         netw_station_t *const e = &n->s[slot];
-        memset(e, 0, sizeof(*e));
+        *e = (netw_station_t){ 0 };
         e->station = station;
         e->first_seen = now;
     }
@@ -295,7 +295,7 @@ static inline const char *netw_via_format(const netw_station_t *e, char *out, si
                 if (best < 0)
                     break;
                 used[best] = true;
-                const int w = snprintf(out + pos, outlen - (size_t)pos, "%s%04" PRIX16 "=%" PRIu32, s ? "," : "", e->via[best].relay, e->via[best].count);
+                const int w = snprintf(out + pos, outlen - (size_t)pos, "%s%03" PRIX16 "=%" PRIu32, s ? "," : "", e->via[best].relay, e->via[best].count);
                 if (w > 0)
                     pos += w;
             }
@@ -317,7 +317,7 @@ static inline const char *netw_hears_format(const netw_station_t *e, char *out, 
             if (pos < 0)
                 pos = 0;
             for (int k = 0; k < e->hears_count && (size_t)pos < outlen; k++) {
-                const int w = snprintf(out + pos, outlen - (size_t)pos, "%s%04" PRIX16 "/%u/%ddBm", k ? "," : "", e->hears[k].station, (unsigned)e->hears[k].cost, e->hears[k].rssi);
+                const int w = snprintf(out + pos, outlen - (size_t)pos, "%s%03" PRIX16 "/%" PRIu8 "/%ddBm", k ? "," : "", e->hears[k].station, e->hears[k].cost, e->hears[k].rssi);
                 if (w > 0)
                     pos += w;
             }
@@ -358,7 +358,7 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
         }
     }
     char stale[32];
-    PRINTF_INFO("netw: gw=%04" PRIX16 " | %d relay(s), %d sensor(s)%s%s | end-to-end loss=%" PRIu32 " seq (%.1f%%):\n", gateway_id, n_relay, n_sensor, n_gw ? " (+peer gw)" : "",
+    PRINTF_INFO("netw: gw=%03" PRIX16 " | %d relay(s), %d sensor(s)%s%s | end-to-end loss=%" PRIu32 " seq (%.1f%%):\n", gateway_id, n_relay, n_sensor, n_gw ? " (+peer gw)" : "",
                 n_stale > 0 ? snprintf_inline(stale, sizeof(stale), ", %d stale hidden", n_stale) : "", loss, netw_loss_pct(loss, rx_total));
     iotdata_order_t ord[sizeof(n->s) / sizeof(n->s[0])];
     int ordered = 0;
@@ -367,19 +367,20 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
     for (int k = 0; k < ordered; k++) {
         const netw_station_t *e = &n->s[ord[k].slot];
         if (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) {
-            PRINTF_INFO("      %04" PRIX16 " %-4s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%u gen=%u gw=%04" PRIX16 "%s\n", e->station, netw_kind_name(e->kind),
-                        e->rssi, (long)(now - e->last_seen), e->tx.rx, e->tx.gaps, netw_rate_per_min(e->tx.rx, e->first_seen, now), e->beacon_rx, e->fwd_sent, netw_rate_per_min(e->fwd_sent, e->first_seen, now), e->accepting ? 'Y' : 'N',
-                        (unsigned)e->cost, (unsigned)e->generation, e->gateway, netw_hears_format(e, n->_buffer_hears, sizeof(n->_buffer_hears)));
+            PRINTF_INFO("      %03" PRIX16 " %-4s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%" PRIu8 " gen=%" PRIu8 " gw=%03" PRIX16 "%s\n", e->station,
+                        netw_kind_name(e->kind), e->rssi, (long)(now - e->last_seen), e->tx.rx, e->tx.gaps, netw_rate_per_min(e->tx.rx, e->first_seen, now), e->beacon_rx, e->fwd_sent, netw_rate_per_min(e->fwd_sent, e->first_seen, now),
+                        e->accepting ? 'Y' : 'N', e->cost, e->generation, e->gateway, netw_hears_format(e, n->_buffer_hears, sizeof(n->_buffer_hears)));
         }
     }
     for (int k = 0; k < ordered; k++) {
         const netw_station_t *e = &n->s[ord[k].slot];
         if (!(e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) && !netw_is_stale(e, now)) {
             char via[80], rly[40];
-            PRINTF_INFO("      %04" PRIX16 " %-4s rssi=%ddBm%s age=%lds var=%u uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ")%s\n",
-                        e->station, netw_kind_name(e->kind), e->rssi, e->relay_rssi != 0 ? snprintf_inline(rly, sizeof(rly), " relay=%ddBm(%04" PRIX16 ")", e->relay_rssi, e->relay_rssi_from) : "", (long)(now - e->last_seen),
-                        (unsigned)e->variant, e->uniq.rx, e->uniq.gaps, netw_loss_pct(e->uniq.gaps, e->uniq.rx), netw_rate_per_min(e->uniq.rx, e->first_seen, now), e->direct.rx, e->direct.dup, e->direct.gaps, e->mesh.rx, e->mesh.dup,
-                        e->mesh.gaps, netw_via_format(e, via, sizeof(via)));
+            PRINTF_INFO("      %03" PRIX16 " %-4s rssi=%ddBm%s age=%lds var=%" PRIu8 " uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32
+                        ")%s\n",
+                        e->station, netw_kind_name(e->kind), e->rssi, e->relay_rssi != 0 ? snprintf_inline(rly, sizeof(rly), " relay=%ddBm(%03" PRIX16 ")", e->relay_rssi, e->relay_rssi_from) : "", (long)(now - e->last_seen), e->variant,
+                        e->uniq.rx, e->uniq.gaps, netw_loss_pct(e->uniq.gaps, e->uniq.rx), netw_rate_per_min(e->uniq.rx, e->first_seen, now), e->direct.rx, e->direct.dup, e->direct.gaps, e->mesh.rx, e->mesh.dup, e->mesh.gaps,
+                        netw_via_format(e, via, sizeof(via)));
         }
     }
 }
@@ -388,7 +389,7 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool netw_begin(netw_t *n) {
-    memset(n, 0, sizeof(*n));
+    *n = (netw_t){ 0 };
     return true;
 }
 

@@ -229,9 +229,9 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
             if (idep_window_active(&s_conf, &s_nodes[i], hw_time_ms())) {
                 bool reboot = false;
                 if (idep_on_frame(&s_conf, &s_nodes[i], buf, (size_t)len, &reboot))
-                    ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " acted on a downstream command", idep_station(&s_nodes[i]));
+                    ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " acted on a downstream command", idep_station(&s_nodes[i]));
                 if (reboot) {
-                    ESP_LOGW(__tag_app, "node: stn=%" PRIu16 " REBOOT commanded -- restarting", idep_station(&s_nodes[i]));
+                    ESP_LOGW(__tag_app, "node: station=%03" PRIX16 " REBOOT commanded -- restarting", idep_station(&s_nodes[i]));
                     iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
                     hw_delay_ms_yieldable(CONSOLE_DRAIN_MS);
                     esp_restart();
@@ -243,7 +243,7 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
     for (int i = 0; i < (int)(sizeof(s_nodes) / sizeof(s_nodes[0])); i++)
         if (s_nodes[i].window_open && !idep_window_active(&s_conf, &s_nodes[i], hw_time_ms())) {
             idep_window_end(&s_nodes[i]);
-            ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " receive window closed", idep_station(&s_nodes[i]));
+            ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " receive window closed", idep_station(&s_nodes[i]));
         }
 }
 
@@ -254,7 +254,7 @@ static void transmit_packet(const iotsim_packet_t *pkt) {
     hex[0] = '\0';
     for (size_t i = 0, o = 0; i < pkt->len && o < (sizeof(hex) - 1); i++)
         o += (size_t)snprintf(&hex[o], (sizeof(hex) - o) - 1, "%02" PRIX8, pkt->buf[i]);
-    ESP_LOGI(__tag_app, "device: e22 tx #%06" PRIu32 ": stn=%-4" PRIu16 " %-18s seq=%06" PRIu16 " len=%-2" PRIu16 " hex=%s", tx_count, pkt->station_id, iotdata_vsuite_name(pkt->variant), pkt->sequence, (uint16_t)pkt->len, hex);
+    ESP_LOGI(__tag_app, "device: e22 tx #%06" PRIu32 ": station=%03" PRIX16 " %-18s seq=%06" PRIu16 " len=%-2" PRIu16 " hex=%s", tx_count, pkt->station_id, iotdata_vsuite_name(pkt->variant), pkt->sequence, (uint16_t)pkt->len, hex);
     if (lora_write_complete(pkt->buf, pkt->len, /*wait_complete=*/true) == ESP_OK)
         tx_count++;
     else {
@@ -275,7 +275,7 @@ static void transmit_packets(iotsim_t *const sim) {
             s_nodes[idx].sequence = (uint16_t)(pkt.sequence + 1u);
             if (idep_receive_announce(&s_conf, &s_nodes[idx])) {
                 idep_window_begin(&s_conf, &s_nodes[idx], hw_time_ms());
-                ESP_LOGI(__tag_app, "node: stn=%" PRIu16 " receive window open for %ums", idep_station(&s_nodes[idx]), (unsigned)IDEP_RECEIVE_WINDOW_MS);
+                ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " receive window open for %ums", idep_station(&s_nodes[idx]), (unsigned)IDEP_RECEIVE_WINDOW_MS);
             }
             hw_delay_ms_yieldable(TRANSMIT_DELAY_MS);
         }
@@ -330,7 +330,7 @@ bool app_init(void) {
     const uint16_t nbands = (uint16_t)(IOTDATA_STATION_ASSIGNABLE_MAX / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS); /* 4094/8 = 511 */
     const uint16_t station_base = (uint16_t)((mac32 % nbands) * (uint32_t)IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
     iotsim_init(&g_sim, seed, hw_time_ms(), station_base);
-    ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%" PRIu16 "-%" PRIu16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed,
+    ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%03" PRIX16 "-%03" PRIX16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed,
              (uint16_t)(station_base + 1), (uint16_t)(station_base + IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS));
     ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS, IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES, (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS / 1000),
              (unsigned)(IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS / 1000));
@@ -345,7 +345,7 @@ bool app_init(void) {
         const iotsim_sensor_t *s = iotsim_sensor(&g_sim, i);
         idep_node_init(&s_nodes[i], s->station_id, &s_state, SIM_STATE_TAG(s->station_id));
         s_nodes[i].elapsed_ms = (uint32_t)((uint64_t)IDEP_RECEIVE_EVERY_MS * (uint32_t)i / IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS);
-        ESP_LOGI(__tag_app, "  [%2d] %-18s stn=%-4" PRIu16 " bat=%" PRIu8 "%%", i, iotdata_vsuite_name(s->variant), s->station_id, s->battery);
+        ESP_LOGI(__tag_app, "  [%2d] %-18s station=%03" PRIX16 " bat=%" PRIu8 "%%", i, iotdata_vsuite_name(s->variant), s->station_id, s->battery);
     }
 
     /* The node is the source of truth; the engine is seeded from it and then advances in lockstep

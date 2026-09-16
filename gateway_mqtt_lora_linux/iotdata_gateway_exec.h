@@ -34,7 +34,7 @@ bool ddup_check_sensor_packet(process_state_t *st, uint16_t station_id, uint16_t
         if (!ddup_insert(st->state_ddup, station_id, sequence)) {
             st->state_mesh->stat_duplicates++;
             if (st->debug || st->state_mesh->debug)
-                PRINTF_INFO("exec: mesh direct packet duplicate suppressed (station=%04" PRIX16 ", sequence=%" PRIu16 ")\n", station_id, sequence);
+                PRINTF_INFO("exec: mesh direct packet duplicate suppressed (station=%03" PRIX16 ", sequence=%" PRIu16 ")\n", station_id, sequence);
             return false;
         }
     return true;
@@ -79,19 +79,19 @@ void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, in
     // dedup point (netw_note_receive), so it also sees suppressed duplicates — which never reach here.
     const iotdata_variant_def_t *vdef;
     if ((vdef = iotdata_get_variant(variant_id)) == NULL) {
-        PRINTF_ERROR("exec: unknown variant %" PRIu8 " (station=%04" PRIX16 ", size=%d)\n", variant_id, station_id, packet_length);
+        PRINTF_ERROR("exec: unknown variant %" PRIu8 " (station=%03" PRIX16 ", size=%d)\n", variant_id, station_id, packet_length);
         stat_on_packet_decode_error(st->state_stat, station_id, variant_id);
         return;
     }
     char *json = NULL;
     iotdata_status_t rc;
     if ((rc = iotdata_decode_to_json(packet_buffer, (size_t)packet_length, &json, &st->_iotdata_scratch)) != IOTDATA_OK) {
-        PRINTF_ERROR("exec: decode failed: %s (variant=%" PRIu8 ", station=%04" PRIX16 ", size=%d)\n", iotdata_strerror(rc), variant_id, station_id, packet_length);
+        PRINTF_ERROR("exec: decode failed: %s (variant=%" PRIu8 ", station=%03" PRIX16 ", size=%d)\n", iotdata_strerror(rc), variant_id, station_id, packet_length);
         stat_on_packet_decode_error(st->state_stat, station_id, variant_id);
         return;
     }
     stat_on_packet_decoded(st->state_stat, station_id, sequence, variant_id, (uint16_t)packet_length, &st->_iotdata_scratch.dec);
-    snprintf(st->_buffer_mqtt_topic, sizeof(st->_buffer_mqtt_topic), "%s/%s/%04" PRIX16, topic_prefix, vdef->name, station_id);
+    snprintf(st->_buffer_mqtt_topic, sizeof(st->_buffer_mqtt_topic), "%s/%s/%03" PRIX16, topic_prefix, vdef->name, station_id);
     // Splice rssi_packet in as the first member rather than teaching the decoder about it: the
     // decoder emits the packet's own payload, and reception strength is not part of that payload.
     // Keeping it out of the codec means every variant gains the field for free and none of them
@@ -120,7 +120,7 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
     const time_t now = time(NULL);
     const uint8_t ctrl_type = iotdata_mesh_peek_ctrl_type(packet_buffer, packet_length);
     if (st->state_mesh->debug)
-        PRINTF_INFO("exec: mesh rx %s from station=%04" PRIX16 ", sequence=%" PRIu16 " (%d bytes)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id, sequence, packet_length);
+        PRINTF_INFO("exec: mesh rx %s from station=%03" PRIX16 ", sequence=%" PRIu16 " (%d bytes)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id, sequence, packet_length);
     netw_note_transmit(&st->network, station_id, sequence, now);
     switch (ctrl_type) {
     case IOTDATA_MESH_CTRL_FORWARD: {
@@ -132,7 +132,7 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
             else {
                 st->state_mesh->stat_duplicates++;
                 if (st->state_mesh->debug)
-                    PRINTF_INFO("exec: mesh FORWARD duplicate suppressed origin={station=%04" PRIX16 ", sequence=%" PRIu16 "}, inner-length=%d\n", fw.origin_station, fw.origin_sequence, fw.inner_len);
+                    PRINTF_INFO("exec: mesh FORWARD duplicate suppressed origin={station=%03" PRIX16 ", sequence=%" PRIu16 "}, inner-length=%d\n", fw.origin_station, fw.origin_sequence, fw.inner_len);
             }
             if (st->state_mesh->enabled)
                 mesh_transmit_ack(st->state_mesh, fw.origin_station, fw.origin_sequence);
@@ -185,12 +185,12 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
     case IOTDATA_MESH_CTRL_PING:
         mesh_stat_frame(st->state_mesh, ctrl_type, packet_length, true);
         if (st->state_mesh->debug)
-            PRINTF_INFO("exec: mesh rx %s from station=%04" PRIX16 " (not handled here)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id);
+            PRINTF_INFO("exec: mesh rx %s from station=%03" PRIX16 " (not handled here)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id);
         break;
     default:
         mesh_stat_frame(st->state_mesh, ctrl_type, packet_length, false);
         if (st->state_mesh->debug)
-            PRINTF_INFO("exec: mesh rx unknown ctrl_type=0x%02" PRIX8 " from station=%04" PRIX16 "\n", ctrl_type, station_id);
+            PRINTF_INFO("exec: mesh rx unknown ctrl_type=0x%02" PRIX8 " from station=%03" PRIX16 "\n", ctrl_type, station_id);
         break;
     }
 }
@@ -341,7 +341,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
         PRINTF_INFO("exec: variant[%d] = \"%s\" (pres_bytes=%" PRIu8 ") -> %s/%s/<station>\n", i, vdef->name, vdef->num_pres_bytes, st->mqtt_topic_prefix, vdef->name);
     }
     if (st->state_mesh->enabled)
-        PRINTF_INFO("exec: variant[15] = mesh control (gateway station=%04" PRIX16 ")\n", idep_station(st->state_mesh->inode));
+        PRINTF_INFO("exec: variant[15] = mesh control (gateway station=%03" PRIX16 ")\n", idep_station(st->state_mesh->inode));
 
     while (*running) {
 
@@ -372,13 +372,13 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
                     st->filter.stat_blocked++;
                     stat_on_link_rx_drop(st->state_stat);
                     if (st->debug)
-                        PRINTF_INFO("exec: FILTERED from=%04" PRIX16 " var=%u len=%d (blocked)\n", station_id, (unsigned)variant_id, packet_length);
+                        PRINTF_INFO("exec: FILTERED from=%03" PRIX16 " var=%" PRIu8 " len=%d (blocked)\n", station_id, variant_id, packet_length);
                 } else if (variant_id == IOTDATA_MESH_VARIANT) {
                     if (st->state_mesh->enabled)
                         process_mesh_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, packet_rssi_dbm);
                     else {
                         stat_on_link_rx_mesh_unexpected(st->state_stat, station_id);
-                        PRINTF_INFO("exec: mesh packet unexpected from station=%04" PRIX16 " while not enabled\n", station_id);
+                        PRINTF_INFO("exec: mesh packet unexpected from station=%03" PRIX16 " while not enabled\n", station_id);
                     }
                 } else {
                     // Dedup direct receptions against the SAME ring the forward path uses, so a sensor
@@ -394,7 +394,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
                             process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, st->mqtt_topic_prefix, "direct", packet_rssi_dbm);
                     } else {
                         stat_on_link_rx_drop(st->state_stat);
-                        PRINTF_ERROR("exec: undecodable frame from station=%04" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station_id, sequence, packet_length,
+                        PRINTF_ERROR("exec: undecodable frame from station=%03" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station_id, sequence, packet_length,
                                      iotdata_strerror(iotdata_decode(rxbuf, (size_t)packet_length, &st->_iotdata_dec)));
                     }
                 }

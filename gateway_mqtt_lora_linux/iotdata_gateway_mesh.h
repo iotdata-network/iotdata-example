@@ -86,7 +86,7 @@ bool mesh_transmit_beacon(mesh_state_t *st) {
                                                      .generation = st->beacon_generation,
                                                  });
         if (st->debug)
-            PRINTF_INFO("mesh: tx BEACON generation=%" PRIu16 ", station=%04" PRIX16 "\n", st->beacon_generation, idep_station(st->inode));
+            PRINTF_INFO("mesh: tx BEACON generation=%" PRIu16 ", station=%03" PRIX16 "\n", st->beacon_generation, idep_station(st->inode));
         st->beacon_generation = (st->beacon_generation + 1) & (IOTDATA_MESH_GENERATION_MOD - 1);
         ok = len > 0 && st->packet_handler(buf, len);
         if (ok) {
@@ -120,7 +120,7 @@ bool mesh_transmit_ack(mesh_state_t *st, uint16_t origin_station, uint16_t origi
                                                   .origin_sequence = origin_sequence,
                                               });
         if (st->debug)
-            PRINTF_INFO("mesh: tx ACK for origin={station=%04" PRIX16 ", sequence=%" PRIu16 "}\n", origin_station, origin_sequence);
+            PRINTF_INFO("mesh: tx ACK for origin={station=%03" PRIX16 ", sequence=%" PRIu16 "}\n", origin_station, origin_sequence);
         ok = len > 0 && st->packet_handler(buf, len);
         if (ok) {
             idep_sequence_used(st->inode);
@@ -145,7 +145,7 @@ bool mesh_receive_forward_r(mesh_state_t *st, const uint8_t *buf, int len, iotda
     if (iotdata_mesh_unpack_forward(buf, len, out)) {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_FORWARD, len, true);
         if (st->debug)
-            PRINTF_INFO("mesh: rx FORWARD from station=%04" PRIX16 ", sequence=%" PRIu16 ", ttl=%" PRIu8 ", origin={station=%04" PRIX16 ", sequence=%" PRIu16 "}, inner-length=%d\n", out->sender_station, out->sender_seq, out->ttl,
+            PRINTF_INFO("mesh: rx FORWARD from station=%03" PRIX16 ", sequence=%" PRIu16 ", ttl=%" PRIu8 ", origin={station=%03" PRIX16 ", sequence=%" PRIu16 "}, inner-length=%d\n", out->sender_station, out->sender_seq, out->ttl,
                         out->origin_station, out->origin_sequence, out->inner_len);
         return true;
     } else {
@@ -162,7 +162,7 @@ bool mesh_receive_beacon_r(mesh_state_t *st, const uint8_t *buf, int len, iotdat
     if (iotdata_mesh_unpack_beacon(buf, len, b)) {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_BEACON, len, true);
         if (st->debug)
-            PRINTF_INFO("mesh: rx BEACON from gateway=%04" PRIX16 ", generation=%" PRIu16 ", cost=%" PRIu8 ", flags=0x%02" PRIX8 "\n", b->gateway_id, b->generation, b->cost, b->flags);
+            PRINTF_INFO("mesh: rx BEACON from gateway=%03" PRIX16 ", generation=%" PRIu16 ", cost=%" PRIu8 ", flags=0x%02" PRIX8 "\n", b->gateway_id, b->generation, b->cost, b->flags);
         return true;
     } else {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_BEACON, len, false);
@@ -180,7 +180,7 @@ bool mesh_receive_ack(mesh_state_t *st, const uint8_t *buf, int len) {
     if (iotdata_mesh_unpack_ack(buf, len, &a)) {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_ACK, len, true);
         if (st->debug)
-            PRINTF_INFO("mesh: rx ACK from station=%04" PRIX16 " for origin={station=%04" PRIX16 ", sequence=%" PRIu16 "}\n", a.sender_station, a.origin_station, a.origin_sequence);
+            PRINTF_INFO("mesh: rx ACK from station=%03" PRIX16 " for origin={station=%03" PRIX16 ", sequence=%" PRIu16 "}\n", a.sender_station, a.origin_station, a.origin_sequence);
         return true;
     } else {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_ACK, len, false);
@@ -195,7 +195,7 @@ bool mesh_receive_route_error(mesh_state_t *st, const uint8_t *buf, int len) {
     iotdata_mesh_route_error_t err;
     if (iotdata_mesh_unpack_route_error(buf, len, &err)) {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_ROUTE_ERROR, len, true);
-        PRINTF_INFO("mesh: rx ROUTE_ERROR from station=%04" PRIX16 ", reason=%s\n", err.sender_station, iotdata_mesh_reason_name(err.reason));
+        PRINTF_INFO("mesh: rx ROUTE_ERROR from station=%03" PRIX16 ", reason=%s\n", err.sender_station, iotdata_mesh_reason_name(err.reason));
         return true;
     } else {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_ROUTE_ERROR, len, false);
@@ -210,12 +210,12 @@ bool mesh_receive_neighbour_report_r(mesh_state_t *st, const uint8_t *buf, int l
     if (iotdata_mesh_unpack_neighbour_report(buf, len, r)) {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_NEIGHBOUR_RPT, len, true);
         if (st->debug) {
-            PRINTF_INFO("mesh: rx NEIGHBOUR_REPORT from %04" PRIX16 " parent=%04" PRIX16 " cost=%u gw=%04" PRIX16 ", %u neighbour(s):\n", r->sender_station, r->parent_id, (unsigned)r->my_cost, r->gateway_id, (unsigned)r->num_neighbours);
+            PRINTF_INFO("mesh: rx NEIGHBOUR_REPORT from %03" PRIX16 " parent=%03" PRIX16 " cost=%" PRIu8 " gw=%03" PRIX16 ", %" PRIu8 " neighbour(s):\n", r->sender_station, r->parent_id, r->my_cost, r->gateway_id, r->num_neighbours);
             for (int k = 0; k < (int)r->num_neighbours; k++) {
                 iotdata_mesh_nbr_entry_t e;
                 if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &e))
                     break;
-                PRINTF_INFO("      %04" PRIX16 " cost=%u rssi=%ddBm\n", e.station, (unsigned)e.cost, iotdata_mesh_rssi_from_q4(e.rssi_q4));
+                PRINTF_INFO("      %03" PRIX16 " cost=%" PRIu8 " rssi=%ddBm\n", e.station, e.cost, iotdata_mesh_rssi_from_q4(e.rssi_q4));
             }
         }
         return true;
@@ -234,7 +234,7 @@ bool mesh_receive_pong(mesh_state_t *st, const uint8_t *buf, int len) {
     if (iotdata_mesh_peek_header(buf, len, &variant, &station_id, &sequence)) {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_PONG, len, true);
         if (st->debug)
-            PRINTF_INFO("mesh: rx PONG from station=%04" PRIX16 " (%d bytes)\n", station_id, len);
+            PRINTF_INFO("mesh: rx PONG from station=%03" PRIX16 " (%d bytes)\n", station_id, len);
         return true;
     } else {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_PONG, len, false);
@@ -261,7 +261,7 @@ bool mesh_begin(mesh_state_t *st, idep_node_t *inode, buffer_pool_t *pool, mesh_
     st->dedup_handler = dedup_handler;
     st->dedup_handler_ctx = dedup_handler_ctx;
     iotdata_mesh_dedup_init(&st->dedup_ring);
-    PRINTF_INFO("mesh: enabled, station=%04" PRIX16 ", beacon-interval=%" PRIu32 "s\n", idep_station(st->inode), (uint32_t)st->beacon_interval);
+    PRINTF_INFO("mesh: enabled, station=%03" PRIX16 ", beacon-interval=%" PRIu32 "s\n", idep_station(st->inode), (uint32_t)st->beacon_interval);
     return true;
 }
 

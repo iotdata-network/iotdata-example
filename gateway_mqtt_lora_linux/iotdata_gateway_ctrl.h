@@ -104,7 +104,7 @@ static ctrl_state_t *g_ctrl = NULL;
 static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
     if (root != NULL) {
         char idbuf[4 + 1];
-        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%04" PRIX16, idep_station(st->inode)));
+        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, idep_station(st->inode)));
         char *const out = cJSON_PrintUnformatted(root);
         if (out != NULL) {
             (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
@@ -211,7 +211,7 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
                         buffer_unref(st->pool, h);
                     }
                     if (staged == args.targets_count)
-                        PRINTF_INFO("ctrl: %s target=%04X%s station=%04X -> %zu byte control x%u (staged %u)\n", cmd, (unsigned)args.target, args.targets_count > 1 ? "+" : "", (unsigned)args.station, n, (unsigned)args.targets_count,
+                        PRINTF_INFO("ctrl: %s target=%03" PRIX16 "%s station=%03" PRIX16 " -> %zu byte control x%u (staged %u)\n", cmd, args.target, args.targets_count > 1 ? "+" : "", args.station, n, (unsigned)args.targets_count,
                                     (unsigned)buffer_queue_count(&st->queue));
                     else {
                         ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "staged %u of %u: no frame buffer", staged, (unsigned)args.targets_count));
@@ -244,7 +244,7 @@ static void ctrl_report_peers(const stat_state_t *const s) {
         ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->peers[i].station_id, (uint16_t)i);
     for (int k = 0; k < ordered; k++) {
         const stat_peer_t *const e = &s->peers[ord[k].slot];
-        PRINTF_INFO("exec:   %04" PRIX16 " cost=%u gen=%u flags=0x%02" PRIX8 " age=%lds\n", e->station_id, (unsigned)e->cost, (unsigned)e->generation, e->flags, (long)(time(NULL) - e->last_seen));
+        PRINTF_INFO("exec:   %03" PRIX16 " cost=%" PRIu8 " gen=%" PRIu8 " flags=0x%02" PRIX8 " age=%lds\n", e->station_id, e->cost, e->generation, e->flags, (long)(time(NULL) - e->last_seen));
     }
 }
 
@@ -256,7 +256,7 @@ static void ctrl_report_filter(const filter_t *const f) {
         ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), f->e[i].station, (uint16_t)i);
     for (int k = 0; k < ordered; k++) {
         const filter_entry_t *const e = &f->e[ord[k].slot];
-        PRINTF_INFO("exec:   %04" PRIX16 " %s (%s)\n", e->station, e->action == FILTER_ALLOW ? "allow" : "block", e->source == FILTER_AUTO ? "auto" : "manual");
+        PRINTF_INFO("exec:   %03" PRIX16 " %s (%s)\n", e->station, e->action == FILTER_ALLOW ? "allow" : "block", e->source == FILTER_AUTO ? "auto" : "manual");
     }
 }
 
@@ -287,10 +287,10 @@ static bool ctrl_from_iotdata(const uint8_t key, const uint8_t *const val, const
         for (int i = 0; i + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE) {
             const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
             if (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_PEER_NONE) {
-                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %04" PRIX16 " none -> %s\n", station, stat_mesh_peer_remove(st->state_stat, station) ? "removed" : "not present");
+                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %03" PRIX16 " none -> %s\n", station, stat_mesh_peer_remove(st->state_stat, station) ? "removed" : "not present");
                 n++;
             } else
-                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %04" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
+                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %03" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
         }
         if (n > 0)
             ctrl_report_peers(st->state_stat);
@@ -311,7 +311,7 @@ static bool ctrl_from_iotdata(const uint8_t key, const uint8_t *const val, const
             const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
             switch (val[i + 2]) {
             case IOTDATA_NODE_CONTROL_MESH_FILTERS_NONE:
-                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " none -> %s\n", station, filter_remove(&st->filter, station) ? "removed" : "not present");
+                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %03" PRIX16 " none -> %s\n", station, filter_remove(&st->filter, station) ? "removed" : "not present");
                 n++;
                 break;
             case IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK:
@@ -319,14 +319,14 @@ static bool ctrl_from_iotdata(const uint8_t key, const uint8_t *const val, const
                 /* the wire values are NONE/BLOCK/ALLOW = 0/1/2; the table's are BLOCK/ALLOW = 0/1 */
                 const bool allow = (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW);
                 const bool ok = filter_insert(&st->filter, station, allow ? FILTER_ALLOW : FILTER_BLOCK, FILTER_MANUAL);
-                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " %s -> %s\n", station, allow ? "allow" : "block", ok ? "ok" : "table full");
+                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %03" PRIX16 " %s -> %s\n", station, allow ? "allow" : "block", ok ? "ok" : "table full");
                 if (ok && !allow) /* make the block take effect on what we already believe */
                     (void)stat_mesh_peer_remove(st->state_stat, station);
                 n++;
                 break;
             }
             default:
-                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %04" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
+                PRINTF_INFO("exec: CONTROL - MESH_FILTER_UPDATE %03" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
                 break;
             }
         }
@@ -385,7 +385,7 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
 
 bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, bbox_state_t *bbox, buffer_pool_t *pool) {
     assert(st && bbox && pool);
-    memset(st, 0, sizeof(*st));
+    *st = (ctrl_state_t){ 0 };
     st->inode = inode;
     st->bbox = bbox;
     st->pool = pool;
@@ -398,7 +398,7 @@ bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, 
         PRINTF_ERROR("ctrl: subscribe to '%s' failed\n", st->topic_req);
         return false;
     }
-    PRINTF_INFO("ctrl: station=%04" PRIX16 ", request-topic='%s'\n", idep_station(st->inode), st->topic_req);
+    PRINTF_INFO("ctrl: station=%03" PRIX16 ", request-topic='%s'\n", idep_station(st->inode), st->topic_req);
     return true;
 }
 

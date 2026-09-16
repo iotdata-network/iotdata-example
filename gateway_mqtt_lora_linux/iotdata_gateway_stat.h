@@ -180,7 +180,7 @@ static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint1
     }
     const int slot = (s->stations_count < (int)(sizeof(s->stations) / sizeof(s->stations[0]))) ? s->stations_count++ : slot_oldest;
     stat_station_t *e = &s->stations[slot];
-    memset(e, 0, sizeof(*e));
+    *e = (stat_station_t){ 0 };
     e->station_id = station_id;
     e->first_seen = now;
     return e;
@@ -313,7 +313,6 @@ bool stat_mesh_peer_remove(stat_state_t *const s, const uint16_t station_id) {
     for (int i = 0; i < s->peers_count; i++)
         if (s->peers[i].station_id == station_id) {
             s->peers[i] = s->peers[s->peers_count - 1];
-            memset(&s->peers[s->peers_count - 1], 0, sizeof(s->peers[0]));
             s->peers_count--;
             return true;
         }
@@ -321,7 +320,6 @@ bool stat_mesh_peer_remove(stat_state_t *const s, const uint16_t station_id) {
 }
 
 void stat_mesh_peers_clear(stat_state_t *const s) {
-    memset(s->peers, 0, sizeof(s->peers));
     s->peers_count = 0;
 }
 
@@ -390,7 +388,7 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         const stat_station_t *st = &s->stations[ord[k].slot];
         cJSON *o = cJSON_CreateObject();
         char buf[4 + 1];
-        cJSON_AddStringToObject(o, "id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, st->station_id));
+        cJSON_AddStringToObject(o, "id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, st->station_id));
         cJSON_AddNumberToObject(o, "first_seen", (double)st->first_seen);
         cJSON_AddNumberToObject(o, "last_seen", (double)st->last_seen);
         cJSON_AddNumberToObject(o, "age_secs", (double)(now - st->last_seen));
@@ -424,7 +422,7 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         cJSON *m = cJSON_AddObjectToObject(root, "mesh");
         cJSON_AddBoolToObject(m, "enabled", mesh->enabled);
         char buf[4 + 1];
-        cJSON_AddStringToObject(m, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, idep_station(mesh->inode)));
+        cJSON_AddStringToObject(m, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, idep_station(mesh->inode)));
         cJSON_AddNumberToObject(m, "beacons_tx", (double)mesh->stat_beacons_tx);
         /* per frame type: only types actually seen are emitted, so the object stays small on a
            quiet link but gains a key the first time a new type appears */
@@ -459,7 +457,7 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         for (int k = 0; k < ordered_peer; k++) {
             const stat_peer_t *const e = &s->peers[ord_peer[k].slot];
             cJSON *p = cJSON_CreateObject();
-            cJSON_AddStringToObject(p, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, e->station_id));
+            cJSON_AddStringToObject(p, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, e->station_id));
             cJSON_AddNumberToObject(p, "generation", (double)e->generation);
             cJSON_AddNumberToObject(p, "cost", (double)e->cost);
             cJSON_AddNumberToObject(p, "flags", (double)e->flags);
@@ -525,7 +523,7 @@ cJSON *stat_build_stat_json(const stat_state_t *const s, const mesh_state_t *con
     const time_t now = time(NULL);
     cJSON *root = cJSON_CreateObject();
     char buf[4 + 1];
-    cJSON_AddStringToObject(root, "station_id", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, idep_station(s->inode)));
+    cJSON_AddStringToObject(root, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, idep_station(s->inode)));
     cJSON_AddStringToObject(root, "version", s->version ? s->version : "");
     cJSON_AddNumberToObject(root, "time", (double)now);
     cJSON_AddNumberToObject(root, "uptime_secs", (double)(now - s->start_time));
@@ -621,7 +619,7 @@ void stat_publish(stat_state_t *const s, const mesh_state_t *const mesh, const d
         char *json = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
         if (json) {
-            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s/%04" PRIX16, s->mqtt_topic, idep_station(s->inode)), json, (int)strlen(json));
+            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s/%03" PRIX16, s->mqtt_topic, idep_station(s->inode)), json, (int)strlen(json));
             free(json);
         }
     }
@@ -653,7 +651,7 @@ bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic
     s->link.packet_rate_bps = lora_config->air_data_rate;
     s->link.transmit_power_dbm = lora_config->transmit_power;
 
-    PRINTF_INFO("stat: started (gateway=%04" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", idep_station(s->inode), s->link.name, s->link.channel, s->link.frequency_khz);
+    PRINTF_INFO("stat: started (gateway=%03" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", idep_station(s->inode), s->link.name, s->link.channel, s->link.frequency_khz);
 
     return true;
 }

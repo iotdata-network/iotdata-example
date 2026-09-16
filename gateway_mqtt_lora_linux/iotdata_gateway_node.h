@@ -102,8 +102,7 @@ static int node_build_control(const node_state_t *st, uint8_t *buf, const size_t
 static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t size, const uint8_t scope) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
-    iotdata_node_status_t s;
-    memset(&s, 0, sizeof(s));
+    iotdata_node_status_t s = { 0 };
     s.uptime_s = st->stat->start_time > 0 ? (uint32_t)(time(NULL) - st->stat->start_time) : 0;
     s.reason = IOTDATA_NODE_REASON_UNKNOWN;
     if (st->status_mesh != NULL)
@@ -231,7 +230,7 @@ static void node_json_table_row(cJSON *const arr, const uint8_t type, const uint
     if (o == NULL)
         return;
     char idbuf[4 + 1];
-    cJSON_AddStringToObject(o, "station", snprintf_inline(idbuf, sizeof(idbuf), "%04" PRIX16, iotdata_node_table_get_u16(val, 0)));
+    cJSON_AddStringToObject(o, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, iotdata_node_table_get_u16(val, 0)));
     switch (type) {
     case IOTDATA_NODE_TLV_MESH_STATIONS:
         cJSON_AddStringToObject(o, "kind", node_json_table_kind(val[2]));
@@ -241,7 +240,7 @@ static void node_json_table_row(cJSON *const arr, const uint8_t type, const uint
         cJSON_AddNumberToObject(o, "rx", iotdata_node_table_get_u32(val, 7));
         break;
     case IOTDATA_NODE_TLV_MESH_PEERS:
-        cJSON_AddStringToObject(o, "gateway", snprintf_inline(idbuf, sizeof(idbuf), "%04" PRIX16, iotdata_node_table_get_u16(val, 2)));
+        cJSON_AddStringToObject(o, "gateway", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, iotdata_node_table_get_u16(val, 2)));
         cJSON_AddNumberToObject(o, "cost", val[4]);
         cJSON_AddNumberToObject(o, "generation", iotdata_node_table_get_u16(val, 5));
         cJSON_AddNumberToObject(o, "rssi", (double)(int8_t)val[7]);
@@ -330,7 +329,7 @@ static void node_publish_from(node_state_t *st, const uint16_t station, const ui
     if (root) {
         char buf[4 + 1];
         cJSON_AddStringToObject(root, "resp", "node"); /* shares a topic with the other responses */
-        cJSON_AddStringToObject(root, "station", snprintf_inline(buf, sizeof(buf), "%04" PRIX16, station));
+        cJSON_AddStringToObject(root, "station", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, station));
         cJSON_AddStringToObject(root, "tlv", iotdata_node_tlv_name(type) ? iotdata_node_tlv_name(type) : "?");
         if (partial != NULL) {
             cJSON *const jp = cJSON_AddObjectToObject(root, "_partial");
@@ -396,7 +395,7 @@ static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const s
             case IOTDATA_NODE_CONTROL_REBOOT:
                 st->stat_commands++;
                 st->reboot_requested = true;
-                PRINTF_INFO("node: REBOOT requested (delay=%us) -- stopping; the service unit restarts us\n", (unsigned)iotdata_kvr_u16(val, vlen, 0));
+                PRINTF_INFO("node: REBOOT requested (delay=%" PRIu16 "s) -- stopping; the service unit restarts us\n", iotdata_kvr_u16(val, vlen, 0));
                 break;
             default:
                 if (st->control != NULL && st->control(key, val, vlen))
@@ -428,12 +427,12 @@ static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t 
              iotdata_encode_end(&st->_iotdata_enc, &len) == IOTDATA_OK;
         if (ok) {
             const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, h, hw_time_ms());
-            PRINTF_INFO("node: down -> %04" PRIX16 " (%zu bytes, %s)\n", target, len, iotdata_down_ev_name(ev));
+            PRINTF_INFO("node: down -> %03" PRIX16 " (%zu bytes, %s)\n", target, len, iotdata_down_ev_name(ev));
             ok = st->tx(buf, (int)len);
         }
         buffer_unref(st->pool, h); /* written straight to the radio (and copied by the DOWN store) */
     } else
-        PRINTF_ERROR("node: down -> %04" PRIX16 " failed: no frame buffer (pool %u/%u)\n", target, (unsigned)buffer_pool_used(st->pool), (unsigned)buffer_pool_total(st->pool));
+        PRINTF_ERROR("node: down -> %03" PRIX16 " failed: no frame buffer (pool %u/%u)\n", target, (unsigned)buffer_pool_used(st->pool), (unsigned)buffer_pool_total(st->pool));
     return ok;
 }
 
@@ -448,7 +447,7 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
             size_t held_len = 0;
             const buffer_handle_t held = iotdata_down_deliver(&st->down, station, &held_len);
             if (held != BUFFER_NONE && iotdata_node_receive_accepts(&rx, IOTDATA_NODE_TLV_CONTROL)) {
-                PRINTF_INFO("node: %04" PRIX16 " is listening -> delivering %zu byte(s) held\n", station, held_len);
+                PRINTF_INFO("node: %03" PRIX16 " is listening -> delivering %zu byte(s) held\n", station, held_len);
                 (void)st->tx(buffer_data(st->pool, held), (int)held_len); /* borrowed: the slot keeps holding */
             }
         }
@@ -571,7 +570,7 @@ static bool node_begin(node_state_t *st, idep_node_t *const inode, const iotdata
     st->control_keys_count = control_keys_count;
     iotdata_down_init(&st->down, pool);
     snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_MQTT_MANAGE_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
-    PRINTF_INFO("node: station=%04" PRIX16 ", responses on %s\n", idep_station(st->inode), st->topic_resp);
+    PRINTF_INFO("node: station=%03" PRIX16 ", responses on %s\n", idep_station(st->inode), st->topic_resp);
     return true;
 }
 

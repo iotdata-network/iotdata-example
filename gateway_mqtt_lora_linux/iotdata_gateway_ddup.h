@@ -187,7 +187,7 @@ void ddup_peers_recv(ddup_state_t *st, int recv_fd) {
                 st->stat_recv_cycles++;
                 st->stat_recv_entries += (uint32_t)entry_count;
                 if (st->debug)
-                    PRINTF_INFO("ddup: rx from gateway=%04" PRIX16 ", entries=%d\n", ddup_packet_get_gateway_id(st->_buffer_packet), entry_count);
+                    PRINTF_INFO("ddup: rx from gateway=%03" PRIX16 ", entries=%d\n", ddup_packet_get_gateway_id(st->_buffer_packet), entry_count);
             }
         }
     }
@@ -309,7 +309,7 @@ bool ddup_begin(ddup_state_t *st, idep_node_t *inode, iotdata_mesh_dedup_ring_t 
     }
     st->running = running;
     st->inode = inode;
-    PRINTF_INFO("ddup: enabled, port=%" PRIu16 ", peers=%d, gateway_id=%04" PRIX16 ", delay=%" PRIu32 "ms\n", st->port, st->peers_count, idep_station(st->inode), st->delay_ms);
+    PRINTF_INFO("ddup: enabled, port=%" PRIu16 ", peers=%d, gateway_id=%03" PRIX16 ", delay=%" PRIu32 "ms\n", st->port, st->peers_count, idep_station(st->inode), st->delay_ms);
     ddup_peers_resolve(st);
     pthread_mutex_init(&st->mutex, NULL);
     if (pthread_create(&st->thread, NULL, ddup_thread_func, st) != 0) {
