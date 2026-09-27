@@ -78,8 +78,8 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #include "iotdata_variant.h"
 #include "iotdata.c"
 #include "iotdata_mesh.h"
-#include "iotdata_node_down.h"
 #include "iotdata_node.h"
+#include "iotdata_node_down.h" /* after iotdata_node.h: it reads RECEIVE advertisements */
 #include "iotdata_node_utils.h"
 #include "iotdata_node_version.h"
 #include "iotdata_node_status.h"
@@ -89,6 +89,7 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 #include "iotdata_node_diagnostics.h"
 #include "iotdata_node_partial.h"
+#include "iotdata_node_variant.h"
 
 typedef struct {
     blackbox_handle_t handle;
@@ -103,6 +104,7 @@ typedef struct {
    inserts and touches, which is all the mesh does with it. */
 #include "device/d_module_datastore_linux.h"
 #include "iotdata_node_state.h"
+#include "iotdata_node_settings.h"
 #include "iotdata_node_platform.h"
 #define STATE_NODE_TAG 0xB1E28004UL
 /* The station's identity, shared by the mesh exactly as iotdata_gateway.c shares it. No datastore
@@ -1357,7 +1359,10 @@ static bool stat_peer_present(const stat_state_t *s, uint16_t station_id) {
     return false;
 }
 
-/* the same dense audit as netw_is_dense(), for both of stat's tables */
+/* The same dense audit as netw_is_dense(), for both of stat's tables -- but only up to the count:
+   stat_mesh_peer_remove() and _peers_clear() deliberately do NOT clear what they vacate, since
+   nothing ever reads past the count. What that gives up is the ability to spot a stale slot, so the
+   duplicate check below is doing the work of catching a removal that forgot to decrement. */
 static bool stat_is_dense(const stat_state_t *s) {
     if (s->stations_count < 0 || s->stations_count > STAT_MAX_STATIONS || s->peers_count < 0 || s->peers_count > STAT_MESH_PEERS_MAX)
         return false;
@@ -1368,9 +1373,6 @@ static bool stat_is_dense(const stat_state_t *s) {
             if (s->stations[i].station_id == s->stations[j].station_id)
                 return false;
     }
-    for (int i = s->stations_count; i < STAT_MAX_STATIONS; i++)
-        if (s->stations[i].station_id != 0)
-            return false;
     for (int i = 0; i < s->peers_count; i++) {
         if (s->peers[i].station_id == 0)
             return false;
@@ -1378,9 +1380,6 @@ static bool stat_is_dense(const stat_state_t *s) {
             if (s->peers[i].station_id == s->peers[j].station_id)
                 return false;
     }
-    for (int i = s->peers_count; i < STAT_MESH_PEERS_MAX; i++)
-        if (s->peers[i].station_id != 0)
-            return false;
     return true;
 }
 #define ASSERT_COUNT_STAT(s) ASSERT(stat_is_dense(s))
@@ -1558,6 +1557,9 @@ static uint16_t ctrl_staged_len(const ctrl_state_t *const st) {
 }
 
 /* drain one the way ctrl_tick does, so a test can check what comes out and in what order */
+/* Returns the ACTION of the staged command: every command shares the one CONTROL key now, so the
+   key alone says nothing and the subject/action pair is what identifies it. Layout is
+   [key][vlen][subject][action][args...]. */
 static bool ctrl_test_take(ctrl_state_t *const st, uint8_t *const key0, uint16_t *const target) {
     uint32_t k = 0;
     const buffer_handle_t h = buffer_queue_take(&st->queue, hw_time_ms(), NULL, &k);
@@ -1565,7 +1567,7 @@ static bool ctrl_test_take(ctrl_state_t *const st, uint8_t *const key0, uint16_t
         return false;
     const uint8_t *const data = buffer_data(st->pool, h);
     if (key0 != NULL)
-        *key0 = data != NULL ? data[0] : 0;
+        *key0 = (data != NULL && data[1] >= 2) ? data[3] : 0;
     if (target != NULL)
         *target = (uint16_t)k;
     buffer_unref(st->pool, h);
@@ -1605,8 +1607,10 @@ static int build_report(uint8_t *out, size_t size, uint16_t station, uint16_t se
     uint8_t kv[32];
     iotdata_kvr_t b;
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    iotdata_kvr_add_flag(&b, IOTDATA_NODE_CONTROL_VERSION_REQUEST);
-    iotdata_kvr_add_flag(&b, IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR);
+    const uint8_t rq[1] = { IOTDATA_NODE_TLV_VERSION };
+    const uint8_t cmd[2] = { IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR };
+    iotdata_kvr_add(&b, IOTDATA_NODE_CONTROL_REQUEST, rq, (uint8_t)sizeof(rq));
+    iotdata_kvr_add(&b, IOTDATA_NODE_CONTROL_CONTROL, cmd, (uint8_t)sizeof(cmd));
     iotdata_encoder_t enc;
     size_t len = 0;
     if (iotdata_encode_begin(&enc, out, size, 0, station, sequence) != IOTDATA_OK)
@@ -1624,35 +1628,41 @@ static bool test_ctrl_short_names(void) {
         uint8_t expect[8];
         int expect_len;
     } cases[] = {
-        { "{\"cmd\":\"vers\",\"target\":\"0x123\"}", { 0x08, 0x00 }, 2 },
-        { "{\"cmd\":\"vari\",\"target\":\"0x123\"}", { 0x10, 0x00 }, 2 },
-        { "{\"cmd\":\"ctrl\",\"target\":\"0x123\"}", { 0x18, 0x00 }, 2 },
-        { "{\"cmd\":\"stat\",\"target\":\"0x123\"}", { 0x20, 0x00 }, 2 },                          /* no scope = all */
-        { "{\"cmd\":\"stat\",\"scope\":\"mesh\",\"target\":\"0x123\"}", { 0x20, 0x01, 0x02 }, 3 }, /* wait: scope parses filter scopes */
-        { "{\"cmd\":\"conf\",\"target\":\"0x123\"}", { 0x28, 0x00 }, 2 },
-        { "{\"cmd\":\"diag\",\"target\":\"0x123\"}", { 0x30, 0x00 }, 2 },
-        { "{\"cmd\":\"cont\",\"target\":\"0x123\"}", { 0x38, 0x00 }, 2 },
-        { "{\"cmd\":\"boot\",\"target\":\"0x123\"}", { 0x00, 0x00 }, 2 },
-        { "{\"cmd\":\"mesh-stations\",\"target\":\"0x123\"}", { 0x40, 0x00 }, 2 },
-        { "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}", { 0x48, 0x00 }, 2 },
-        { "{\"cmd\":\"mesh-peers-clear\",\"target\":\"0x123\"}", { 0x4A, 0x00 }, 2 },
-        { "{\"cmd\":\"mesh-filters\",\"target\":\"0x123\"}", { 0x50, 0x00 }, 2 },       /* a request: the report answers */
-        { "{\"cmd\":\"mesh-stations-dump\",\"target\":\"0x123\"}", { 0x41, 0x00 }, 2 }, /* a dump: the node prints */
-        { "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x123\"}", { 0x4B, 0x00 }, 2 },
-        { "{\"cmd\":\"mesh-filters-dump\",\"target\":\"0x123\"}", { 0x53, 0x00 }, 2 },
-        { "{\"cmd\":\"mesh-filters-update\",\"station\":\"0x456\",\"action\":\"block\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x01 }, 5 },
-        { "{\"cmd\":\"mesh-filters-update\",\"station\":\"0x456\",\"action\":\"allow\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x02 }, 5 },
-        { "{\"cmd\":\"mesh-filters-update\",\"station\":\"0x456\",\"action\":\"none\",\"target\":\"0x123\"}", { 0x51, 0x03, 0x04, 0x56, 0x00 }, 5 },
-        { "{\"cmd\":\"mesh-peers-update\",\"station\":\"0x456\",\"action\":\"remove\",\"target\":\"0x123\"}", { 0x49, 0x03, 0x04, 0x56, 0x00 }, 5 },
-        /* the recorder, which is a NODE command and not a mesh one: one vocabulary per node */
-        { "{\"cmd\":\"diag-enable\",\"target\":\"0x123\"}", { 0x31, 0x01, 0x01 }, 3 },
-        { "{\"cmd\":\"diag-disable\",\"target\":\"0x123\"}", { 0x31, 0x01, 0x00 }, 3 },
-        { "{\"cmd\":\"diag-clear\",\"target\":\"0x123\"}", { 0x32, 0x00 }, 2 },
-        { "{\"cmd\":\"diag-dump\",\"target\":\"0x123\"}", { 0x33, 0x00 }, 2 },
-        /* a filter scope is carried even when zero, because the key declares a width of 1 */
-        { "{\"cmd\":\"mesh-filters-clear\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x00 }, 3 },
-        { "{\"cmd\":\"mesh-filters-clear\",\"scope\":\"manual\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x01 }, 3 },
-        { "{\"cmd\":\"mesh-filters-clear\",\"scope\":\"auto\",\"target\":\"0x123\"}", { 0x52, 0x01, 0x02 }, 3 },
+        /* [key][vlen][subject]... -- REQUEST is 0x00 and CONTROL is 0x01; everything else is
+           vocabulary. Subjects are the TLV types verbatim, plus NODE (0x40) and MESH (0x41). */
+        { "{\"cmd\":\"recv\",\"target\":\"0x123\"}", { 0x00, 0x01, 0x00 }, 3 },
+        { "{\"cmd\":\"vers\",\"target\":\"0x123\"}", { 0x00, 0x01, 0x01 }, 3 },
+        { "{\"cmd\":\"vari\",\"target\":\"0x123\"}", { 0x00, 0x01, 0x02 }, 3 },
+        { "{\"cmd\":\"ctrl\",\"target\":\"0x123\"}", { 0x00, 0x01, 0x03 }, 3 },
+        { "{\"cmd\":\"stat\",\"target\":\"0x123\"}", { 0x00, 0x01, 0x04 }, 3 }, /* no scope = the default groups */
+        { "{\"cmd\":\"stat\",\"scope\":\"mesh\",\"target\":\"0x123\"}", { 0x00, 0x02, 0x04, 0x02 }, 4 },
+        { "{\"cmd\":\"conf\",\"target\":\"0x123\"}", { 0x00, 0x01, 0x05 }, 3 },
+        { "{\"cmd\":\"diag\",\"target\":\"0x123\"}", { 0x00, 0x01, 0x06 }, 3 },
+        { "{\"cmd\":\"cont\",\"target\":\"0x123\"}", { 0x00, 0x01, 0x07 }, 3 },
+        { "{\"cmd\":\"boot\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x40, 0x00 }, 4 }, /* NODE/reboot */
+        /* the tables have no command of their own: each is `stat` with the table's scope bit */
+        { "{\"cmd\":\"stat\",\"scope\":\"stations\",\"target\":\"0x123\"}", { 0x00, 0x02, 0x04, 0x04 }, 4 },
+        { "{\"cmd\":\"stat\",\"scope\":\"filters\",\"target\":\"0x123\"}", { 0x00, 0x02, 0x04, 0x08 }, 4 },
+        { "{\"cmd\":\"stat\",\"scope\":\"peers\",\"target\":\"0x123\"}", { 0x00, 0x02, 0x04, 0x10 }, 4 },
+        /* a dump is a command, because a scope cannot express "print it on your own console" */
+        { "{\"cmd\":\"stations-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x04, 0x00 }, 4 },
+        { "{\"cmd\":\"filters-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x04, 0x01 }, 4 },
+        { "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x41, 0x02 }, 4 },
+        { "{\"cmd\":\"mesh-peers-clear\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x41, 0x01 }, 4 },
+        { "{\"cmd\":\"filters-update\",\"station\":\"0x456\",\"action\":\"block\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x01 }, 7 },
+        { "{\"cmd\":\"filters-update\",\"station\":\"0x456\",\"action\":\"allow\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x02 }, 7 },
+        { "{\"cmd\":\"filters-update\",\"station\":\"0x456\",\"action\":\"none\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x00 }, 7 },
+        { "{\"cmd\":\"mesh-peers-update\",\"station\":\"0x456\",\"action\":\"remove\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x41, 0x00, 0x04, 0x56, 0x00 }, 7 },
+        /* the recorder's actions hang off the DIAGNOSTICS subject, where its reports already are */
+        { "{\"cmd\":\"diag-enable\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x06, 0x00, 0x01 }, 5 },
+        { "{\"cmd\":\"diag-disable\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x06, 0x00, 0x00 }, 5 },
+        { "{\"cmd\":\"diag-clear\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x06, 0x01 }, 4 },
+        { "{\"cmd\":\"diag-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x06, 0x02 }, 4 },
+        /* a filter scope is carried even when zero: SCOPE_ALL is a real instruction, where an
+           absent STATUS scope already means the default groups */
+        { "{\"cmd\":\"filters-clear\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x00 }, 5 },
+        { "{\"cmd\":\"filters-clear\",\"scope\":\"manual\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x01 }, 5 },
+        { "{\"cmd\":\"filters-clear\",\"scope\":\"auto\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x02 }, 5 },
     };
     ctrl_state_t st;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1727,31 +1737,31 @@ static bool test_mesh_node_table_report(void) {
     netw_note_receive(&ps.network, 0x0537, 4, 1, NETW_PATH_DIRECT, true, -48, 0, time(NULL));
     netw_note_receive(&ps.network, 0x06ED, 0, 1, NETW_PATH_DIRECT, true, -55, 0, time(NULL));
     stat_on_peer(&ss, 0x05BF, 7, 1, IOTDATA_MESH_FLAG_ACCEPTING);
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, (const uint8_t[]){ 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK }, IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, (const uint8_t[]){ 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK }, IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE));
 
-    ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_TLV_MESH_STATIONS), 2);
-    ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_TLV_MESH_PEERS), 1);
-    ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_TLV_MESH_FILTERS), 1);
+    ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_STATUS_STATIONS_ENTRY), 2);
+    ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY), 1);
+    ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_STATUS_FILTERS_ENTRY), 1);
 
     /* a peer row, read back exactly as a reader would */
-    uint8_t row[IOTDATA_NODE_TABLE_ROW_MAX];
+    uint8_t row[IOTDATA_NODE_STATUS_ENTRY_MAX];
     memset(row, 0, sizeof(row));
-    ASSERT(exec_node_table_row(IOTDATA_NODE_TLV_MESH_PEERS, 0, row));
-    ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 0), 0x05BF);
-    ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 2), 0x0001); /* the gateway is its own gateway */
-    ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 5), 7);      /* generation */
-    ASSERT_EQ_INT(row[10] & IOTDATA_NODE_TABLE_PEER_ACCEPTING, IOTDATA_NODE_TABLE_PEER_ACCEPTING);
-    ASSERT_EQ_INT(row[10] & IOTDATA_NODE_TABLE_PEER_PARENT, 0); /* a root has no parent */
+    ASSERT(exec_node_table_row(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY, 0, row));
+    ASSERT_EQ_INT(iotdata_node_entry_get_u16(row, 0), 0x05BF);
+    ASSERT_EQ_INT(iotdata_node_entry_get_u16(row, 2), 0x0001); /* the gateway is its own gateway */
+    ASSERT_EQ_INT(iotdata_node_entry_get_u16(row, 5), 7);      /* generation */
+    ASSERT_EQ_INT(row[10] & IOTDATA_NODE_STATUS_MESH_PEERS_FLAG_ACCEPTING, IOTDATA_NODE_STATUS_MESH_PEERS_FLAG_ACCEPTING);
+    ASSERT_EQ_INT(row[10] & IOTDATA_NODE_STATUS_MESH_PEERS_FLAG_PARENT, 0); /* a root has no parent */
 
     /* a filter row */
     memset(row, 0, sizeof(row));
-    ASSERT(exec_node_table_row(IOTDATA_NODE_TLV_MESH_FILTERS, 0, row));
-    ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 0), 0x0AF9);
+    ASSERT(exec_node_table_row(IOTDATA_NODE_STATUS_FILTERS_ENTRY, 0, row));
+    ASSERT_EQ_INT(iotdata_node_entry_get_u16(row, 0), 0x0AF9);
     ASSERT_EQ_INT(row[2], IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK);
     ASSERT_EQ_INT(row[3], IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_MANUAL);
 
     /* an index past the end is refused rather than returning a stale row */
-    ASSERT(!exec_node_table_row(IOTDATA_NODE_TLV_MESH_PEERS, 5, row));
+    ASSERT(!exec_node_table_row(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY, 5, row));
     ASSERT(!exec_node_table_row(IOTDATA_NODE_TLV_STATUS, 0, row)); /* not a table */
     g_exec = NULL;
     return true;
@@ -1771,14 +1781,14 @@ static bool test_mesh_node_table_after_remove(void) {
     stat_on_peer(&ss, 0x0502, 1, 1, 0);
     stat_on_peer(&ss, 0x0503, 1, 1, 0);
     ASSERT(stat_mesh_peer_remove(&ss, 0x0502)); /* from the middle: 0x0503 moves down into its place */
-    ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_TLV_MESH_PEERS), 2);
+    ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY), 2);
 
-    uint8_t row[IOTDATA_NODE_TABLE_ROW_MAX];
-    ASSERT(exec_node_table_row(IOTDATA_NODE_TLV_MESH_PEERS, 0, row));
-    ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 0), 0x0501);
-    ASSERT(exec_node_table_row(IOTDATA_NODE_TLV_MESH_PEERS, 1, row));
-    ASSERT_EQ_INT(iotdata_node_table_get_u16(row, 0), 0x0503); /* the survivor, wherever it now sits */
-    ASSERT(!exec_node_table_row(IOTDATA_NODE_TLV_MESH_PEERS, 2, row));
+    uint8_t row[IOTDATA_NODE_STATUS_ENTRY_MAX];
+    ASSERT(exec_node_table_row(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY, 0, row));
+    ASSERT_EQ_INT(iotdata_node_entry_get_u16(row, 0), 0x0501);
+    ASSERT(exec_node_table_row(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY, 1, row));
+    ASSERT_EQ_INT(iotdata_node_entry_get_u16(row, 0), 0x0503); /* the survivor, wherever it now sits */
+    ASSERT(!exec_node_table_row(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY, 2, row));
     g_exec = NULL;
     return true;
 }
@@ -1800,31 +1810,31 @@ static bool test_table_report_json(void) {
     uint8_t kv[64];
     iotdata_kvr_t b;
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    uint8_t row[IOTDATA_NODE_TABLE_PEERS_ROW_SIZE];
+    uint8_t row[IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY_SIZE];
     memset(row, 0, sizeof(row));
-    iotdata_node_table_put_u16(row, 0, 0x0F1B);
-    iotdata_node_table_put_u16(row, 2, 0x0001); /* a NUL byte, mid-row, on purpose */
+    iotdata_node_entry_put_u16(row, 0, 0x0F1B);
+    iotdata_node_entry_put_u16(row, 2, 0x0001); /* a NUL byte, mid-row, on purpose */
     row[4] = 1;
-    iotdata_node_table_put_u16(row, 5, 9);
+    iotdata_node_entry_put_u16(row, 5, 9);
     row[7] = (uint8_t)(int8_t)-42;
-    iotdata_node_table_put_u16(row, 8, 3);
-    row[10] = IOTDATA_NODE_TABLE_PEER_ACCEPTING;
-    iotdata_kvr_add_u8(&b, IOTDATA_NODE_TABLE_COUNT, 1);
-    iotdata_kvr_add(&b, IOTDATA_NODE_TABLE_ROW, row, (uint8_t)sizeof(row));
+    iotdata_node_entry_put_u16(row, 8, 3);
+    row[10] = IOTDATA_NODE_STATUS_MESH_PEERS_FLAG_ACCEPTING;
+    iotdata_kvr_add_u8(&b, IOTDATA_NODE_STATUS_MESH_PEERS_COUNT, 1);
+    iotdata_kvr_add(&b, IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY, row, (uint8_t)sizeof(row));
 
-    ASSERT(iotdata_node_tlv_is_table(IOTDATA_NODE_TLV_MESH_PEERS));
+    ASSERT(iotdata_node_status_entry_size(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY) == sizeof(row));
     cJSON *const root = cJSON_CreateObject();
     ASSERT(root != NULL);
     cJSON *const data = cJSON_AddObjectToObject(root, "data");
-    node_json_table(data, IOTDATA_NODE_TLV_MESH_PEERS, kv, b.len);
+    node_json_kvr(NULL, data, IOTDATA_NODE_TLV_STATUS, kv, b.len);
     char *const out = cJSON_PrintUnformatted(root);
     ASSERT(out != NULL);
 
     /* the whole table's count, and a row decoded into named fields */
-    ASSERT(strstr(out, "\"count\":1") != NULL);
-    ASSERT(strstr(out, "\"rows\":[") != NULL);
-    ASSERT(strstr(out, "\"station\":\"0F1B\"") != NULL);
-    ASSERT(strstr(out, "\"gateway\":\"0001\"") != NULL); /* survived the NUL */
+    ASSERT(strstr(out, "\"mesh_peers_count\":1") != NULL);
+    ASSERT(strstr(out, "\"peers\":[") != NULL);
+    ASSERT(strstr(out, "\"station\":\"F1B\"") != NULL); /* 3 hex digits: a station is 12 bits */
+    ASSERT(strstr(out, "\"gateway\":\"001\"") != NULL); /* survived the NUL */
     ASSERT(strstr(out, "\"cost\":1") != NULL);
     ASSERT(strstr(out, "\"rssi\":-42") != NULL);
     ASSERT(strstr(out, "\"accepting\":true") != NULL);
@@ -1834,13 +1844,13 @@ static bool test_table_report_json(void) {
 
     /* a row of the wrong width is dropped, not misread as another table's row */
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    iotdata_kvr_add_u8(&b, IOTDATA_NODE_TABLE_COUNT, 1);
-    iotdata_kvr_add(&b, IOTDATA_NODE_TABLE_ROW, row, 4); /* a FILTERS-width row in a PEERS report */
+    iotdata_kvr_add_u8(&b, IOTDATA_NODE_STATUS_MESH_PEERS_COUNT, 1);
+    iotdata_kvr_add(&b, IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY, row, 4); /* a FILTERS-width row in a PEERS report */
     cJSON *const r2 = cJSON_CreateObject();
     cJSON *const d2 = cJSON_AddObjectToObject(r2, "data");
-    node_json_table(d2, IOTDATA_NODE_TLV_MESH_PEERS, kv, b.len);
+    node_json_kvr(NULL, d2, IOTDATA_NODE_TLV_STATUS, kv, b.len);
     char *const o2 = cJSON_PrintUnformatted(r2);
-    ASSERT(strstr(o2, "\"rows\":[]") != NULL);
+    ASSERT(strstr(o2, "\"peers\":[]") != NULL);
     free(o2);
     cJSON_Delete(r2);
     return true;
@@ -1942,16 +1952,18 @@ static bool test_ctrl_status_scope_differs_from_node_status(void) {
     ctrl_test_state(&st);
     ctrl_test_feed(&st, "{\"cmd\":\"stat\",\"scope\":\"mesh\",\"target\":\"0x123\"}");
     ASSERT(ctrl_staged(&st));
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_STATUS_REQUEST);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 1);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[2], IOTDATA_NODE_STATUS_SCOPE_MESH);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_REQUEST);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 2);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[2], IOTDATA_NODE_TLV_STATUS);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[3], IOTDATA_NODE_STATUS_SCOPE_MESH);
     ctrl_test_drop(&st); /* ctrl_test_state below memsets the slot: give this one back first */
 
     ctrl_test_state(&st);
     ctrl_test_feed(&st, "{\"cmd\":\"stat\",\"target\":\"0x123\"}");
     ASSERT(ctrl_staged(&st));
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_STATUS_REQUEST);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 0); /* no scope value = all groups */
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_REQUEST);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 1); /* the subject alone: no scope = the default groups */
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[2], IOTDATA_NODE_TLV_STATUS);
     ctrl_test_drop(&st);
     return true;
 }
@@ -1959,13 +1971,15 @@ static bool test_ctrl_status_scope_differs_from_node_status(void) {
 static bool test_ctrl_mesh_update_entry_shape(void) {
     ctrl_state_t st;
     ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-filters-update\",\"station\":\"0xABC\",\"action\":\"block\",\"target\":\"0x123\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"filters-update\",\"station\":\"0xABC\",\"action\":\"block\",\"target\":\"0x123\"}");
     ASSERT(ctrl_staged(&st));
-    ASSERT_EQ_INT(ctrl_staged_len(&st), 2 + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
-    ASSERT_EQ_INT((uint16_t)((ctrl_staged_bytes(&st)[2] << 8) | ctrl_staged_bytes(&st)[3]), 0x0ABC);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[4], IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK);
+    ASSERT_EQ_INT(ctrl_staged_len(&st), 2 + 2 + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_CONTROL);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 2 + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[2], IOTDATA_NODE_TLV_STATUS);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[3], IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE);
+    ASSERT_EQ_INT((uint16_t)((ctrl_staged_bytes(&st)[4] << 8) | ctrl_staged_bytes(&st)[5]), 0x0ABC);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[6], IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK);
     ctrl_test_drop(&st);
     return true;
 }
@@ -2017,7 +2031,7 @@ static bool test_ctrl_bad_json_stages_nothing(void) {
 static bool test_ctrl_target_defaults_to_broadcast(void) {
     ctrl_state_t st;
     ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\"}");
     ASSERT(ctrl_staged(&st));
     ASSERT_EQ_INT(ctrl_staged_target(&st), IOTDATA_STATION_BROADCAST);
     ctrl_test_drop(&st);
@@ -2027,18 +2041,18 @@ static bool test_ctrl_target_defaults_to_broadcast(void) {
 static bool test_ctrl_requests_queue_in_order(void) {
     ctrl_state_t st;
     ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}");
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-filters\",\"target\":\"0x456\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x123\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"filters-dump\",\"target\":\"0x456\"}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 2u);
     ASSERT_EQ_INT(buffer_queue_rejected(&st.queue), 0u);
 
     uint8_t key = 0;
     uint16_t target = 0;
     ASSERT(ctrl_test_take(&st, &key, &target));
-    ASSERT_EQ_INT(key, IOTDATA_NODE_CONTROL_MESH_PEERS_REQUEST /* a request; the report answers */);
+    ASSERT_EQ_INT(key, IOTDATA_NODE_ACTION_MESH_PEERS_DUMP);
     ASSERT_EQ_INT(target, 0x123); /* the target travels with each one, not just with the last */
     ASSERT(ctrl_test_take(&st, &key, &target));
-    ASSERT_EQ_INT(key, IOTDATA_NODE_CONTROL_MESH_FILTERS_REQUEST /* likewise */);
+    ASSERT_EQ_INT(key, IOTDATA_NODE_ACTION_STATUS_FILTERS_DUMP /* likewise */);
     ASSERT_EQ_INT(target, 0x456);
     ASSERT(!ctrl_test_take(&st, NULL, NULL));
     return true;
@@ -2048,7 +2062,7 @@ static bool test_ctrl_queue_full_is_refused(void) {
     ctrl_state_t st;
     ctrl_test_state(&st);
     for (int i = 0; i < CTRL_QUEUE_MAX + 2; i++)
-        ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}");
+        ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x123\"}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), CTRL_QUEUE_MAX);
     /* Refused by the ctrl layer BEFORE a buffer is acquired, so the queue never sees the attempt:
        a request naming several targets has to be checked against the room for all of them at once,
@@ -2064,19 +2078,19 @@ static bool test_ctrl_queue_full_is_refused(void) {
 static bool test_ctrl_multiple_targets(void) {
     ctrl_state_t st;
     ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":[\"0x123\",\"0x456\",\"0x789\"]}");
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":[\"0x123\",\"0x456\",\"0x789\"]}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 3u); /* one frame each */
     ASSERT_EQ_INT(st.stat_req_bad, 0u);
     /* a repeated station is airtime for nothing, and a broadcast anywhere absorbs the rest */
     ctrl_test_drop(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":[\"0x123\",\"0x123\"]}");
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":[\"0x123\",\"0x123\"]}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
     ctrl_test_drop(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":[\"0x123\",\"all\",\"0x456\"]}");
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":[\"0x123\",\"all\",\"0x456\"]}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
     ctrl_test_drop(&st);
     /* more targets than one request may name: refused, never truncated to what happens to fit */
-    char many[256] = "{\"cmd\":\"mesh-peers\",\"target\":[";
+    char many[256] = "{\"cmd\":\"mesh-peers-dump\",\"target\":[";
     for (int i = 0; i < IOTDATA_CONTROL_TARGETS_MAX + 1; i++)
         (void)snprintf(many + strlen(many), sizeof(many) - strlen(many), "%s\"0x%03X\"", i ? "," : "", 0x100 + i);
     (void)snprintf(many + strlen(many), sizeof(many) - strlen(many), "]}");
@@ -2084,9 +2098,9 @@ static bool test_ctrl_multiple_targets(void) {
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 0u);
     ASSERT_EQ_INT(st.stat_req_bad, 1u);
     /* and a list that FITS but the queue has no room for: also refused whole, nothing staged */
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x001\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x001\"}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
-    char full[256] = "{\"cmd\":\"mesh-peers\",\"target\":[";
+    char full[256] = "{\"cmd\":\"mesh-peers-dump\",\"target\":[";
     for (int i = 0; i < IOTDATA_CONTROL_TARGETS_MAX; i++)
         (void)snprintf(full + strlen(full), sizeof(full) - strlen(full), "%s\"0x%03X\"", i ? "," : "", 0x200 + i);
     (void)snprintf(full + strlen(full), sizeof(full) - strlen(full), "]}");
@@ -2100,7 +2114,7 @@ static bool test_ctrl_multiple_targets(void) {
 static bool test_ctrl_staged_command_expires(void) {
     ctrl_state_t st;
     ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers\",\"target\":\"0x123\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x123\"}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
     const uint32_t now_ms = hw_time_ms();
     ASSERT_EQ_INT(buffer_queue_expire(&st.queue, now_ms + CTRL_QUEUE_TTL_MS - 1000), 0u); /* not yet */
@@ -2163,14 +2177,14 @@ static bool test_mesh_node_filter_update_blocks_rx(void) {
     ASSERT(filter_allows(&ps.filter, 0x0537)); /* nothing filtered yet */
 
     const uint8_t block[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
     ASSERT(!filter_allows(&ps.filter, 0x0537)); /* blocked */
     ASSERT(filter_allows(&ps.filter, 0x0538));  /* and only that one */
     ASSERT_EQ_INT(filter_count(&ps.filter), 1);
 
     /* NONE removes it: there is no separate remove command, by design */
     const uint8_t none[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_NONE };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, none, (uint8_t)sizeof(none)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, none, (uint8_t)sizeof(none)));
     ASSERT(filter_allows(&ps.filter, 0x0537));
     ASSERT_EQ_INT(filter_count(&ps.filter), 0);
     g_exec = NULL;
@@ -2186,7 +2200,7 @@ static bool test_mesh_node_block_drops_peer(void) {
     ASSERT_EQ_INT(ss.peers_count, 1);
 
     const uint8_t block[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
     ASSERT_EQ_INT(ss.peers_count, 0);
     g_exec = NULL;
     return true;
@@ -2202,18 +2216,18 @@ static bool test_mesh_node_peers_update_and_clear(void) {
     ASSERT_EQ_INT(ss.peers_count, 2);
 
     const uint8_t forget[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_PEER_NONE };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget)));
     ASSERT_EQ_INT(ss.peers_count, 1);
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget))); /* again */
-    ASSERT_EQ_INT(ss.peers_count, 1);                                                                   /* still 1: idempotent */
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget))); /* again */
+    ASSERT_EQ_INT(ss.peers_count, 1);                                                                                             /* still 1: idempotent */
 
     /* the hole a removal leaves must be reusable, or the table leaks slots */
     stat_on_peer(&ss, 0x0AF9, 1, 1, 0);
     ASSERT_EQ_INT(ss.peers_count, 2);
 
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR, NULL, 0));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR, NULL, 0));
     ASSERT_EQ_INT(ss.peers_count, 0);
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR, NULL, 0)); /* again */
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR, NULL, 0)); /* again */
     ASSERT_EQ_INT(ss.peers_count, 0);
     g_exec = NULL;
     return true;
@@ -2228,7 +2242,7 @@ static bool test_mesh_node_filter_update_takes_a_list(void) {
     const uint8_t three[3 * IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = {
         0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK, 0x05, 0x38, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK, 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW,
     };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE, three, (uint8_t)sizeof(three)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, three, (uint8_t)sizeof(three)));
     ASSERT_EQ_INT(filter_count(&ps.filter), 3);
     ASSERT(!filter_allows(&ps.filter, 0x0537));
     ASSERT(!filter_allows(&ps.filter, 0x0538));
@@ -2244,8 +2258,8 @@ static bool test_mesh_node_unimplemented_key_refused(void) {
     mesh_state_t ms;
     stat_state_t ss;
     mesh_node_test_state(&ps, &ms, &ss);
-    ASSERT(!ctrl_from_iotdata(0x7F, NULL, 0));
-    ASSERT(!ctrl_from_iotdata(IOTDATA_NODE_CONTROL_REBOOT, NULL, 0)); /* the node layer's, not ours */
+    ASSERT(!ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, 0x7F, NULL, 0));                            /* a MESH action nobody defines */
+    ASSERT(!ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_NODE, IOTDATA_NODE_ACTION_NODE_REBOOT, NULL, 0)); /* the node layer's, not ours */
     g_exec = NULL;
     return true;
 }
@@ -2273,11 +2287,13 @@ static bool test_mesh_node_control_keys_are_all_handled(void) {
     cs.pool = &t_pool;
     buffer_queue_init(&cs.queue, cs.queue_slot, CTRL_QUEUE_MAX, &t_pool);
     g_ctrl = &cs;
-    for (size_t i = 0; i < sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0]); i++) {
-        const uint8_t key = ctrl_from_iotdata_keys[i];
+    /* the advertised list is (subject, action) pairs: every one must be serviced, or a manager is
+       sent on a wild goose chase by the node's own inventory */
+    for (size_t i = 0; i + 1 < sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0]); i += 2) {
+        const uint8_t subject = ctrl_from_iotdata_keys[i], action = ctrl_from_iotdata_keys[i + 1];
         const uint8_t entry[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, 0x00 };
-        if (!ctrl_from_iotdata(key, entry, (uint8_t)sizeof(entry))) {
-            printf("FAIL (advertised key 0x%02X is not handled)\n", key);
+        if (!ctrl_from_iotdata(subject, action, entry, (uint8_t)sizeof(entry))) {
+            printf("FAIL (advertised %02X/%02X is not handled)\n", subject, action);
             g_exec = NULL;
             g_ctrl = NULL;
             return false;
@@ -2520,7 +2536,8 @@ static bool test_control_over_the_air_reaches_the_same_handler(void) {
     uint8_t kv[16], frame[TEST_FRAME_MAX];
     iotdata_kvr_t b;
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    iotdata_kvr_add_flag(&b, IOTDATA_NODE_CONTROL_VERSION_REQUEST);
+    const uint8_t rq_vers[1] = { IOTDATA_NODE_TLV_VERSION };
+    iotdata_kvr_add(&b, IOTDATA_NODE_CONTROL_REQUEST, rq_vers, (uint8_t)sizeof(rq_vers));
 
     iotdata_encoder_t enc;
     size_t len = 0;
@@ -2535,7 +2552,7 @@ static bool test_control_over_the_air_reaches_the_same_handler(void) {
     /* the same frame aimed at somebody else is OUR OWN ECHO coming back off a relay, and must not
        be executed -- a gateway never sends a DOWN frame to itself, so an exact match cannot be one */
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    iotdata_kvr_add_flag(&b, IOTDATA_NODE_CONTROL_VERSION_REQUEST);
+    iotdata_kvr_add(&b, IOTDATA_NODE_CONTROL_REQUEST, rq_vers, (uint8_t)sizeof(rq_vers));
     ASSERT(iotdata_encode_begin(&enc, frame, sizeof(frame), 0, 0x0537, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK);
     ASSERT(iotdata_encode_tlv(&enc, IOTDATA_NODE_TLV_CONTROL, kv, (uint8_t)b.len) == IOTDATA_OK);
     ASSERT(iotdata_encode_end(&enc, &len) == IOTDATA_OK);

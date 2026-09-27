@@ -40,5 +40,12 @@
 #define E22_UART          UART_NUM_1
 #define E22_UART_BUF_SIZE 512
 
+/* The pack, which is a property of the cell fitted rather than of the wiring -- so it sits outside
+   the carrier/bench split, unlike the divider constants above. 0 = unknown, and an unknown capacity
+   is reported ABSENT rather than as zero, because zero would be a claim. */
+#ifndef BATTERY_CAPACITY_MAH
+#define BATTERY_CAPACITY_MAH 0 /* a Molicel INR18650-M35A is 3350 */
+#endif
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------

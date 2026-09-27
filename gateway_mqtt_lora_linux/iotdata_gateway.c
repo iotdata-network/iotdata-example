@@ -180,15 +180,17 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
 #include "iotdata_node_version.h"
-// #include "iotdata_node_variant.h"
+#include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
-// #include "iotdata_node_config.h"
+#include "iotdata_node_config.h"
 #include "iotdata_node_control.h"
 #define IOTDATA_DIAGNOSTICS IOTDATA_CONFIG_BLACKBOX
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 #include "iotdata_node_diagnostics.h"
 // #include "iotdata_node_content.h"
+
 #include "iotdata_node_state.h"
+#include "iotdata_node_settings.h"
 #define IOTDATA_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
 #include "iotdata_node_down.h"
 #include "iotdata_node_stations.h"
@@ -251,9 +253,15 @@ typedef struct {
 
 #define STATE_NODE_TAG 0xB1E28004UL
 
+/* The PROTOCOL's own settings -- station id, reporting schedule, receive schedule. A state block
+   like any other, so it must be attached BEFORE the load below, and a write flushes it at once. */
+static iotdata_settings_t s_settings;
+
 static void gateway_state_begin(store_state_t *state, const store_conf_t *conf) {
     if (datastore_open(&state->datastore, conf->directory)) {
         iotdata_state_init(&state->node, &state->datastore, "state");
+        if (!iotdata_settings_attach(&s_settings, &state->node))
+            PRINTF_WARN("state: settings block not registered -- protocol settings will not persist\n");
         state->opened = true;
         if (!datastore_persistent(&state->datastore))
             PRINTF_WARN("state: '%s' is a tmpfs -- -- nothing will persist across a reboot\n", conf->directory);
@@ -682,6 +690,7 @@ int main(int argc, char *argv[]) {
     if (!node_begin(&state->node_state, &state->inode, &state->iotd_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row,
                     ctrl_from_iotdata_keys, (uint8_t)(sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0])), state->process_state.mqtt_topic_prefix))
         goto end_mqtt;
+    node_settings_attach(&state->node_state, &s_settings, &state->store_state.node);
     if (!mesh_begin(&state->mesh_state, &state->inode, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
         goto end_node;
     if (!ddup_begin(&state->ddup_state, &state->inode, &state->mesh_state.dedup_ring, &state->running))

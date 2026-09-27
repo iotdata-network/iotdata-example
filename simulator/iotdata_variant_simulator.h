@@ -44,11 +44,11 @@ typedef struct {
     uint32_t tx_interval_ms; /* current interval                */
     uint32_t tx_count;       /* transmissions so far            */
 
-    /* Simulated readings (physical units, pre-quantisation) */
-    int16_t temperature;    /* centi-degrees: 2150 = 21.50°C  */
+    /* Simulated readings (physical units, pre-quantisation)   */
+    int16_t temperature;    /* centi-degrees: 2150 = 21.50°C   */
     uint16_t pressure;      /* hPa                             */
     uint8_t humidity;       /* percent                         */
-    uint16_t wind_speed;    /* centi-m/s: 350 = 3.50 m/s      */
+    uint16_t wind_speed;    /* centi-m/s: 350 = 3.50 m/s       */
     uint16_t wind_dir;      /* degrees 0-359                   */
     uint16_t wind_gust;     /* centi-m/s                       */
     uint8_t rain_rate;      /* mm/hr                           */
@@ -62,7 +62,7 @@ typedef struct {
     uint16_t aq_gas[8];     /* gas values in native units      */
     uint8_t aq_gas_present; /* which gas channels              */
     uint16_t rad_cpm;       /* counts per minute               */
-    uint16_t rad_dose;      /* centi-µSv/h: 10 = 0.10 µSv/h   */
+    uint16_t rad_dose;      /* centi-µSv/h: 10 = 0.10 µSv/h    */
     uint16_t depth;         /* cm                              */
     uint8_t battery;        /* percent 0-100                   */
     uint8_t flags;          /* 1-bit flags                     */
@@ -73,10 +73,10 @@ typedef struct {
  * -------------------------------------------------------------------------*/
 
 typedef struct {
-    iotsim_sensor_t sensors[IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS];
-    uint32_t rng_state; /* xorshift32 state */
-    uint32_t time_base; /* sim start time for diurnal */
-    int poll_next;      /* round-robin start index for iotsim_poll */
+    iotsim_sensor_t sensors[IOTDATA_CONFIG_SIMULATOR_SENSORS_MAX]; /* dimensioned for the MAX; only the live count is used */
+    uint32_t rng_state;                                            /* xorshift32 state */
+    uint32_t time_base;                                            /* sim start time for diurnal */
+    int poll_next;                                                 /* round-robin start index for iotsim_poll */
 } iotsim_t;
 
 /* ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ typedef struct {
  * -------------------------------------------------------------------------*/
 
 typedef struct {
-    uint8_t buf[IOTDATA_CONFIG_SIMULATOR_MAX_PACKET];
+    uint8_t buf[IOTDATA_MAX_PACKET_SIZE];
     size_t len;
     uint8_t sensor_index; /* which sensor [0..15]  */
     uint8_t variant;      /* variant type          */

@@ -10,7 +10,7 @@
  * Reads a Bosch BME280 (temperature / pressure / humidity) amd/or an LTR390
  * (solar irradiance and ultraviolet) over I2C, encodes the reading as an
  * iotdata packet using the "weather_station" variant, transmits it via the
- * E22 LoRa radio module, then sleeps until the next cycle — every TX_PERIOD_MS.
+ * E22 LoRa radio module, then sleeps until the next cycle — every TRANSMIT_PERIOD_MS.
  *
  * Every wake is a complete, self-contained cycle: measure, transmit, sleep.
  * Nothing carries over except a small block of RTC-retained state (station id,
@@ -49,15 +49,29 @@
 // TUNABLE
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define TX_PERIOD_MS      IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS /* one measure+transmit cycle per period */
-#define TX_PERIOD_MIN_MS  1000                               /* floor, if a cycle overruns the period  */
-#define CONSOLE_DRAIN_MS  100                                /* let the console flush before deep sleep    */
-#define RECEIVE_WINDOW_MS 10
-#define RESTART_MS        30000
-#define PACKET_MAX        64 /* the packets built here are a dozen bytes   */
-#define PACKET_VARIANT    IOTDATA_VSUITE_WEATHER_STATION
+#ifndef TRANSMIT_PERIOD_MS
+#define TRANSMIT_PERIOD_MS ((uint32_t)iotdata_config_u16(TRANSMIT_PERIOD_S) * 1000u)
+#endif
+#ifndef TRANSMIT_PERIOD_MIN_MS
+#define TRANSMIT_PERIOD_MIN_MS 1000 /* floor, if a cycle overruns the period  */
+#endif
+#ifndef CONSOLE_DRAIN_MS
+#define CONSOLE_DRAIN_MS 100 /* let the console flush before deep sleep    */
+#endif
+#ifndef RECEIVE_POLL_MS
+#define RECEIVE_POLL_MS 10 /* polling during the recieve window */
+#endif
+#ifndef RESTART_MS
+#define RESTART_MS 30000 /* duration of restart on failure */
+#endif
+#ifndef PACKET_VARIANT
+#define PACKET_VARIANT IOTDATA_VSUITE_WEATHER_STATION
+#endif
 #if defined(BENCH_BUSY_SLEEP) && !defined(BENCH_BATTERY_SELFTEST_MS)
 #define BENCH_BATTERY_SELFTEST_MS 0
+#endif
+#ifndef POWER_DIAGNOSTICS
+#define POWER_DIAGNOSTICS 1
 #endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -92,20 +106,6 @@
 #include "d_interface_batt.h"
 #include "d_module_datastore_esp32.h"
 
-static const lora_config_t lora_cfg = {
-    .e22_address = IOTDATA_CONFIG_LORA_ADDRESS,
-    .e22_network = IOTDATA_CONFIG_LORA_NETWORK,
-    .channel = IOTDATA_CONFIG_LORA_CHANNEL,
-    .transmit_power = 22,  // dBm
-    .air_data_rate = 2400, // bps
-    .packet_size = 240,
-    .listen_before_transmit = true,
-    .crypt = 0x0000,
-    .module = LORA_MODULE_DIP,
-    .rssi_packet = true,
-    .rssi_channel = false,
-};
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // IOTDATA PROTOCOL + COMMONS
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -129,9 +129,9 @@ static const lora_config_t lora_cfg = {
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
 #include "iotdata_node_version.h"
-// #include "iotdata_node_variant.h"
+#include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
-// #include "iotdata_node_config.h"
+#include "iotdata_node_config.h"
 #include "iotdata_node_control.h"
 #define IOTDATA_DIAGNOSTICS       IOTDATA_CONFIG_BLACKBOX
 #define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
@@ -141,8 +141,33 @@ static void _node_diagnostics_emit(const char *const line) {
 }
 #include "iotdata_node_diagnostics.h"
 // #include "iotdata_node_content.h"
+
 #include "iotdata_node_state.h"
+#include "iotdata_node_settings.h"
 #include "iotdata_node_platform.h"
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
+
+#define IOTDATA_CONFIG_LORA_NOTIFY on_lora_changed
+#include "iotdata_hardware_config.h"
+
+#define IOTDATA_CONFIG_ENTRIES(X) \
+    /*NAME  id  TYPE  min  max  default  flags  validate  notify */ \
+    X(TRANSMIT_PERIOD_S, 0x001, U16, 10, 3600, (IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS / 1000), 0, NULL, NULL) \
+    IOTDATA_CONFIG_ENTRIES_LORA(X)
+
+#include "iotdata_node_config.h"
+#include "iotdata_hardware_config.h"
+
+static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, __attribute__((unused)) const iotdata_config_info_t *info) {
+    ESP_LOGW("config", "%s changed (was %llu); the radio is configured once, so this needs a restart", row->name, (unsigned long long)was->u);
+    return true;
+}
+
+#include "iotdata_hardware_diagnostics.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -175,7 +200,9 @@ typedef struct {
 typedef struct {
     datastore_t datastore;
     iotdata_node_state_t node;
+    iotdata_settings_t settings; /* the PROTOCOL's own: station id, reporting, receive */
     const idep_config_t idep_cfg;
+    uint8_t packet_buffer[IOTDATA_MAX_PACKET_SIZE];
 } state_running_t;
 
 static _RTC_DATA_STRUCT state_operating_t _state_operating;
@@ -184,11 +211,13 @@ static state_running_t _state_running = { .idep_cfg = {
                                               .status = sensor_node_status,
                                               .tx = sensor_node_transmit,
                                               .control = IOTDATA_DIAGNOSTICS_CONTROL,
-                                              .control_keys = iotdata_diagnostics_control_keys,
-                                              .control_keys_count = IOTDATA_DIAGNOSTICS_CONTROL_KEYS_COUNT,
+                                              .control_actions = iotdata_diagnostics_control_actions,
+                                              .control_actions_count = IOTDATA_DIAGNOSTICS_CONTROL_ACTIONS_COUNT,
                                               .diag = IOTDATA_DIAGNOSTICS_PULL,
                                               .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
                                               .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
+                                              .settings = &_state_running.settings,
+                                              .state = &_state_running.node,
                                               .packet_max = LORA_PACKET_SIZE_MAX,
                                           } };
 
@@ -298,8 +327,8 @@ static void app_receive(void) {
             frames++;
             acted += idep_on_frame(c, n, buf, (size_t)len, &reboot) ? 1 : 0;
         }
-        iotdata_diagnostics_pump();               /* a DUMP that arrived in this window drains inside it */
-        hw_delay_ms_yieldable(RECEIVE_WINDOW_MS); /* yield and pat the watchdog: the window is long by MCU standards */
+        iotdata_diagnostics_pump();             /* a DUMP that arrived in this window drains inside it */
+        hw_delay_ms_yieldable(RECEIVE_POLL_MS); /* yield and pat the watchdog: the window is long by MCU standards */
     }
     idep_window_end(n);
     ESP_LOGI(__tag_app, "receive: window closed (%u frame(s) heard, %u for us)", frames, acted);
@@ -366,6 +395,7 @@ size_t app_transmit_gather(uint8_t *const buf, const size_t len, bool advertise)
     /* --- battery --- */
     battery_reading_t reading_battery_ = { 0 }, *reading_battery = NULL;
     if (app_state.operating->battery_present) {
+        const int16_t battery_mv_was = app_state.operating->battery_mv; /* battery_read overwrites it */
         if (battery_begin()) {
             reading_battery = battery_read(&reading_battery_, &app_state.operating->battery_mv) ? &reading_battery_ : NULL;
             battery_end();
@@ -374,6 +404,7 @@ size_t app_transmit_gather(uint8_t *const buf, const size_t len, bool advertise)
             ESP_LOGE(__tag_app, "battery: no reading this cycle");
             flags |= (uint8_t)(1U << VSUITE_FLAG_SENSOR_FAULTS);
         } else {
+            power_sample(reading_battery, reading_bme280 ? &reading_bme280->temperature_c : NULL, app_state.operating->cycles, battery_mv_was, reading_battery->percent);
             if (reading_battery->percent <= BATTERY_PCT_LOW)
                 flags |= (uint8_t)(1U << VSUITE_FLAG_BATTERY_DRAINING);
         }
@@ -393,16 +424,17 @@ size_t app_transmit_gather(uint8_t *const buf, const size_t len, bool advertise)
 
 void app_cycle(void) {
 
-    uint8_t buf[PACKET_MAX];
-
-    const bool receive = idep_window_advance(&app_state.running->idep_cfg, &app_state.operating->node, TX_PERIOD_MS);
-    const size_t transmit = app_transmit_gather(buf, sizeof(buf), receive);
+    const bool receive = idep_window_advance(&app_state.running->idep_cfg, &app_state.operating->node, TRANSMIT_PERIOD_MS);
+    const size_t transmit = app_transmit_gather(app_state.running->packet_buffer, sizeof(app_state.running->packet_buffer), receive);
 
     if (transmit || receive) {
-        if (!app_state.operating->lora_present)
+        if (!app_state.operating->lora_present) {
+            lora_config_t lora_cfg;
+            iotdata_config_lora_apply(&lora_cfg);
             app_state.operating->lora_present = lora_setup(&lora_cfg) == ESP_OK;
+        }
         const bool lora_started = app_state.operating->lora_present && lora_start() == ESP_OK;
-        if (lora_started && transmit && lora_write_complete(buf, transmit, /*wait_complete=*/true) == ESP_OK) {
+        if (lora_started && transmit && lora_write_complete(app_state.running->packet_buffer, transmit, /*wait_complete=*/true) == ESP_OK) {
             ESP_LOGI(__tag_app, "packet: transmit success (%d bytes)", transmit);
             idep_sequence_used(&app_state.operating->node);
             app_state.operating->tx_count++;
@@ -425,7 +457,7 @@ bool app_init(void) {
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     const bool restarted = (reset_reason != ESP_RST_DEEPSLEEP);
 
-    ESP_LOGI(__tag_app, "iotdata lora sensor+bme280/ltr390: %s variant, every %us", iotdata_vsuite_name(PACKET_VARIANT), (unsigned)(TX_PERIOD_MS / 1000));
+    ESP_LOGI(__tag_app, "iotdata lora sensor+bme280/ltr390: %s variant, every %us", iotdata_vsuite_name(PACKET_VARIANT), (unsigned)(TRANSMIT_PERIOD_MS / 1000));
     ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
 #if defined(BENCH_BUSY_SLEEP)
     ESP_LOGW(__tag_app, "boot: BENCH_BUSY_SLEEP -- NO DEEP SLEEP, DO NOT SHIP");
@@ -436,6 +468,11 @@ bool app_init(void) {
         ESP_LOGW(__tag_app, "diag: the recorder did not start");
     iotdata_diagnostics_flush();
 
+    if (reset_reason == ESP_RST_BROWNOUT && _RTC_DATA_VALID(app_state.operating, STATE_MAGIC) && app_state.operating->battery_mv > 0) {
+        power_startup(app_state.operating->battery_mv);
+        ESP_LOGE(__tag_app, "boot: BROWNOUT -- the last reading before it was %dmV", (int)app_state.operating->battery_mv);
+    }
+
 #if BENCH_BATTERY_SELFTEST_MS > 0
     (void)battery_test(BENCH_BATTERY_SELFTEST_MS);
 #endif
@@ -445,6 +482,7 @@ bool app_init(void) {
         idep_node_init(&app_state.operating->node, iotdata_node_station_from_mac(__tag_app), NULL, 0u);
         iotdata_version_caps_init(&app_state.operating->caps);
         app_state.operating->battery_present = battery_probe();
+        power_describe(app_state.operating->battery_present);
         if ((app_state.operating->bme280_present = (bme280_setup(&bme280_config_default) == ESP_OK)))
             iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAP_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
         if ((app_state.operating->ltr390_present = (ltr390_setup(&ltr390_config_default) == ESP_OK)))
@@ -458,6 +496,9 @@ bool app_init(void) {
 
     if (datastore_open(&app_state.running->datastore, "iotdata")) {
         iotdata_state_init(&app_state.running->node, &app_state.running->datastore, "state");
+        /* a state block like any other, so it registers BEFORE the load below */
+        if (!iotdata_settings_attach(&app_state.running->settings, &app_state.running->node))
+            ESP_LOGW(__tag_app, "state: settings block not registered -- protocol settings will not persist");
         if (!idep_node_bind(&app_state.operating->node, &app_state.running->node, STATE_TAG))
             ESP_LOGW(__tag_app, "state: persistence failed (bind STATE_TAG)");
         if (restarted) {
@@ -475,7 +516,7 @@ bool app_init(void) {
 void app_sleep(const uint32_t start_ms) {
 #define MAX_INT(a, b) ((a) > (b) ? (a) : (b))
     const uint32_t awake_ms = hw_time_ms() - start_ms;
-    const uint32_t sleep_ms = MAX_INT(TX_PERIOD_MS - awake_ms - CONSOLE_DRAIN_MS, TX_PERIOD_MIN_MS);
+    const uint32_t sleep_ms = MAX_INT(TRANSMIT_PERIOD_MS - awake_ms - CONSOLE_DRAIN_MS, TRANSMIT_PERIOD_MIN_MS);
     ESP_LOGI(__tag_app, "cycle %" PRIu32 " done: tx=%" PRIu32 " errors=%" PRIu32 " awake=%" PRIu32 "ms, sleeping %" PRIu32 "ms", app_state.operating->cycles, app_state.operating->tx_count, app_state.operating->tx_errors, awake_ms,
              sleep_ms);
     iotdata_diagnostics_event(IOTDATA_BB_LC_SLEEP, iotdata_diagnostics_reason(sleep_ms / 1000));

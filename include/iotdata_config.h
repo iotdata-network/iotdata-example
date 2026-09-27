@@ -39,32 +39,56 @@
 #ifndef IOTDATA_CONFIG_LORA_ADDRESS
 #define IOTDATA_CONFIG_LORA_ADDRESS 0x0008
 #endif
-
-// --- simulator (simulator_sensor_lora_esp32) -------------------------------------------------------------------------------
-
-#ifndef IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS
-#define IOTDATA_CONFIG_SIMULATOR_NUM_SENSORS 8 /* sensors/board — keeps the shared channel sane across ~4 boards */
+#ifndef IOTDATA_CONFIG_LORA_CRYPT
+#define IOTDATA_CONFIG_LORA_CRYPT 0x0000 /* E22 scrambling key; 0 = off */
 #endif
-#ifndef IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES
-#define IOTDATA_CONFIG_SIMULATOR_VARIANT_TYPES 4 /* distinct types/board; a fleet spreads the 9-type suite out */
+#ifndef IOTDATA_CONFIG_LORA_LBT
+#define IOTDATA_CONFIG_LORA_LBT 1 /* listen before transmit */
 #endif
-#ifndef IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS
-#define IOTDATA_CONFIG_SIMULATOR_TX_MIN_MS 20000 /* 20s min tx interval */
+#ifndef IOTDATA_CONFIG_LORA_AIR_RATE
+#define IOTDATA_CONFIG_LORA_AIR_RATE 2400 /* bps on air */
 #endif
-#ifndef IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS
-#define IOTDATA_CONFIG_SIMULATOR_TX_MAX_MS 40000 /* 40s max tx interval */
+#ifndef IOTDATA_CONFIG_LORA_PACKET_SIZE
+#define IOTDATA_CONFIG_LORA_PACKET_SIZE 240 /* the E22 sub-packet */
 #endif
-#ifndef IOTDATA_CONFIG_SIMULATOR_EXTRA_FIELDS_EVERY
-#define IOTDATA_CONFIG_SIMULATOR_EXTRA_FIELDS_EVERY 10 /* add extra fields every ~Nth tx */
-#endif
-#ifndef IOTDATA_CONFIG_SIMULATOR_MAX_PACKET
-#define IOTDATA_CONFIG_SIMULATOR_MAX_PACKET 128
+#ifndef IOTDATA_CONFIG_LORA_TX_POWER
+#define IOTDATA_CONFIG_LORA_TX_POWER 22 /* dBm */
 #endif
 
-// --- bme280 sensor (sensor_bme280_lora_esp32) ------------------------------------------------------------------------------
+// --- the receive window ----------------------------------------------------------------------------------------------------
 
-#ifndef IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS
-#define IOTDATA_CONFIG_SENSOR_TX_PERIOD_MS (60 * 1000) /* one measure+transmit cycle per minute */
+#ifndef IOTDATA_CONFIG_RECEIVE_WINDOW_MS
+#define IOTDATA_CONFIG_RECEIVE_WINDOW_MS 5000
+#endif
+
+// --- simulator (simulator_lora_esp32) --------------------------------------------------------------------------------------
+
+#ifndef IOTDATA_CONFIG_SIMULATOR_SENSORS_MAX
+#define IOTDATA_CONFIG_SIMULATOR_SENSORS_MAX 16 /* what the arrays are dimensioned for */
+#endif
+#ifndef IOTDATA_CONFIG_SIMULATOR_SENSORS
+#define IOTDATA_CONFIG_SIMULATOR_SENSORS 8 /* sensors/board — keeps the shared channel sane across ~4 boards */
+#endif
+#ifndef IOTDATA_CONFIG_SIMULATOR_VARIANTS_MAX
+#define IOTDATA_CONFIG_SIMULATOR_VARIANTS_MAX IOTDATA_VARIANT_MAX /* the whole telemetry variant space */
+#endif
+#ifndef IOTDATA_CONFIG_SIMULATOR_VARIANTS
+#define IOTDATA_CONFIG_SIMULATOR_VARIANTS 4 /* distinct types/board; a fleet spreads the 9-type suite out */
+#endif
+#ifndef IOTDATA_CONFIG_SIMULATOR_TRANSMIT_MIN_MS
+#define IOTDATA_CONFIG_SIMULATOR_TRANSMIT_MIN_MS 20000 /* 20s min tx interval */
+#endif
+#ifndef IOTDATA_CONFIG_SIMULATOR_TRANSMIT_MAX_MS
+#define IOTDATA_CONFIG_SIMULATOR_TRANSMIT_MAX_MS 40000 /* 40s max tx interval */
+#endif
+#ifndef IOTDATA_CONFIG_SIMULATOR_EXTRA_FIELDS
+#define IOTDATA_CONFIG_SIMULATOR_EXTRA_FIELDS 10 /* add extra fields every ~Nth tx */
+#endif
+
+// --- bme280 sensor (sensor_lora_esp32) -------------------------------------------------------------------------------------
+
+#ifndef IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS
+#define IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS (60 * 1000) /* one measure+transmit cycle per minute */
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------------------

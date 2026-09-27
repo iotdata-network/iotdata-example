@@ -227,16 +227,16 @@ static void exec_node_status_mesh(iotdata_node_status_mesh_t *const out) {
     out->duplicates = st->state_mesh->stat_duplicates;
 }
 
-static uint8_t exec_node_table_count(const uint8_t type) {
+static uint8_t exec_node_table_count(const uint8_t entry) {
     const process_state_t *const st = g_exec;
     if (st == NULL)
         return 0;
-    switch (type) {
-    case IOTDATA_NODE_TLV_MESH_STATIONS:
+    switch (entry) {
+    case IOTDATA_NODE_STATUS_STATIONS_ENTRY:
         return (uint8_t)st->network.count;
-    case IOTDATA_NODE_TLV_MESH_PEERS:
+    case IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY:
         return (uint8_t)st->state_stat->peers_count;
-    case IOTDATA_NODE_TLV_MESH_FILTERS:
+    case IOTDATA_NODE_STATUS_FILTERS_ENTRY:
         return (uint8_t)filter_count(&st->filter);
     default:
         return 0;
@@ -264,50 +264,50 @@ static uint8_t exec_node_table_count(const uint8_t type) {
         } \
     } while (0)
 
-static bool exec_node_table_row(const uint8_t type, const uint8_t index, uint8_t *const row) {
+static bool exec_node_table_row(const uint8_t entry, const uint8_t index, uint8_t *const row) {
     process_state_t *const st = g_exec;
     if (st == NULL)
         return false;
     const time_t now = time(NULL);
     int slot = -1;
-    switch (type) {
-    case IOTDATA_NODE_TLV_MESH_STATIONS: {
+    switch (entry) {
+    case IOTDATA_NODE_STATUS_STATIONS_ENTRY: {
         EXEC_TABLE_NTH(st->network.s, st->network.count, station, index, slot);
         if (slot < 0)
             return false;
         const netw_station_t *const e = &st->network.s[slot];
-        iotdata_node_table_put_u16(row, 0, e->station);
-        row[2] = (e->kind == NETW_KIND_GATEWAY)  ? IOTDATA_NODE_TABLE_KIND_GATEWAY
-                 : (e->kind == NETW_KIND_RELAY)  ? IOTDATA_NODE_TABLE_KIND_RELAY
-                 : (e->kind == NETW_KIND_SENSOR) ? IOTDATA_NODE_TABLE_KIND_SENSOR
-                                                 : IOTDATA_NODE_TABLE_KIND_UNKNOWN;
+        iotdata_node_entry_put_u16(row, 0, e->station);
+        row[2] = (e->kind == NETW_KIND_GATEWAY)  ? IOTDATA_NODE_STATUS_STATIONS_KIND_GATEWAY
+                 : (e->kind == NETW_KIND_RELAY)  ? IOTDATA_NODE_STATUS_STATIONS_KIND_RELAY
+                 : (e->kind == NETW_KIND_SENSOR) ? IOTDATA_NODE_STATUS_STATIONS_KIND_SENSOR
+                                                 : IOTDATA_NODE_STATUS_STATIONS_KIND_UNKNOWN;
         row[3] = e->variant;
         row[4] = (uint8_t)(int8_t)e->rssi;
-        iotdata_node_table_put_u16(row, 5, (uint16_t)(now > e->last_seen ? (now - e->last_seen) : 0));
-        iotdata_node_table_put_u32(row, 7, e->rx_count);
+        iotdata_node_entry_put_u16(row, 5, (uint16_t)(now > e->last_seen ? (now - e->last_seen) : 0));
+        iotdata_node_entry_put_u32(row, 7, e->rx_count);
         return true;
     }
-    case IOTDATA_NODE_TLV_MESH_PEERS: {
+    case IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY: {
         EXEC_TABLE_NTH(st->state_stat->peers, st->state_stat->peers_count, station_id, index, slot);
         if (slot < 0)
             return false;
         const stat_peer_t *const e = &st->state_stat->peers[slot];
-        iotdata_node_table_put_u16(row, 0, e->station_id);
-        iotdata_node_table_put_u16(row, 2, idep_station(st->state_mesh->inode)); /* we ARE the gateway */
+        iotdata_node_entry_put_u16(row, 0, e->station_id);
+        iotdata_node_entry_put_u16(row, 2, idep_station(st->state_mesh->inode)); /* we ARE the gateway */
         row[4] = e->cost;
-        iotdata_node_table_put_u16(row, 5, e->generation);
+        iotdata_node_entry_put_u16(row, 5, e->generation);
         row[7] = 0; /* this peer table is built from beacons, which carry no RSSI of their own */
-        iotdata_node_table_put_u16(row, 8, (uint16_t)(now > e->last_seen ? (now - e->last_seen) : 0));
+        iotdata_node_entry_put_u16(row, 8, (uint16_t)(now > e->last_seen ? (now - e->last_seen) : 0));
         /* the root has no parent, so only ACCEPTING can be true of a peer here */
-        row[10] = (uint8_t)((e->flags & IOTDATA_MESH_FLAG_ACCEPTING) ? IOTDATA_NODE_TABLE_PEER_ACCEPTING : 0);
+        row[10] = (uint8_t)((e->flags & IOTDATA_MESH_FLAG_ACCEPTING) ? IOTDATA_NODE_STATUS_MESH_PEERS_FLAG_ACCEPTING : 0);
         return true;
     }
-    case IOTDATA_NODE_TLV_MESH_FILTERS: {
+    case IOTDATA_NODE_STATUS_FILTERS_ENTRY: {
         EXEC_TABLE_NTH(st->filter.e, filter_count(&st->filter), station, index, slot);
         if (slot < 0)
             return false;
         const filter_entry_t *const e = &st->filter.e[slot];
-        iotdata_node_table_put_u16(row, 0, e->station);
+        iotdata_node_entry_put_u16(row, 0, e->station);
         row[2] = (e->action == FILTER_ALLOW) ? IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW : IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK;
         row[3] = (e->source == FILTER_AUTO) ? IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_AUTO : IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_MANUAL;
         return true;

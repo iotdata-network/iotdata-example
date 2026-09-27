@@ -261,51 +261,25 @@ static void ctrl_report_filter(const filter_t *const f) {
 }
 
 static const uint8_t ctrl_from_iotdata_keys[] = {
-    IOTDATA_NODE_CONTROL_MESH_STATIONS_DUMP, IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE, IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR,   IOTDATA_NODE_CONTROL_MESH_PEERS_DUMP,   IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE,
-    IOTDATA_NODE_CONTROL_MESH_FILTERS_CLEAR, IOTDATA_NODE_CONTROL_MESH_FILTERS_DUMP, IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE, IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR, IOTDATA_NODE_CONTROL_DIAGNOSTICS_DUMP,
+    IOTDATA_NODE_TLV_STATUS,      IOTDATA_NODE_ACTION_STATUS_STATIONS_DUMP, IOTDATA_NODE_TLV_STATUS,      IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, IOTDATA_NODE_TLV_STATUS,      IOTDATA_NODE_ACTION_STATUS_FILTERS_CLEAR,
+    IOTDATA_NODE_TLV_STATUS,      IOTDATA_NODE_ACTION_STATUS_FILTERS_DUMP,  IOTDATA_NODE_SUBJECT_MESH,    IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE,     IOTDATA_NODE_SUBJECT_MESH,    IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR,
+    IOTDATA_NODE_SUBJECT_MESH,    IOTDATA_NODE_ACTION_MESH_PEERS_DUMP,      IOTDATA_NODE_TLV_DIAGNOSTICS, IOTDATA_NODE_ACTION_DIAGNOSTICS_ENABLE,    IOTDATA_NODE_TLV_DIAGNOSTICS, IOTDATA_NODE_ACTION_DIAGNOSTICS_CLEAR,
+    IOTDATA_NODE_TLV_DIAGNOSTICS, IOTDATA_NODE_ACTION_DIAGNOSTICS_DUMP,
 };
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool ctrl_from_iotdata(const uint8_t key, const uint8_t *const val, const uint8_t vlen) {
-    process_state_t *const st = g_exec;
-    if (st == NULL)
-        return false;
-    switch (key) {
-
-    case IOTDATA_NODE_CONTROL_MESH_STATIONS_DUMP:
+static bool ctrl_action_status(process_state_t *const st, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    switch (action) {
+    case IOTDATA_NODE_ACTION_STATUS_STATIONS_DUMP:
         PRINTF_INFO("exec: CONTROL - MESH_STATIONS_DUMP\n");
         netw_report(&st->network, idep_station(st->state_mesh->inode));
         return true;
-
-    case IOTDATA_NODE_CONTROL_MESH_PEERS_DUMP:
-        PRINTF_INFO("exec: CONTROL - MESH_PEERS_DUMP\n");
-        ctrl_report_peers(st->state_stat);
-        return true;
-    case IOTDATA_NODE_CONTROL_MESH_PEERS_UPDATE: {
-        int n = 0;
-        for (int i = 0; i + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE) {
-            const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
-            if (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_PEER_NONE) {
-                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %03" PRIX16 " none -> %s\n", station, stat_mesh_peer_remove(st->state_stat, station) ? "removed" : "not present");
-                n++;
-            } else
-                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %03" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
-        }
-        if (n > 0)
-            ctrl_report_peers(st->state_stat);
-        return true;
-    }
-    case IOTDATA_NODE_CONTROL_MESH_PEERS_CLEAR:
-        PRINTF_INFO("exec: CONTROL - MESH_PEERS_CLEAR -> forgetting %d peer(s)\n", st->state_stat->peers_count);
-        stat_mesh_peers_clear(st->state_stat);
-        return true;
-
-    case IOTDATA_NODE_CONTROL_MESH_FILTERS_DUMP:
+    case IOTDATA_NODE_ACTION_STATUS_FILTERS_DUMP:
         PRINTF_INFO("exec: CONTROL - MESH_FILTERS_DUMP\n");
         ctrl_report_filter(&st->filter);
         return true;
-    case IOTDATA_NODE_CONTROL_MESH_FILTERS_UPDATE: {
+    case IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE: {
         int n = 0;
         for (int i = 0; i + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE) {
             const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
@@ -334,28 +308,81 @@ static bool ctrl_from_iotdata(const uint8_t key, const uint8_t *const val, const
             ctrl_report_filter(&st->filter);
         return true;
     }
-    case IOTDATA_NODE_CONTROL_MESH_FILTERS_CLEAR: {
+    case IOTDATA_NODE_ACTION_STATUS_FILTERS_CLEAR: {
         const filter_scope_t scope = (vlen >= 1) ? (filter_scope_t)val[0] : FILTER_SCOPE_ALL;
         PRINTF_INFO("exec: CONTROL - MESH_FILTER_CLEAR scope=%u -> %d cleared\n", (unsigned)scope, filter_clear(&st->filter, scope));
         ctrl_report_filter(&st->filter);
         return true;
     }
 
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_ENABLE: {
+    default:
+        return false; /* not ours: the node layer counts it unknown */
+    }
+}
+
+static bool ctrl_action_mesh(process_state_t *const st, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    switch (action) {
+    case IOTDATA_NODE_ACTION_MESH_PEERS_DUMP:
+        PRINTF_INFO("exec: CONTROL - MESH_PEERS_DUMP\n");
+        ctrl_report_peers(st->state_stat);
+        return true;
+    case IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE: {
+        int n = 0;
+        for (int i = 0; i + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE) {
+            const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
+            if (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_PEER_NONE) {
+                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %03" PRIX16 " none -> %s\n", station, stat_mesh_peer_remove(st->state_stat, station) ? "removed" : "not present");
+                n++;
+            } else
+                PRINTF_INFO("exec: CONTROL - MESH_PEERS_UPDATE %03" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
+        }
+        if (n > 0)
+            ctrl_report_peers(st->state_stat);
+        return true;
+    }
+    case IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR:
+        PRINTF_INFO("exec: CONTROL - MESH_PEERS_CLEAR -> forgetting %d peer(s)\n", st->state_stat->peers_count);
+        stat_mesh_peers_clear(st->state_stat);
+        return true;
+
+    default:
+        return false; /* not ours: the node layer counts it unknown */
+    }
+}
+
+static bool ctrl_action_diag(const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    switch (action) {
+    case IOTDATA_NODE_ACTION_DIAGNOSTICS_ENABLE: {
         const bool on = (vlen >= 1) ? (val[0] != 0u) : true;
         PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_ENABLE -> %s\n", on ? "true" : "false");
         ctrl_diag_enable(on);
         return true;
     }
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_CLEAR:
+    case IOTDATA_NODE_ACTION_DIAGNOSTICS_CLEAR:
         PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_CLEAR\n");
         ctrl_diag_clear();
         return true;
-    case IOTDATA_NODE_CONTROL_DIAGNOSTICS_DUMP:
+    case IOTDATA_NODE_ACTION_DIAGNOSTICS_DUMP:
         PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_DUMP\n");
         ctrl_diag_dump();
         return true;
 
+    default:
+        return false; /* not ours: the node layer counts it unknown */
+    }
+}
+
+static bool ctrl_from_iotdata(const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    process_state_t *const st = g_exec;
+    if (st == NULL)
+        return false;
+    switch (subject) {
+    case IOTDATA_NODE_TLV_STATUS:
+        return ctrl_action_status(st, action, val, vlen);
+    case IOTDATA_NODE_SUBJECT_MESH:
+        return ctrl_action_mesh(st, action, val, vlen);
+    case IOTDATA_NODE_TLV_DIAGNOSTICS:
+        return ctrl_action_diag(action, val, vlen); /* the recorder is global: no process state */
     default:
         return false; /* not ours: the node layer counts it unknown */
     }
