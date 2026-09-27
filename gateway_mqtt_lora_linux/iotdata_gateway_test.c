@@ -1899,9 +1899,9 @@ static bool test_version_report_as_the_monitor_sees_it(void) {
 
     iotdata_version_caps_t caps;
     memset(&caps, 0, sizeof(caps));
-    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAP_RADIO, IOTDATA_VERSION_RADIO_E22_USB);
-    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAP_FEATURES, IOTDATA_VERSION_FEATURE_MESH | IOTDATA_VERSION_FEATURE_BLACKBOX);
-    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAP_PROPRIETARY, 0x008); /* a bit with no name */
+    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAPS_RADIO, IOTDATA_VERSION_RADIO_E22_USB);
+    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAPS_FEATURES, IOTDATA_VERSION_FEATURE_MESH | IOTDATA_VERSION_FEATURE_BLACKBOX);
+    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAPS_PROPRIETARY, 0x008); /* a bit with no name */
 
     uint8_t kv[200];
     iotdata_kvr_t b;

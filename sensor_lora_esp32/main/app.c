@@ -321,7 +321,7 @@ static void app_receive(void) {
     bool reboot = false;
     unsigned frames = 0, acted = 0;
     while (idep_window_active(c, n, (uint32_t)hw_time_ms())) {
-        uint8_t buf[IOTDATA_MAX_PACKET_SIZE]; // XXX
+        static uint8_t buf[IOTDATA_MAX_PACKET_SIZE]; // XXX
         int len = 0, rssi_dbm = 0;
         if (lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) == ESP_OK && len > 0) {
             frames++;
@@ -484,9 +484,9 @@ bool app_init(void) {
         app_state.operating->battery_present = battery_probe();
         power_describe(app_state.operating->battery_present);
         if ((app_state.operating->bme280_present = (bme280_setup(&bme280_config_default) == ESP_OK)))
-            iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAP_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
+            iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAPS_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
         if ((app_state.operating->ltr390_present = (ltr390_setup(&ltr390_config_default) == ESP_OK)))
-            iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAP_SENSOR, IOTDATA_VERSION_SENSOR_LTR390);
+            iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAPS_SENSOR, IOTDATA_VERSION_SENSOR_LTR390);
     }
 
     char vbuf[IOTDATA_VERSION_STR_MAX + 1];

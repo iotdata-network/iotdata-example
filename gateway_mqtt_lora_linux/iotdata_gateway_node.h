@@ -365,7 +365,7 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
             else if (vlen == 0)
                 cJSON_AddBoolToObject(obj, name, true); /* a flag: present, no value */
             else if (!node_json_value_is_text(val, vlen)) {
-                char hex[2 * IOTDATA_TLV_DATA_MAX + 1]; // XXX
+                char hex[2 * IOTDATA_TLV_LENGTH_MAX + 1]; // XXX
                 size_t h = 0;
                 for (uint8_t i = 0; i < vlen && h + 2 < sizeof(hex); i++)
                     h += (size_t)snprintf(hex + h, sizeof(hex) - h, "%02X", val[i]);

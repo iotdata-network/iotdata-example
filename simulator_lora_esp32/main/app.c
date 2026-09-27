@@ -70,6 +70,7 @@
 
 #include "d_platform_esp32.h"
 #include "d_common.h"
+#include "d_format.h"
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"
 #include "d_interface_e22900t22.h"

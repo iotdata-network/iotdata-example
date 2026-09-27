@@ -648,7 +648,7 @@ int main(int argc, char *argv[]) {
         return ret;
 
     iotdata_version_caps_init(&state->iotd_caps);
-    iotdata_version_caps_add(&state->iotd_caps, IOTDATA_VERSION_CAP_RADIO, state->lora_config.module == LORA_MODULE_USB ? IOTDATA_VERSION_RADIO_E22_USB : IOTDATA_VERSION_RADIO_E22_DIP);
+    iotdata_version_caps_add(&state->iotd_caps, IOTDATA_VERSION_CAPS_RADIO, state->lora_config.module == LORA_MODULE_USB ? IOTDATA_VERSION_RADIO_E22_USB : IOTDATA_VERSION_RADIO_E22_DIP);
 
     char vbuf[IOTDATA_VERSION_STR_MAX + 1];
     PRINTF_INFO("version: %s\n", iotdata_version_str(vbuf, sizeof(vbuf), &state->iotd_caps));
