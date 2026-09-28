@@ -128,7 +128,7 @@
 
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
-// #define IOTDATA_VERSION_HAS_BLACKBOX
+#define IOTDATA_VERSION_HAS_BLACKBOX
 #include "iotdata_node_version.h"
 #include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
@@ -177,6 +177,8 @@ static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_confi
 
 static void sensor_node_status(const uint16_t station, iotdata_node_status_t *const out);
 static bool sensor_node_transmit(const uint8_t *const packet, const size_t len);
+static int sensor_config_build(uint8_t *buf, size_t size, iotdata_partial_t *partial);
+static bool sensor_config_apply(const uint8_t *buf, size_t len, bool *reboot_out);
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // APP STATE
@@ -222,6 +224,8 @@ static state_running_t _state_running = { .idep_cfg = {
                                               .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
                                               .settings = &_state_running.settings,
                                               .state = &_state_running.node,
+                                              .config_build = sensor_config_build,
+                                              .config_apply = sensor_config_apply,
                                               .packet_max = LORA_PACKET_SIZE_MAX,
                                           } };
 
@@ -229,6 +233,13 @@ static const struct {
     state_operating_t *const operating;
     state_running_t *const running;
 } app_state = { .operating = &_state_operating, .running = &_state_running };
+
+static int sensor_config_build(uint8_t *const buf, const size_t size, iotdata_partial_t *const partial) {
+    return iotdata_config_pack(buf, size, partial);
+}
+static bool sensor_config_apply(const uint8_t *const buf, const size_t len, bool *const reboot_out) {
+    return iotdata_config_apply(buf, len, &app_state.running->datastore, reboot_out);
+}
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // IOTDATA COMMONS
@@ -509,12 +520,12 @@ bool app_init(void) {
             ESP_LOGW(__tag_app, "state: settings block not registered -- protocol settings will not persist");
         if (!idep_node_bind(&app_state.operating->node, &app_state.running->node, STATE_TAG))
             ESP_LOGW(__tag_app, "state: persistence failed (bind STATE_TAG)");
-        if (restarted) {
-            const bool restored = iotdata_state_load(&app_state.running->node);
-            ESP_LOGI(__tag_app, "state: %u block(s), %s", (unsigned)app_state.running->node.count, restored ? "restored" : "defaulted");
-            if (idep_node_restore_station(&app_state.operating->node, &app_state.running->settings))
-                ESP_LOGI(__tag_app, "node: station=%" PRIu16 " restored from settings", idep_station(&app_state.operating->node));
-        }
+        const bool restored = iotdata_state_load(&app_state.running->node);
+        ESP_LOGI(__tag_app, "state: %u block(s), %s", (unsigned)app_state.running->node.count, restored ? "restored" : "defaulted");
+        if (idep_node_restore_station(&app_state.operating->node, &app_state.running->settings))
+            ESP_LOGI(__tag_app, "node: station=%" PRIu16 " restored from settings", idep_station(&app_state.operating->node));
+        if (!iotdata_config_load(&app_state.running->datastore))
+            ESP_LOGI(__tag_app, "config: nothing stored yet -- every row at its default");
     } else
         ESP_LOGW(__tag_app, "state: persistence disabled (no datastore)");
 
