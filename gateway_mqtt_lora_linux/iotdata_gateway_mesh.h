@@ -86,6 +86,7 @@ bool mesh_transmit_beacon(mesh_state_t *st) {
                                                      .cost = 0,
                                                      .flags = IOTDATA_MESH_FLAG_ACCEPTING,
                                                      .generation = st->beacon_generation,
+                                                     .interval_s = (uint16_t)st->beacon_interval,
                                                  });
         if (st->debug)
             PRINTF_INFO("mesh: tx BEACON generation=%" PRIu16 ", station=%03" PRIX16 "\n", st->beacon_generation, idep_station(st->inode));

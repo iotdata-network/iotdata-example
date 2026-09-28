@@ -259,6 +259,7 @@ static bool test_mesh_transmit_beacon_ok(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
+    ms.beacon_interval = 90; /* a root HAS a cadence, and states it -- see I.1 */
     idep_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
@@ -267,6 +268,11 @@ static bool test_mesh_transmit_beacon_ok(void) {
 
     ASSERT_EQ_INT(packet_handler_calls, 1);
     ASSERT_EQ_INT(captured_lengths[0], IOTDATA_MESH_BEACON_SIZE);
+    {   /* and it is the root's OWN interval on the wire, where a relay can read it */
+        iotdata_mesh_beacon_t sent;
+        ASSERT(iotdata_mesh_unpack_beacon(captured_packets[0], captured_lengths[0], &sent));
+        ASSERT_EQ_INT(sent.interval_s, 90);
+    }
     ASSERT_EQ_INT(ms.stat_beacons_tx, 1u);
     ASSERT_EQ_INT(idep_sequence(&t_inode), 1u);
 
@@ -523,9 +529,33 @@ static bool test_mesh_receive_beacon_rx(void) {
     ASSERT_EQ_INT(len, IOTDATA_MESH_BEACON_SIZE);
 
     iotdata_mesh_beacon_t got;
-    ASSERT(mesh_receive_beacon_r(&ms, buf, IOTDATA_MESH_BEACON_SIZE, &got));
+    ASSERT(mesh_receive_beacon_r(&ms, buf, len, &got));
     ASSERT_EQ_INT(got.gateway_id, b.gateway_id);
-    /* no crash = pass */
+    /* this sender stated nothing, so the field carries 0 -- which means "I do not know the cadence",
+       not "there is no field". A relay that has joined but not yet heard an interval of its own
+       sends exactly this, and a reader has to tell it apart from a real cadence. */
+    ASSERT_EQ_INT(got.interval_s, 0);
+
+    /* THE ROOT'S CLOCK, STATED -- and MANDATORY. Every beacon is 11 bytes and a frame short of that
+       is not a beacon, so "what cadence is this tree on" has an answer in every frame rather than
+       one that depends on which build the sender happens to be. */
+    {
+        uint8_t wide[IOTDATA_MESH_BEACON_SIZE];
+        iotdata_mesh_beacon_t withi = b;
+        withi.interval_s = 600;
+        ASSERT_EQ_INT(iotdata_mesh_pack_beacon(wide, sizeof(wide), &withi), IOTDATA_MESH_BEACON_SIZE);
+        iotdata_mesh_beacon_t back;
+        ASSERT(iotdata_mesh_unpack_beacon(wide, IOTDATA_MESH_BEACON_SIZE, &back));
+        ASSERT_EQ_INT(back.interval_s, 600);
+        ASSERT_EQ_INT(back.generation, b.generation); /* and nothing before it moved */
+        ASSERT_EQ_INT(back.cost, b.cost);
+
+        /* a frame one byte short is REFUSED rather than read with a truncated interval, and the
+           packer will not emit a partial beacon into a buffer that cannot hold the whole thing */
+        ASSERT(!iotdata_mesh_unpack_beacon(wide, IOTDATA_MESH_BEACON_SIZE - 1, &back));
+        uint8_t narrow[IOTDATA_MESH_BEACON_SIZE - 1];
+        ASSERT_EQ_INT(iotdata_mesh_pack_beacon(narrow, sizeof(narrow), &withi), 0);
+    }
     return true;
 }
 
