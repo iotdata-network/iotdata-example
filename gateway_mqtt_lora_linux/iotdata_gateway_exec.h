@@ -329,8 +329,8 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
     st->rx_held = BUFFER_NONE;
 
     char buf[16];
-    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu32 "s, stats-publish=%" PRIu32 "s, [packets=%c], topic-prefix=%s) :: mesh=%c%s\n", (uint32_t)st->stat_display_interval,
-                (uint32_t)st->stat_publish_interval, st->capture_rssi_packet ? 'y' : 'n', st->mqtt_topic_prefix, st->state_mesh->enabled ? 'y' : 'n',
+    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu32 "s, stats-publish=%" PRIu32 "s, [packets=%c], topic-prefix=%s) :: mesh=%c%s\n", (uint32_t)st->stat_display_interval, (uint32_t)st->stat_publish_interval,
+                st->capture_rssi_packet ? 'y' : 'n', st->mqtt_topic_prefix, st->state_mesh->enabled ? 'y' : 'n',
                 st->state_mesh->enabled ? snprintf_inline(buf, sizeof(buf), ", beacon=%" PRIu32 "s", (uint32_t)st->state_mesh->beacon_interval) : "");
 
     for (int i = 0; i < IOTDATA_VARIANT_MAPS_COUNT; i++) {

@@ -259,7 +259,7 @@ static bool test_mesh_transmit_beacon_ok(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.beacon_interval = 90; /* a root HAS a cadence, and states it -- see I.1 */
+    ms.beacon_interval = 90;                    /* a root HAS a cadence, and states it -- see I.1 */
     idep_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
@@ -268,7 +268,7 @@ static bool test_mesh_transmit_beacon_ok(void) {
 
     ASSERT_EQ_INT(packet_handler_calls, 1);
     ASSERT_EQ_INT(captured_lengths[0], IOTDATA_MESH_BEACON_SIZE);
-    {   /* and it is the root's OWN interval on the wire, where a relay can read it */
+    { /* and it is the root's OWN interval on the wire, where a relay can read it */
         iotdata_mesh_beacon_t sent;
         ASSERT(iotdata_mesh_unpack_beacon(captured_packets[0], captured_lengths[0], &sent));
         ASSERT_EQ_INT(sent.interval_s, 90);
@@ -2459,7 +2459,7 @@ static bool test_gateway_config_load_and_overlay(void) {
     memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
     ASSERT(gateway_config_load(5, argv));
     ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 120); /* the overlay beat the file */
-    ASSERT_EQ_INT(iotdata_config_u8(LORA_CHANNEL), 42);          /* and the file still holds what it holds */
+    ASSERT_EQ_INT(iotdata_config_u8(LORA_CHANNEL), 42);             /* and the file still holds what it holds */
 
     (void)remove(cfg);
     (void)remove(ovl);
@@ -2550,7 +2550,7 @@ static bool test_gateway_settings_fused_and_pinned(void) {
         iotdata_config_defaults();
         memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
         memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
-        char *bargv[] = { (char *)(uintptr_t) "gw", (char *)(uintptr_t) "--config", bare, (char *)(uintptr_t) "--overlay", barov };
+        char *bargv[] = { (char *)(uintptr_t)"gw", (char *)(uintptr_t)"--config", bare, (char *)(uintptr_t)"--overlay", barov };
         ASSERT(gateway_config_load(5, bargv));
         ASSERT_EQ_INT(iotdata_settings_station(&gateway_settings), iotdata_node_station_from_mac("test"));
         ASSERT(iotdata_station_is_assignable(iotdata_settings_station(&gateway_settings)));
@@ -2566,8 +2566,8 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     _iotdata_settings_pin = 0;
     _iotdata_settings_pin_report = 0;
     {
-        char *pargv[] = { (char *)(uintptr_t)"gw",           (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl, (char *)(uintptr_t)"--mesh-beacon-interval-s", (char *)(uintptr_t)"45",
-                          (char *)(uintptr_t)"--node-window", (char *)(uintptr_t)"7000" };
+        char *pargv[] = { (char *)(uintptr_t)"gw",  (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl, (char *)(uintptr_t)"--mesh-beacon-interval-s", (char *)(uintptr_t)"45", (char *)(uintptr_t)"--node-window",
+                          (char *)(uintptr_t)"7000" };
         ASSERT(gateway_config_load(9, pargv));
     }
     ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 45);
@@ -2604,8 +2604,8 @@ static bool test_gateway_settings_fused_and_pinned(void) {
         iotdata_kvr_add(&kv, IOTDATA_NODE_SETTINGS_RECEIVE, r, (uint8_t)sizeof(r));
         ASSERT(iotdata_settings_apply(&gateway_settings, kvbuf, kv.len));
     }
-    ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 7000);          /* held */
-    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 1000u, 30);  /* took */
+    ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 7000);         /* held */
+    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 1000u, 30); /* took */
 
     _iotdata_settings_pin = 0;
     _iotdata_settings_pin_report = 0;

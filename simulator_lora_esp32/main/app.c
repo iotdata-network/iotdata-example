@@ -209,7 +209,7 @@ static idep_config_t s_confs[IOTDATA_CONFIG_SIMULATOR_SENSORS_MAX];
  * elsewhere. Keyed by station, a foreign record simply finds no home and that sensor starts clean.
  * Stations are 12-bit, so this is unique and stable per station.
  */
-#define SIM_STATE_TAG(station) (0x53490000UL | (uint32_t)(station)) /* "SI" + station */
+#define SIM_STATE_TAG(station)    (0x53490000UL | (uint32_t)(station)) /* "SI" + station */
 
 static void sim_node_status(const uint16_t station, iotdata_node_status_t *const out) {
     out->uptime_s = (uint32_t)(hw_time_ms() / 1000);

@@ -21,9 +21,17 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-typedef enum { NETW_KIND_UNKNOWN = 0, NETW_KIND_GATEWAY, NETW_KIND_RELAY, NETW_KIND_SENSOR } netw_kind_t;
+typedef enum {
+    NETW_KIND_UNKNOWN = 0,
+    NETW_KIND_GATEWAY,
+    NETW_KIND_RELAY,
+    NETW_KIND_SENSOR
+} netw_kind_t;
 
-typedef enum { NETW_PATH_DIRECT = 0, NETW_PATH_MESH } netw_path_t;
+typedef enum {
+    NETW_PATH_DIRECT = 0,
+    NETW_PATH_MESH
+} netw_path_t;
 
 // Per-path reception stats for a sensor: how many packets arrived on this path, how many were
 // duplicates (already had them via some path), and how many sequence numbers went missing.

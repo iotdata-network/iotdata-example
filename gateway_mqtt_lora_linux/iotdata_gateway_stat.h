@@ -25,7 +25,7 @@
 #ifndef STAT_EMA_TIMED_TAU_SECS_DEFAULT
 #define STAT_EMA_TIMED_TAU_SECS_DEFAULT 300.0f
 #endif
-#define STAT_WINDOW_COUNT       8
+#define STAT_WINDOW_COUNT 8
 static const time_t stat_windows_secs[STAT_WINDOW_COUNT] = { 5 * 60, 15 * 60, 60 * 60, 3 * 3600, 12 * 3600, 24 * 3600, 3 * 86400, 7 * 86400 };
 static const char *const stat_windows_names[STAT_WINDOW_COUNT] = { "5m", "15m", "1h", "3h", "12h", "24h", "3d", "7d" };
 

@@ -142,9 +142,9 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define MQTT_CONNECT_TIMEOUT    60
-#define MQTT_PUBLISH_QOS        0
-#define MQTT_PUBLISH_RETAIN     false
+#define MQTT_CONNECT_TIMEOUT 60
+#define MQTT_PUBLISH_QOS     0
+#define MQTT_PUBLISH_RETAIN  false
 #include "mqtt_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -242,7 +242,7 @@ typedef struct {
  * writer. A host has one place a person looks; a second store, opaque and in a directory beside it,
  * is the thing this removed. `iotdata_settings_saver_attach()` is what swaps the sink.
  */
-#define s_settings gateway_settings
+#define s_settings     gateway_settings
 
 static void gateway_state_begin(store_state_t *state, const store_conf_t *conf) {
     if (datastore_open(&state->datastore, conf->directory)) {
@@ -307,7 +307,10 @@ void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
     cfg->rssi_channel = false;
     cfg->rssi_packet = true;
     cfg->debug = iotdata_config_bool(LORA_DEBUG);
-    PRINTF_INFO("config: lora: port=%s, module=USB, address=0x%03" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", packet-size=%" PRIu8 "B, air-rate=%" PRIu16 "bps, transmit-power=%" PRIu8 "dBm, listen-before-transmit=%s, rssi-channel=%s, rssi-packet=%s, debug=%s\n", *cfg_port, cfg->e22_address, cfg->e22_network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->air_data_rate, cfg->transmit_power, cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off", cfg->rssi_packet ? "on" : "off", cfg->debug ? "on" : "off");
+    PRINTF_INFO("config: lora: port=%s, module=USB, address=0x%03" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", packet-size=%" PRIu8 "B, air-rate=%" PRIu16 "bps, transmit-power=%" PRIu8
+                "dBm, listen-before-transmit=%s, rssi-channel=%s, rssi-packet=%s, debug=%s\n",
+                *cfg_port, cfg->e22_address, cfg->e22_network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->air_data_rate, cfg->transmit_power, cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
+                cfg->rssi_packet ? "on" : "off", cfg->debug ? "on" : "off");
 }
 
 void mesh_config_populate(mesh_state_t *cfg) {
@@ -327,7 +330,8 @@ void mqtt_config_populate(mqtt_config_t *cfg) {
     cfg->reconnect_delay = iotdata_config_u16(MQTT_RECONNECT_DELAY);
     cfg->reconnect_delay_max = iotdata_config_u16(MQTT_RECONNECT_DELAY_MAX);
     cfg->debug = iotdata_config_bool(MQTT_DEBUG);
-    PRINTF_INFO("config: mqtt: client=%s, server=%s, tls=%s, sync=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, !cfg->tls_insecure ? "on" : "off", cfg->synchronous ? "on" : "off", cfg->reconnect_delay, cfg->reconnect_delay_max);
+    PRINTF_INFO("config: mqtt: client=%s, server=%s, tls=%s, sync=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, !cfg->tls_insecure ? "on" : "off", cfg->synchronous ? "on" : "off", cfg->reconnect_delay,
+                cfg->reconnect_delay_max);
 }
 
 void ddup_config_populate(ddup_state_t *cfg) {
