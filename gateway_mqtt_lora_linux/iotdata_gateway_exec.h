@@ -422,8 +422,10 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
             mesh_transmit_beacon(st->state_mesh);
 
         // control
-        if (*running)
+        if (*running) {
             ctrl_tick(state_ctrl, state_node);
+            iotdata_console_poll(); /* non-blocking; a gateway with no terminal simply reads nothing */
+        }
         if (*running)
             node_tick(state_node);
 

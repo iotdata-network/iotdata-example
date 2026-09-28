@@ -67,34 +67,20 @@
 
 #define IOTDATA_GATEWAY_VERSION IOTDATA_VERSION_SEMVER
 
-#define IOTDATA_VERSION_HAS_MESH
-#define IOTDATA_VERSION_HAS_BLACKBOX
-
-#define CONFIG_FILE_DEFAULT           "iotdata_gateway.cfg"
-#define STATE_PATH_DEFAULT            "/var/lib/iotdata"
-
-#define SERIAL_PORT_DEFAULT           "/dev/e22900t22u"
 #define SERIAL_RATE_DEFAULT           9600
 #define SERIAL_BITS_DEFAULT           SERIAL_8N1
-
-#define STAT_INTERVAL_DEFAULT         (5 * 60)
-#define INTERVAL_RSSI_CHANNEL_DEFAULT 0
-
-#define INTERVAL_BEACON_DEFAULT       60 /* seconds */
-
-#define GATEWAY_STATION_ID_DEFAULT    1
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #ifndef BUFFER_LENGTH_FRAME
-#define BUFFER_LENGTH_FRAME 240 /* the E22 sub-packet size: the largest frame that arrives in one piece */
+#define BUFFER_LENGTH_FRAME IOTDATA_MAX_PACKET_SIZE
 #endif
 #ifndef BUFFER_LENGTH_PREFIX
 #define BUFFER_LENGTH_PREFIX 0 /* nothing is prepended: a gateway terminates frames, it does not forward them */
 #endif
 #ifndef BUFFER_LENGTH_TOTAL
-#define BUFFER_LENGTH_TOTAL (BUFFER_LENGTH_FRAME + 1 + BUFFER_LENGTH_PREFIX) /* 1 = RSSI byte */
+#define BUFFER_LENGTH_TOTAL (BUFFER_LENGTH_PREFIX + BUFFER_LENGTH_FRAME + 1) /* 1 = RSSI byte */
 #endif
 #ifndef BUFFER_SLOTS_DOWNSTREAM
 #define BUFFER_SLOTS_DOWNSTREAM 128
@@ -108,6 +94,9 @@
 #ifndef BUFFER_SLOTS_TOTAL
 #define BUFFER_SLOTS_TOTAL (BUFFER_SLOTS_PROCESSING + BUFFER_SLOTS_DOWNSTREAM + BUFFER_SLOTS_MARGIN)
 #endif
+// #ifndef BUFFER_QUEUE_TX_MAX
+// #define BUFFER_QUEUE_TX_MAX (BUFFER_SLOTS_PROCESSING / 2) /* frames waiting for the radio at once */
+// #endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -179,6 +168,8 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
+#define IOTDATA_VERSION_HAS_MESH
+#define IOTDATA_VERSION_HAS_BLACKBOX
 #include "iotdata_node_version.h"
 #include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
@@ -190,6 +181,7 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 // #include "iotdata_node_content.h"
 
 #include "iotdata_node_state.h"
+#include "iotdata_node_console.h"
 #include "iotdata_node_settings.h"
 #define IOTDATA_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
 #include "iotdata_node_down.h"
@@ -253,15 +245,19 @@ typedef struct {
 
 #define STATE_NODE_TAG 0xB1E28004UL
 
-/* The PROTOCOL's own settings -- station id, reporting schedule, receive schedule. A state block
-   like any other, so it must be attached BEFORE the load below, and a write flushes it at once. */
-static iotdata_settings_t s_settings;
+/*
+ * The PROTOCOL's own settings -- station id, reporting schedule, receive schedule.
+ *
+ * NOT A STATE BLOCK HERE, unlike on a device. They live in `gateway_settings`, seeded and loaded by
+ * the config loader out of the SAME FILE the configuration comes from, and written back by the same
+ * writer. A host has one place a person looks; a second store, opaque and in a directory beside it,
+ * is the thing this removed. `iotdata_settings_saver_attach()` is what swaps the sink.
+ */
+#define s_settings gateway_settings
 
 static void gateway_state_begin(store_state_t *state, const store_conf_t *conf) {
     if (datastore_open(&state->datastore, conf->directory)) {
         iotdata_state_init(&state->node, &state->datastore, "state");
-        if (!iotdata_settings_attach(&s_settings, &state->node))
-            PRINTF_WARN("state: settings block not registered -- protocol settings will not persist\n");
         state->opened = true;
         if (!datastore_persistent(&state->datastore))
             PRINTF_WARN("state: '%s' is a tmpfs -- -- nothing will persist across a reboot\n", conf->directory);
@@ -303,181 +299,24 @@ static void gateway_state_end(store_state_t *state) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#include "config_linux.h"
 
-// clang-format off
-const struct option config_options [] = {
-    {"help",                            no_argument,       0, 'h'},
-    {"config",                          required_argument, 0, 0},
-    //
-    {"lora-port",                       required_argument, 0, 0},
-    {"lora-rate",                       required_argument, 0, 0},
-    {"lora-bits",                       required_argument, 0, 0},
-    {"lora-address",                    required_argument, 0, 0},
-    {"lora-network",                    required_argument, 0, 0},
-    {"lora-channel",                    required_argument, 0, 0},
-    {"lora-crypt",                      required_argument, 0, 0},
-    {"lora-packet-size",                required_argument, 0, 0},
-    {"lora-packet-rate",                required_argument, 0, 0},
-    {"lora-transmit-power",             required_argument, 0, 0},
-    {"lora-transmission-method",        required_argument, 0, 0},
-    {"lora-rssi-channel",               required_argument, 0, 0},
-    {"lora-rssi-packet",                required_argument, 0, 0},
-    {"lora-listen-before-transmit",     required_argument, 0, 0},
-    {"lora-read-timeout-command",       required_argument, 0, 0},
-    {"lora-read-timeout-packet",        required_argument, 0, 0},
-    {"lora-debug",                      required_argument, 0, 0},
-    //
-    {"mqtt-client",                     required_argument, 0, 0},
-    {"mqtt-server",                     required_argument, 0, 0},
-    {"mqtt-topic-prefix",               required_argument, 0, 0},
-    {"mqtt-tls-insecure",               required_argument, 0, 0},
-    {"mqtt-reconnect-delay",            required_argument, 0, 0},
-    {"mqtt-reconnect-delay-max",        required_argument, 0, 0},
-    {"mqtt-debug",                      required_argument, 0, 0},
-    //
-    {"mesh-enable",                     required_argument, 0, 0},
-    {"mesh-station-id",                 required_argument, 0, 0},
-    {"mesh-beacon-interval",            required_argument, 0, 0},
-    {"mesh-debug",                      required_argument, 0, 0},
-    //
-    {"ddup-enable",                     required_argument, 0, 0},
-    {"ddup-port",                       required_argument, 0, 0},
-    {"ddup-peers",                      required_argument, 0, 0},
-    {"ddup-delay",                      required_argument, 0, 0},
-    {"ddup-debug",                      required_argument, 0, 0},
-    //
-    {"stat-display-interval",           required_argument, 0, 0},
-    {"stat-publish-interval",           required_argument, 0, 0},
-    {"stat-network-interval",           required_argument, 0, 0},
-    {"stat-publish-mqtt-topic-prefix",  required_argument, 0, 0},
-    //
-    {"blackbox-enabled",                required_argument, 0, 0},
-    {"blackbox-ram-max-records",        required_argument, 0, 0},
-    {"blackbox-ram-max-seconds",        required_argument, 0, 0},
-    {"blackbox-file-directory",         required_argument, 0, 0},
-    {"blackbox-file-max-bytes",         required_argument, 0, 0},
-    {"blackbox-file-generations",       required_argument, 0, 0},
-    //
-    {"state",                           required_argument, 0, 0},
-    //
-    {"debug",                           required_argument, 0, 0},
-    {"debug-data",                      required_argument, 0, 0},
-    {0, 0, 0, 0}
-};
+/* HERE and not with the other node headers: the table's defaults are stated by the modules above
+   -- MQTT_SERVER_DEFAULT, DDUP_PORT_DEFAULT, STAT_MQTT_TOPIC_DEFAULT. Nothing reads a setting
+   before this point, and config_linux.h -- which used to parse into a list of its own -- is gone:
+   the table is the store, and the loader beside it writes straight into it. */
+#include "iotdata_gateway_conf.h" /* the table */
+#include "iotdata_node_config.h"    /* expand it */
+#include "iotdata_gateway_conf.h" /* and now the adapters, the adopt and the overlay writer */
 
-const config_option_help_t config_options_help [] = {
-    {"help",                            "Display this help message and exit"},
-    {"config",                          "Config file path (default: '" CONFIG_FILE_DEFAULT "')"},
-    //
-    {"lora-port",                       "Lora E22 serial port device (default: '" SERIAL_PORT_DEFAULT "')"},
-    {"lora-rate",                       "Lora E22 serial baud rate (default: 9600)"},
-    {"lora-bits",                       "Lora E22 serial data bits (default: 8N1)"},
-    {"lora-address",                    "Lora E22 module address (hex) (default: 0x0000)"},
-    {"lora-network",                    "Lora E22 module network ID (hex) (default: 0x00)"},
-    {"lora-channel",                    "Lora E22 module channel (default: 0)"},
-    {"lora-crypt",                      "Lora E22 encryption key (default: 0x0000)"},
-    {"lora-packet-size",                "Lora E22 packet size (default: 0)"},
-    {"lora-packet-rate",                "Lora E22 packet rate (default: 0)"},
-    {"lora-transmit-power",             "Lora E22 transmit power level 0-3 (default: 0)"},
-    {"lora-transmission-method",        "Lora E22 transmission method 0=transparent, 1=fixed-point (default: 0)"},
-    {"lora-rssi-channel",               "Lora E22 channel (ambient) RSSI poll interval in seconds (default: 0 = disabled)"},
-    {"lora-rssi-packet",                "Lora E22 enable packet RSSI capture (default: true)"},
-    {"lora-listen-before-transmit",     "Lora E22 enable listen-before-transmit mode (default: true)"},
-    {"lora-read-timeout-command",       "Lora E22 command read timeout in milliseconds (default: 1000)"},
-    {"lora-read-timeout-packet",        "Lora E22 packet read timeout in milliseconds (default: 5000)"},
-    {"lora-debug",                      "Lora E22 debug output (true/false)"},
-    //
-    {"mqtt-client",                     "MQTT client ID (default: '" MQTT_CLIENT_DEFAULT "')"},
-    {"mqtt-server",                     "MQTT server URL (default: '" MQTT_SERVER_DEFAULT "')"},
-    {"mqtt-topic-prefix",               "MQTT topic prefix (default: '" MQTT_TOPIC_PREFIX_DEFAULT "')"},
-    {"mqtt-tls-insecure",               "MQTT disable TLS verification (default: false)"},
-    {"mqtt-reconnect-delay",            "MQTT reconnect delay in seconds (default: 5)"},
-    {"mqtt-reconnect-delay-max",        "MQTT max reconnect delay in seconds (default: 60)"},
-    {"mqtt-debug",                      "MQTT debug output (true/false)"},
-    //
-    {"mesh-enable",                     "Mesh enable (iotdata networking) (default: false)"},
-    {"mesh-station-id",                 "Mesh gateway (station) ID (default: 1)"},
-    {"mesh-beacon-interval",            "Mesh beacon transmission interval in seconds (default: 60)"},
-    {"mesh-debug",                      "Mesh debug output (true/false)"},
-    //
-    {"ddup-enable",                     "Ddup enable (cross-gateway deduplication) (default: false)"},
-    {"ddup-port",                       "Ddup UDP port for peer communication (default: 9876)"},
-    {"ddup-peers",                      "Ddup peers comma-separated list (host:port)"},
-    {"ddup-delay",                      "Ddup batch send delay in milliseconds (default: 20)"},
-    {"ddup-debug",                      "Ddup debug output (true/false)"},
-    //
-    {"stat-display-interval",           "Stat display stdout interval in seconds (default: 300; 0 disables)"},
-    {"stat-publish-interval",           "Stat publish MQTT interval in seconds (default: 300; 0 disables)"},
-    {"stat-network-interval",           "Network/stations table stdout interval in seconds (default: 300; 0 disables)"},
-    {"stat-publish-mqtt-topic-prefix",  "Stat publish MQTT topic prefix (default: 'iotdata/stats')"},
-    //
-    {"blackbox-enabled",                "Enable the blackbox diagnostic recorder (true/false, default: false)"},
-    {"blackbox-ram-max-records",        "RAM pool maximum records (0 = unbounded, default: 0)"},
-    {"blackbox-ram-max-seconds",        "RAM pool maximum seconds before flush to file (0 = write-through, default: 0)"},
-    {"blackbox-file-directory",         "CSV file directory (default: '.')"},
-    {"blackbox-file-max-bytes",         "CSV file maximum bytes, rotates past this (0 = unbounded, default: 0)"},
-    {"blackbox-file-generations",       "CSV file maximum rotated generations to keep (<file>.1 .. .N; 0 = overwrite/no backup, default: 10)"},
-    //
-    {"state",                           "Persistent state directory (default: '" STATE_PATH_DEFAULT "')"},
-    //
-    {"debug",                           "Debug output (true/false)"},
-    {"debug-data",                      "Debug data (hex dump of received packet data) output (true/false)"},
+/* `conf` is not written here: the config framework brings its own, and it is the only handler that
+   can resolve a NAME because it is the only thing holding the table. */
+static const iotdata_console_t s_gateway_cons[] = {
+    IOTDATA_CONFIG_CONSOLE_COMMAND,
+    IOTDATA_SETTINGS_CONSOLE_COMMAND,
 };
-// clang-format on
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
-
-/*
- * The `lora-packet-{size,rate}` and `lora-transmit-power` config keys are REGISTER INDICES, which
- * is the right unit for them: both ends of a link must land on the same index, not the same
- * nominal rate. The driver takes real units, so they are converted here.
- *
- * Air rate indices 2..7 mean the same on the U and D modules; 0 and 1 do NOT (they are 0.3/1.2kbps
- * on D and both 2.4kbps on U). Index 2 is 2.4kbps on both and is the portable choice, so 0 and 1
- * are folded to it here rather than silently meaning something different from the sensors.
- */
-static uint16_t _lora_rate_bps_from_index(const int idx) {
-    switch (idx) {
-    case 3:
-        return 4800;
-    case 4:
-        return 9600;
-    case 5:
-        return 19200;
-    case 6:
-        return 38400;
-    case 7:
-        return 62500;
-    default:
-        return 2400; /* 0, 1, 2 -- see above */
-    }
-}
-static uint8_t _lora_size_bytes_from_index(const int idx) {
-    switch (idx) {
-    case 1:
-        return 128;
-    case 2:
-        return 64;
-    case 3:
-        return 32;
-    default:
-        return 240;
-    }
-}
-static uint8_t _lora_power_dbm_from_index(const int idx) {
-    switch (idx) {
-    case 1:
-        return 17;
-    case 2:
-        return 13;
-    case 3:
-        return 10;
-    default:
-        return 22;
-    }
-}
 
 void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
     *cfg = (lora_config_t){ 0 };
@@ -487,10 +326,10 @@ void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
     cfg->e22_network = (uint8_t)config_get_integer("lora-network", IOTDATA_CONFIG_LORA_NETWORK);
     cfg->channel = (uint8_t)config_get_integer("lora-channel", IOTDATA_CONFIG_LORA_CHANNEL);
     cfg->crypt = (uint16_t)config_get_integer("lora-crypt", 0x0000);
-    cfg->packet_size = _lora_size_bytes_from_index(config_get_integer("lora-packet-size", 0));
-    cfg->air_data_rate = _lora_rate_bps_from_index(config_get_integer("lora-packet-rate", 2));
-    cfg->transmit_power = _lora_power_dbm_from_index(config_get_integer("lora-transmit-power", 0));
-    cfg->listen_before_transmit = config_get_bool("lora-listen-before-transmit", true);
+    cfg->packet_size = (uint8_t)config_get_integer("lora-packet-size", 240);
+    cfg->air_data_rate = (uint16_t)config_get_integer("lora-air-rate", 2400);
+    cfg->transmit_power = (uint8_t)config_get_integer("lora-tx-power", 22);
+    cfg->listen_before_transmit = config_get_bool("lora-lbt", true);
     /* Same key, same default as the read interval below: off also stops the module computing it. */
     cfg->rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT) > 0;
     cfg->rssi_packet = config_get_bool("lora-rssi-packet", true);
@@ -503,8 +342,6 @@ void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
                 *cfg_port, cfg->e22_address, cfg->e22_network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->air_data_rate, cfg->transmit_power, cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
                 cfg->rssi_packet ? "on" : "off");
 }
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
 void mqtt_config_populate(mqtt_config_t *cfg) {
     *cfg = (mqtt_config_t){ 0 };
@@ -590,16 +427,30 @@ static system_t system_state;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+__attribute__((format(printf, 1, 2))) static void gateway_help_emit(const char *const fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vprintf(fmt, ap);
+    va_end(ap);
+}
+
 bool system_config(system_t *state, const int argc, char *argv[]) {
 
     for (int i = 1; i < argc; i++)
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            config_help(argv[0], config_options, config_options_help, (int)(sizeof(config_options_help) / sizeof(config_options_help[0])));
+            iotdata_config_help(gateway_help_emit, argv[0]);
+            static iotdata_settings_t help_settings;
+            iotdata_settings_defaults(&help_settings, iotdata_config_u16(STATION_ID));
+            iotdata_settings_help(gateway_help_emit, &help_settings);
             exit(EXIT_SUCCESS);
         }
 
-    if (!config_load(CONFIG_FILE_DEFAULT, argc, argv, config_options))
+    if (!gateway_config_load(argc, argv))
         return false;
+    iotdata_config_saver_attach(gateway_config_save);
+    iotdata_settings_saver_attach(gateway_settings_save);
+    iotdata_config_console_attach(NULL);
+    iotdata_console_init(s_gateway_cons, sizeof s_gateway_cons / sizeof s_gateway_cons[0]);
 
     lora_config_populate(&state->lora_port, &state->lora_config);
     mqtt_config_populate(&state->mqtt_config);
@@ -624,14 +475,6 @@ void signal_handler(const int sig __attribute__((unused))) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static uint16_t gateway_station_config(void) {
-    const uint16_t id = (uint16_t)config_get_integer("mesh-station-id", GATEWAY_STATION_ID_DEFAULT);
-    if (iotdata_station_is_assignable(id))
-        return id;
-    PRINTF_ERROR("config: station-id %" PRIu16 " is reserved (must be 1..%" PRIu16 ") -- using %" PRIu16 "\n", id, IOTDATA_STATION_ASSIGNABLE_MAX, GATEWAY_STATION_ID_DEFAULT);
-    return GATEWAY_STATION_ID_DEFAULT;
-}
-
 int main(int argc, char *argv[]) {
 
     int ret = EXIT_FAILURE;
@@ -642,10 +485,10 @@ int main(int argc, char *argv[]) {
 
     system_t *state = &system_state;
 
-    PRINTF_INFO("starting (iotdata gateway: variants=%d, features=mesh,dedup,stats,mqtt)\n", IOTDATA_VARIANT_MAPS_COUNT);
-
     if (!system_config(state, argc, argv))
         return ret;
+
+    PRINTF_INFO("starting (iotdata gateway: variants=%d, features=mesh,dedup,stats,mqtt)\n", IOTDATA_VARIANT_MAPS_COUNT);
 
     iotdata_version_caps_init(&state->iotd_caps);
     iotdata_version_caps_add(&state->iotd_caps, IOTDATA_VERSION_CAPS_RADIO, state->lora_config.module == LORA_MODULE_USB ? IOTDATA_VERSION_RADIO_E22_USB : IOTDATA_VERSION_RADIO_E22_DIP);
@@ -663,7 +506,8 @@ int main(int argc, char *argv[]) {
                                                                      .max_bytes = (int)config_get_integer("blackbox-file-max-bytes", 0),
                                                                      .generations = (int)config_get_integer("blackbox-file-generations", 10) });
     gateway_state_begin(&state->store_state, &(const store_conf_t){ .directory = config_get_string("state", STATE_PATH_DEFAULT) });
-    idep_node_init(&state->inode, gateway_station_config(), &state->store_state.node, STATE_NODE_TAG);
+    idep_node_init(&state->inode, iotdata_settings_station(&gateway_settings), &state->store_state.node, STATE_NODE_TAG);
+    iotdata_settings_console_attach(&gateway_settings, &state->store_state.node);
     PRINTF_INFO("node: station=%03" PRIX16 "\n", idep_station(&state->inode));
 
     // DEVICE (LORA)
@@ -690,7 +534,7 @@ int main(int argc, char *argv[]) {
     if (!node_begin(&state->node_state, &state->inode, &state->iotd_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row,
                     ctrl_from_iotdata_keys, (uint8_t)(sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0])), state->process_state.mqtt_topic_prefix))
         goto end_mqtt;
-    node_settings_attach(&state->node_state, &s_settings, &state->store_state.node);
+    node_settings_attach(&state->node_state, &gateway_settings, &state->store_state.node);
     if (!mesh_begin(&state->mesh_state, &state->inode, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
         goto end_node;
     if (!ddup_begin(&state->ddup_state, &state->inode, &state->mesh_state.dedup_ring, &state->running))

@@ -128,6 +128,7 @@
 
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
+// #define IOTDATA_VERSION_HAS_BLACKBOX
 #include "iotdata_node_version.h"
 #include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
@@ -152,22 +153,25 @@ static void _node_diagnostics_emit(const char *const line) {
 static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
 
 #define IOTDATA_CONFIG_LORA_NOTIFY on_lora_changed
-#include "iotdata_hardware_config.h"
+#include "iotdata_node_config_device_e22900t22.h"
 
 #define IOTDATA_CONFIG_ENTRIES(X) \
     /*NAME  id  TYPE  min  max  default  flags  validate  notify */ \
-    X(TRANSMIT_PERIOD_S, 0x001, U16, 10, 3600, (IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS / 1000), 0, NULL, NULL) \
+    X(TRANSMIT_PERIOD_S, 0x001, U16, 10, 3600, (IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS / 1000), 0, NULL, NULL, "how often a reading goes out") \
     IOTDATA_CONFIG_ENTRIES_LORA(X)
 
 #include "iotdata_node_config.h"
-#include "iotdata_hardware_config.h"
+#include "iotdata_node_config_device_e22900t22.h"
 
 static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, __attribute__((unused)) const iotdata_config_info_t *info) {
     ESP_LOGW("config", "%s changed (was %llu); the radio is configured once, so this needs a restart", row->name, (unsigned long long)was->u);
     return true;
 }
 
-#include "iotdata_hardware_diagnostics.h"
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+#include "iotdata_node_diagnostics_device_batt.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -496,6 +500,7 @@ bool app_init(void) {
 
     if (datastore_open(&app_state.running->datastore, "iotdata")) {
         iotdata_state_init(&app_state.running->node, &app_state.running->datastore, "state");
+        iotdata_settings_defaults(&app_state.running->settings, idep_station(&app_state.operating->node));
         /* a state block like any other, so it registers BEFORE the load below */
         if (!iotdata_settings_attach(&app_state.running->settings, &app_state.running->node))
             ESP_LOGW(__tag_app, "state: settings block not registered -- protocol settings will not persist");
@@ -504,6 +509,8 @@ bool app_init(void) {
         if (restarted) {
             const bool restored = iotdata_state_load(&app_state.running->node);
             ESP_LOGI(__tag_app, "state: %u block(s), %s", (unsigned)app_state.running->node.count, restored ? "restored" : "defaulted");
+            if (idep_node_restore_station(&app_state.operating->node, &app_state.running->settings))
+                ESP_LOGI(__tag_app, "node: station=%" PRIu16 " restored from settings", idep_station(&app_state.operating->node));
         }
     } else
         ESP_LOGW(__tag_app, "state: persistence disabled (no datastore)");

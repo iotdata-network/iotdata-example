@@ -98,13 +98,14 @@
 
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
+// #define IOTDATA_VERSION_HAS_BLACKBOX
 #include "iotdata_node_version.h"
 #include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
 #include "iotdata_node_config.h"
 #include "iotdata_node_control.h"
 #define IOTDATA_DIAGNOSTICS       IOTDATA_CONFIG_BLACKBOX
-#define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
+#define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_BATCH_TIME
 #define IOTDATA_BLACKBOX_IMPLEMENTATION
 static void _node_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
@@ -114,6 +115,7 @@ static void _node_diagnostics_emit(const char *const line) {
 
 #define IOTDATA_STATE_BLOCKS_MAX (IOTDATA_CONFIG_SIMULATOR_SENSORS_MAX + 4)
 #include "iotdata_node_state.h"
+#include "iotdata_node_console.h"
 #include "iotdata_node_settings.h"
 #include "iotdata_node_platform.h"
 
@@ -125,19 +127,19 @@ static bool sim_transmit_max_ok(const iotdata_config_row_t *row, const iotdata_c
 static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
 
 #define IOTDATA_CONFIG_LORA_NOTIFY on_lora_changed
-#include "iotdata_hardware_config.h"
+#include "iotdata_node_config_device_e22900t22.h"
 
 #define IOTDATA_CONFIG_ENTRIES(X) \
     /*NAME               id     TYPE min  max                                         default                                     flags                       validate       notify */ \
-    X(SENSORS, 0x001, U8, 1, IOTDATA_CONFIG_SIMULATOR_SENSORS_MAX, IOTDATA_CONFIG_SIMULATOR_SENSORS, IOTDATA_CONFIG_FLAG_REBOOT, NULL, NULL) \
-    X(VARIANTS, 0x002, U8, 1, IOTDATA_CONFIG_SIMULATOR_VARIANTS_MAX, IOTDATA_CONFIG_SIMULATOR_VARIANTS, IOTDATA_CONFIG_FLAG_REBOOT, NULL, NULL) \
-    X(EXTRA_FIELDS, 0x003, U8, 1, 100, IOTDATA_CONFIG_SIMULATOR_EXTRA_FIELDS, 0, NULL, NULL) \
-    X(TRANSMIT_MIN_S, 0x004, U16, 1, 3600, (IOTDATA_CONFIG_SIMULATOR_TRANSMIT_MIN_MS / 1000), 0, sim_transmit_min_ok, NULL) \
-    X(TRANSMIT_MAX_S, 0x005, U16, 1, 3600, (IOTDATA_CONFIG_SIMULATOR_TRANSMIT_MAX_MS / 1000), 0, sim_transmit_max_ok, NULL) \
+    X(SENSORS, 0x001, U8, 1, IOTDATA_CONFIG_SIMULATOR_SENSORS_MAX, IOTDATA_CONFIG_SIMULATOR_SENSORS, IOTDATA_CONFIG_FLAG_REBOOT, NULL, NULL, "how many simulated sensors this board pretends to be") \
+    X(VARIANTS, 0x002, U8, 1, IOTDATA_CONFIG_SIMULATOR_VARIANTS_MAX, IOTDATA_CONFIG_SIMULATOR_VARIANTS, IOTDATA_CONFIG_FLAG_REBOOT, NULL, NULL, "how many telemetry suites to spread across them") \
+    X(EXTRA_FIELDS, 0x003, U8, 1, 100, IOTDATA_CONFIG_SIMULATOR_EXTRA_FIELDS, 0, NULL, NULL, "extra fields per reading, to vary the packet size") \
+    X(TRANSMIT_MIN_S, 0x004, U16, 1, 3600, (IOTDATA_CONFIG_SIMULATOR_TRANSMIT_MIN_MS / 1000), 0, sim_transmit_min_ok, NULL, "the shortest gap between simulated transmissions") \
+    X(TRANSMIT_MAX_S, 0x005, U16, 1, 3600, (IOTDATA_CONFIG_SIMULATOR_TRANSMIT_MAX_MS / 1000), 0, sim_transmit_max_ok, NULL, "the longest, so they do not fall into step") \
     IOTDATA_CONFIG_ENTRIES_LORA(X)
 
 #include "iotdata_node_config.h"
-#include "iotdata_hardware_config.h"
+#include "iotdata_node_config_device_e22900t22.h"
 
 static bool sim_transmit_min_ok(const iotdata_config_row_t *row, const iotdata_config_value_t *v, const struct iotdata_config_update *u) {
     if (v->u < row->min.u || v->u > row->max.u)
@@ -234,6 +236,21 @@ static bool sim_node_tx(const uint8_t *const packet, const size_t len) {
 
 static iotdata_version_caps_t s_caps;
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static int sim_config_build(uint8_t *const buf, const size_t size, iotdata_partial_t *const partial) {
+    return iotdata_config_pack(buf, size, partial);
+}
+static bool sim_config_apply(const uint8_t *const buf, const size_t len, bool *const reboot_out) {
+    return iotdata_config_apply(buf, len, &s_datastore, reboot_out);
+}
+
+static const iotdata_console_t s_app_cons[] = {
+    IOTDATA_CONFIG_CONSOLE_COMMAND,
+    IOTDATA_SETTINGS_CONSOLE_COMMAND,
+};
+
 static const idep_config_t s_conf = {
     .caps = &s_caps,
     .status = sim_node_status,
@@ -247,6 +264,8 @@ static const idep_config_t s_conf = {
     .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
     .settings = &s_settings,
     .state = &s_state,
+    .config_build = sim_config_build,
+    .config_apply = sim_config_apply,
     .packet_max = LORA_PACKET_SIZE_MAX, /* what OUR radio carries; the framework sizes for the protocol */
 };
 
@@ -375,13 +394,19 @@ bool app_init(void) {
     ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%03" PRIX16 "-%03" PRIX16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed,
              (uint16_t)(station_base + 1), (uint16_t)(station_base + SIM_SENSORS));
     ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", SIM_SENSORS, SIM_VARIANTS, SIM_TRANSMIT_MIN_MS, SIM_TRANSMIT_MAX_MS);
+    iotdata_settings_defaults(&s_settings, station_base);
     if (datastore_open(&s_datastore, "iotdata")) {
         iotdata_state_init(&s_state, &s_datastore, "state");
-        /* a state block like any other, so it registers BEFORE the load below */
         if (!iotdata_settings_attach(&s_settings, &s_state))
             ESP_LOGW(__tag_app, "state: settings block not registered -- protocol settings will not persist");
+        if (!iotdata_config_load(&s_datastore))
+            ESP_LOGI(__tag_app, "config: nothing stored yet -- every row at its default");
+        iotdata_config_console_attach(&s_datastore);
     } else
-        ESP_LOGW(__tag_app, "state: persistence disabled (no datastore)");
+        ESP_LOGW(__tag_app, "state: persistence disabled (no datastore) -- config will not survive a restart");
+    iotdata_settings_console_attach(&s_settings, &s_state);
+    iotdata_console_init(s_app_cons, sizeof s_app_cons / sizeof s_app_cons[0]);
+    ESP_LOGI(__tag_app, "console: ready, %u config entries (try `help`, or `conf`)", (unsigned)IOTDATA_CFG_COUNT);
 
     /* Each node registers its own sequence as it comes up; the load afterwards fills them all in
        one pass, and nothing may register after it. */
@@ -420,8 +445,10 @@ bool app_exec(void) {
 
         transmit_packets(&g_sim);
         receive_packets(&g_sim);
-        (void)iotdata_diagnostics_pump(); /* drains a DUMP a chunk per pass, so the loop keeps time */
-        (void)iotdata_state_tick(&s_state, hw_time_ms());
+        iotdata_diagnostics_tick(hw_time_ms());
+        iotdata_console_poll(); /* non-blocking: reads whatever bytes are already in */
+        iotdata_diagnostics_pump();
+        iotdata_state_tick(&s_state, hw_time_ms());
 
         if (tx_count >= tx_count_last + STATUS_EVERY_N_TX) {
             tx_count_last = tx_count;

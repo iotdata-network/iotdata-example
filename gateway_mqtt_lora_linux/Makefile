@@ -34,7 +34,7 @@ TARGET=iotdata_gateway
 MAIN=iotdata_gateway.c
 SOURCES_TARGET=\
     iotdata_gateway_ddup.h iotdata_gateway_exec.h iotdata_gateway_mesh.h iotdata_gateway_ctrl.h iotdata_gateway_netw.h iotdata_gateway_node.h iotdata_gateway_stat.h \
-    include/config_linux.h include/mqtt_linux.h
+    include/mqtt_linux.h
 SOURCES_DEPEND=\
     $(IOTDATA_SRC_COMMON)/include/device/d_platform_linux.h \
     $(IOTDATA_SRC_COMMON)/include/device/d_common.h \

@@ -49,6 +49,12 @@ typedef struct {
     /* The protocol's own settings, and where they persist. Attached after node_begin() rather than
        passed through it: both or neither, since a block that cannot be flushed would answer a
        write with a promise rather than a fact. */
+    /* The gateway's own CONFIG, reached through callbacks because the table is compiled into the
+       APPLICATION and this header is included before the X-macro that expands it. Both NULL today:
+       the gateway keeps its configuration in its own file and has not been migrated, so it answers
+       a CONFIG request with an empty report -- which is an answer, and an honest one. */
+    idep_config_build_fn config_build;
+    idep_config_apply_fn config_apply;
     iotdata_settings_t *settings;
     iotdata_node_state_t *state;
 
@@ -68,6 +74,18 @@ typedef struct {
     buffer_pool_t *pool;
     char _buffer_blackbox_rec[BLACKBOX_LINE_MAX];
 } node_state_t;
+
+/* WHO OWNS THE SCHEDULE -- settings when there are settings, the struct's own fields when there are
+   not, and never a merge of the two. Settings are seeded dense, so a subject always has a record
+   and there is nothing for the struct's copy to fill in; a record saying "never" means never.
+   (The relay says exactly this in relay_node.h. The two nodes are separate modules by history, and
+   the point of stating it identically is that the cadence cannot differ by accident.) */
+static inline bool node_at_startup(const node_state_t *const st, const uint8_t type) {
+    return (st->settings != NULL) ? iotdata_settings_at_startup(st->settings, type) : ((st->startup >> type) & 1u) != 0u;
+}
+static inline uint16_t node_period_s(const node_state_t *const st, const uint8_t type) {
+    return (st->settings != NULL) ? iotdata_settings_period_s(st->settings, type) : st->period[type];
+}
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -156,10 +174,12 @@ static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t 
 /* A node's own settings are PROPRIETARY keys, and this device has none to state -- so the report is
    an EMPTY kvr, which is an answer. The reporting cadence that used to live here is protocol
    configuration and is now the trigger record, carried by control(<subject>, set-trigger). */
-static int node_build_config(__attribute__((unused)) const node_state_t *st, uint8_t *buf, const size_t size) {
-    iotdata_kvr_t kv;
-    iotdata_kvr_init(&kv, buf, size);
-    return kv.overflow ? -1 : (int)kv.len;
+/* The device's own configuration, as the [id|type][value] record stream the store and the wire
+   share -- NOT kvr, because a config id is 12 bits and a kvr key is 8. Nothing is attached yet, so
+   this reports EMPTY: the gateway's own settings still live in its .cfg file. An empty report is an
+   answer, and the truthful one until that migration happens. */
+static int node_build_config(const node_state_t *st, uint8_t *buf, const size_t size, iotdata_partial_t *partial) {
+    return (st->config_build != NULL) ? st->config_build(buf, size, partial) : 0;
 }
 
 static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t size, iotdata_partial_t *partial) {
@@ -203,7 +223,7 @@ static int node_build(node_state_t *st, const uint8_t type, uint8_t *buf, const 
     case IOTDATA_NODE_TLV_STATUS:
         return node_build_status(st, buf, size, scope, partial);
     case IOTDATA_NODE_TLV_CONFIG:
-        return node_build_config(st, buf, size);
+        return node_build_config(st, buf, size, partial);
     case IOTDATA_NODE_TLV_SETTINGS:
         return node_build_settings(st, buf, size, (scope != 0u) ? &scope : NULL, (scope != 0u) ? 1u : 0u);
     case IOTDATA_NODE_TLV_DIAGNOSTICS:
@@ -489,17 +509,19 @@ static bool node_addressed_to_us(const node_state_t *st, const uint16_t station)
     return station == idep_station(st->inode) || station == IOTDATA_STATION_BROADCAST;
 }
 
-static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t kvlen, const uint16_t target) {
+/* `tlv` says what the payload IS. CONTROL for a command, CONFIG for a write -- a write is not a
+   verb, so it travels as its own TLV rather than wrapped in a command, exactly as SETTINGS does. */
+static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t kvlen, const uint16_t target, const uint8_t tlv) {
     bool ok = false;
     const buffer_handle_t h = buffer_acquire(st->pool);
     if (h != BUFFER_NONE) {
         uint8_t *const buf = buffer_data(st->pool, h);
         size_t len = 0;
-        ok = iotdata_encode_begin(&st->_iotdata_enc, buf, buffer_room(st->pool, h), 0, target, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK && iotdata_encode_tlv(&st->_iotdata_enc, IOTDATA_NODE_TLV_CONTROL, kvbuf, (uint8_t)kvlen) == IOTDATA_OK &&
+        ok = iotdata_encode_begin(&st->_iotdata_enc, buf, buffer_room(st->pool, h), 0, target, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK && iotdata_encode_tlv(&st->_iotdata_enc, tlv, kvbuf, (uint8_t)kvlen) == IOTDATA_OK &&
              iotdata_encode_end(&st->_iotdata_enc, &len) == IOTDATA_OK;
         if (ok) {
             const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, buf, len, h, 0u /* the gateway does not model its own air rate: 0 means "assume it fits" */, hw_time_ms());
-            PRINTF_INFO("node: down -> %03" PRIX16 " (%zu bytes, %s)\n", target, len, iotdata_down_ev_name(ev));
+            PRINTF_INFO("node: down -> %03" PRIX16 " (%zu bytes, %s, %s)\n", target, len, iotdata_down_ev_name(ev), iotdata_node_tlv_name(tlv) ? iotdata_node_tlv_name(tlv) : "?");
             ok = st->tx(buf, (int)len);
         }
         buffer_unref(st->pool, h); /* written straight to the radio (and copied by the DOWN store) */
@@ -574,10 +596,10 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
                         st->stat_commands++;
                         PRINTF_INFO("node: SETTINGS write over the air (%u byte(s))\n", (unsigned)t->length);
                         if (st->settings != NULL && iotdata_settings_apply(st->settings, t->raw, t->length)) {
-                            (void)iotdata_settings_commit(st->state);
+                            (void)iotdata_settings_commit(st->settings, st->state);
                             /* a written station takes effect NOW, so the reply goes out as who we
                             have become rather than as who we were */
-                            (void)idep_node_adopt_station(st->inode, iotdata_settings_station(st->settings, idep_station(st->inode)));
+                            (void)idep_node_adopt_station(st->inode, iotdata_settings_station(st->settings));
                         }
                         (void)node_report(st, IOTDATA_NODE_TLV_SETTINGS);
                         ok = true;
@@ -599,13 +621,31 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
     return ok;
 }
 
-static void node_on_mqtt(node_state_t *const st, const uint8_t *kvbuf, const size_t kvlen, const uint16_t target) {
+/* A staged payload on its way out. `tlv` is what the queue tagged it as: a CONTROL command, which
+   the gateway may also be the subject of, or a CONFIG write, which it relays. It does not yet apply
+   one to ITSELF -- its own configuration is still the .cfg file, and answering as though it had
+   would report something that did not happen. */
+static void node_on_mqtt(node_state_t *const st, const uint8_t *kvbuf, const size_t kvlen, const uint16_t target, const uint8_t tlv) {
     if (node_addressed_to_us(st, target)) {
         st->stat_rx++;
-        node_process_control(st, kvbuf, kvlen);
+        if (tlv == IOTDATA_NODE_TLV_CONTROL)
+            node_process_control(st, kvbuf, kvlen);
+        else if (tlv == IOTDATA_NODE_TLV_CONFIG) {
+            st->stat_commands++;
+            if (st->config_apply != NULL)
+                (void)st->config_apply(kvbuf, kvlen, NULL);
+            (void)node_report(st, IOTDATA_NODE_TLV_CONFIG);
+        }
     }
     if (target != idep_station(st->inode))
-        (void)node_send_down(st, kvbuf, kvlen, target);
+        (void)node_send_down(st, kvbuf, kvlen, target, tlv);
+}
+
+/* Attach the gateway's own configuration. Separate for the reason the relay's is: the table does not
+   exist yet when the node layer is set up. Unused while the gateway is unmigrated. */
+__attribute__((unused)) static void node_config_attach(node_state_t *const st, const idep_config_build_fn build, const idep_config_apply_fn apply) {
+    st->config_build = build;
+    st->config_apply = apply;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -621,12 +661,11 @@ static void node_tick(node_state_t *const st) {
         /* bit N selects type N: the mapping table this replaces said the same thing in six entries
            that could drift from the numbering they mirrored. */
         for (uint8_t t = 0; t < IOTDATA_NODE_TLV_SYSTEM_COUNT; t++)
-            if (iotdata_node_tlv_is_reportable(t) && iotdata_settings_at_startup(st->settings, t, (st->startup & (uint16_t)(1u << t)) != 0u))
+            if (iotdata_node_tlv_is_reportable(t) && node_at_startup(st, t))
                 (void)node_report(st, t);
     }
     for (uint8_t type = 1; type < (uint8_t)(sizeof(st->period) / sizeof(st->period[0])); type++) {
-        /* a written schedule overrides the built-in one; an absent entry defers to it */
-        const uint16_t period_s = iotdata_settings_period_s(st->settings, type, st->period[type]);
+        const uint16_t period_s = node_period_s(st, type);
         if (period_s != 0) {
             if (st->period_last[type] == 0)
                 st->period_last[type] = now; /* prime: first report after one full interval */
@@ -666,6 +705,14 @@ static bool node_begin(node_state_t *st, idep_node_t *const inode, const iotdata
     st->control_actions = control_actions;
     st->control_actions_count = control_actions_count;
     iotdata_down_init(&st->down, pool);
+    /* The same defaults every other node comes up with. They used to be absent here, which left
+       BOTH at zero -- no startup burst, no periodic STATUS -- so a gateway announced itself only
+       when asked. Nobody decided that; it was the difference between a module that had the numbers
+       and one that did not. SETTINGS still overrides either. */
+    if (st->startup == 0)
+        st->startup = IOTDATA_SETTINGS_DEFAULT_STARTUP;
+    if (st->period[IOTDATA_NODE_TLV_STATUS] == 0)
+        st->period[IOTDATA_NODE_TLV_STATUS] = (uint16_t)IOTDATA_SETTINGS_DEFAULT_PERIOD_STATUS_S;
     snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_MQTT_MANAGE_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
     PRINTF_INFO("node: station=%03" PRIX16 ", responses on %s\n", idep_station(st->inode), st->topic_resp);
     return true;

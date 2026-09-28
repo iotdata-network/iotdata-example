@@ -33,6 +33,8 @@
 //   ./iotdata_gateway_control.js status --target all
 //   ./iotdata_gateway_control.js status --target 0x5BF,0x537,0x538      (one frame each)
 //   ./iotdata_gateway_control.js status --target 0x5BF --broker mqtt://192.168.0.61:1883
+//   ./iotdata_gateway_control.js conf --target 0x5BF
+//   ./iotdata_gateway_control.js conf-set --target 0x5BF 0x051:u8=20 0x042:u32=300000
 //   ./iotdata_gateway_control.js raw '{"cmd":"status","target":"all"}'
 //
 // Setup:  npm install        (in this dir; pulls in mqtt)
@@ -128,7 +130,8 @@ const COMMANDS = {
     'vari': { summary: 'request VARIANT — iotdata variant suite produced' },
     'ctrl': { summary: 'request CONTROL — supported control operations' },
     'stat': { summary: 'request STATUS — operating status (system, network)', takes: 'scope', scopes: 'node | mesh | node,mesh   (default: every group)' },
-    'conf': { summary: 'request CONFIG — tbd' },
+    'conf': { summary: 'request CONFIG — the device\'s own settable values' },
+    'conf-set': { summary: 'write one or more config values', takes: 'config', config: '<id>:<type>=<value> ...   e.g. 0x051:u8=20 0x042:u32=300000' },
     'diag': { summary: 'request DIAGNOSTICS — diagnostic operations and recordings' },
     'cont': { summary: 'request CONTENT — tbd' },
     'reports': { summary: 'request every report the node can produce, in type order' },
@@ -196,6 +199,37 @@ function convertResponse(text, convert) {
     return text;
 }
 
+/* The CONFIG wire types, as iotdata_node_config.h numbers them. */
+const CONFIG_TYPES = { bool: 0, u8: 1, i8: 2, u16: 3, i16: 4, u32: 5, i32: 6, u64: 7, i64: 8, float: 9, string: 10, blob: 11 };
+
+/*
+ * `<id>:<type>=<value>` — numeric id, explicit type.
+ *
+ * NUMERIC because the gateway does not resolve names, and should not: an id is what travels, and the
+ * client nearest the operator is the one place that turns a name into one. A gateway with no name
+ * table is a gateway that cannot fall out of step with the firmware in the field — and one that
+ * could run on an ESP32.
+ *
+ * EXPLICITLY TYPED because a write is not self-describing the way a read is. A node reports
+ * id+type+value, but "0x051 = 20" does not say whether 20 is a u8 or a u32, and the record on the
+ * wire carries the type in its own header. Nothing here validates the VALUE: the node owns the
+ * bounds, and it answers with what is now true — so a refused value is simply absent from the reply.
+ */
+function parseConfigAssignments(args) {
+    if (args.length === 0) throw new Error('conf-set: needs at least one <id>:<type>=<value>');
+    return args.map((a) => {
+        const m = /^([^:]+):([a-z0-9]+)=(.+)$/i.exec(a);
+        if (!m) throw new Error(`conf-set: '${a}' is not <id>:<type>=<value>, e.g. 0x051:u8=20`);
+        const id = Number.parseInt(m[1], m[1].toLowerCase().startsWith('0x') ? 16 : 10);
+        if (!Number.isInteger(id) || id < 0 || id > 0x0fff) throw new Error(`conf-set: id '${m[1]}' is not in 0x000..0xFFF`);
+        const type = CONFIG_TYPES[m[2].toLowerCase()];
+        if (type === undefined) throw new Error(`conf-set: unknown type '${m[2]}' (one of ${Object.keys(CONFIG_TYPES).join(', ')})`);
+        const value = Number(m[3]);
+        if (!Number.isFinite(value)) throw new Error(`conf-set: value '${m[3]}' is not a number`);
+        return { id, type, value };
+    });
+}
+
 function buildRequest(name, args) {
     if (name === 'raw') {
         if (args[0] === undefined) throw new Error("raw: needs a JSON request, e.g. raw '{\"cmd\":\"stat\"}'");
@@ -219,6 +253,7 @@ function buildRequest(name, args) {
         req.station = parseStation(args[0]);
         if (args[1] !== undefined) req.action = args[1];
     } else if (spec.takes === 'scope' && args[0] !== undefined) req.scope = args[0];
+    else if (spec.takes === 'config') req.set = parseConfigAssignments(args);
     return req;
 }
 
@@ -241,6 +276,7 @@ function usage() {
         display.log(`  ${name.padEnd(18)} ${c.summary}`);
         if (c.takes === 'station') display.log(`  ${''.padEnd(18)}   takes <station>`);
         if (c.takes === 'station+action') display.log(`  ${''.padEnd(18)}   takes <station> <action>`);
+        if (c.takes === 'config') display.log(`  ${''.padEnd(18)}   takes ${c.config}`);
         if (c.actions) display.log(`  ${''.padEnd(18)}   action: ${c.actions}`);
         if (c.scopes) display.log(`  ${''.padEnd(18)}   scope: ${c.scopes}`);
     }

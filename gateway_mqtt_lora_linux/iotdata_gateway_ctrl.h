@@ -37,15 +37,32 @@
    starve it. A full queue is an answer ("busy"), not a silent overwrite. */
 /* At least IOTDATA_CONTROL_TARGETS_MAX: one request may name several stations and each becomes its
    own DOWN frame, so a queue shorter than the target limit could never stage a full request. */
-#define CTRL_QUEUE_MAX    IOTDATA_CONTROL_TARGETS_MAX
+#define CTRL_QUEUE_MAX          IOTDATA_CONTROL_TARGETS_MAX
 /* The largest CONTROL payload one command builds: `reports` is the widest, a flag per report type. */
-#define CTRL_PAYLOAD_MAX  32
-#define CTRL_QUEUE_TTL_MS 30000 /* a command nobody could send in 30s is stale, not queued */
+#define CTRL_PAYLOAD_MAX        32
+/* A config write is bigger: several [id|type][value] records, bounded by what one frame can carry. */
+#define CTRL_PAYLOAD_CONFIG_MAX IOTDATA_TLV_VALUE_MAX
+#define CTRL_QUEUE_TTL_MS       30000 /* a command nobody could send in 30s is stale, not queued */
 
-#define CTRL_TAG_CONTROL  1
+/* What a staged payload IS, so the drain knows which TLV to put it in. A command is a CONTROL kvr;
+   a config write is a CONFIG record stream, because a write is not a verb and does not need one. */
+#define CTRL_TAG_CONTROL        1
+#define CTRL_TAG_CONFIG         2
 
 static const char *ctrl_tag_name(const uint8_t tag) {
-    return tag == CTRL_TAG_CONTROL ? "CONTROL" : "NONE";
+    switch (tag) {
+    case CTRL_TAG_CONTROL:
+        return "CONTROL";
+    case CTRL_TAG_CONFIG:
+        return "CONFIG";
+    default:
+        return "NONE";
+    }
+}
+
+/* The TLV a tag travels as. */
+static uint8_t ctrl_tag_tlv(const uint8_t tag) {
+    return (tag == CTRL_TAG_CONFIG) ? (uint8_t)IOTDATA_NODE_TLV_CONFIG : (uint8_t)IOTDATA_NODE_TLV_CONTROL;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -172,6 +189,68 @@ static void ctrl_diag_dump(void) {
     ctrl_respond_diag(st, "diag-dump", snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "dumped %d records", n));
 }
 
+/* A CONFIG WRITE, built from JSON into the [id|type][value] record stream the node expects.
+ *
+ * NUMERIC AND EXPLICITLY TYPED, both on purpose. The gateway does not resolve names: an id is what
+ * travels, and the client nearest the operator is the one place that turns a name into one. That is
+ * what keeps the gateway free of a name table it would otherwise have to keep in step with every
+ * firmware in the fleet -- and what leaves the door open to a gateway on an ESP32.
+ *
+ * The type has to be stated because a write is not self-describing the way a read is: the node sends
+ * id+type+value back, but nothing in "0x051 = 20" says whether 20 is a u8 or a u32, and the record
+ * carries the type in its own header. `--config-set 0x051:u8=20`.
+ *
+ * Returns the bytes built, or 0 -- with `why` set to something an operator can act on.
+ */
+static size_t ctrl_config_build(const cJSON *const root, uint8_t *const out, const size_t size, const char **const why) {
+    const cJSON *const set = cJSON_GetObjectItem(root, "set");
+    if (!cJSON_IsArray(set) || cJSON_GetArraySize(set) == 0) {
+        *why = "conf-set needs a non-empty \"set\" array of {id,type,value}";
+        return 0;
+    }
+    size_t at = 0;
+    const cJSON *e = NULL;
+    cJSON_ArrayForEach(e, set) {
+        const cJSON *const jid = cJSON_GetObjectItem(e, "id");
+        const cJSON *const jty = cJSON_GetObjectItem(e, "type");
+        const cJSON *const jvl = cJSON_GetObjectItem(e, "value");
+        if (!cJSON_IsNumber(jid) || !cJSON_IsNumber(jty) || !cJSON_IsNumber(jvl)) {
+            *why = "each entry needs numeric id, type and value";
+            return 0;
+        }
+        const uint16_t id = (uint16_t)jid->valuedouble;
+        const uint8_t type = (uint8_t)jty->valuedouble;
+        const uint8_t w = iotdata_config_type_size(type);
+        if (id > IOTDATA_CONFIG_ID_MAX || w == 0) {
+            *why = "id out of range, or a type that has no fixed width";
+            return 0;
+        }
+        if (at + 2u + w > size) {
+            *why = "the write would not fit one frame";
+            return 0;
+        }
+        const uint16_t rec = (uint16_t)iotdata_config_rec(id, type);
+        out[at++] = (uint8_t)(rec >> 8);
+        out[at++] = (uint8_t)rec;
+        /* Signed and float go in by their own bit pattern; everything else is the integer. The node
+           re-reads it through its own table, so a value that disagrees with the row is refused
+           THERE -- which is the only place that knows the bounds. */
+        uint64_t raw;
+        if (type == IOTDATA_CONFIG_TYPE_FLOAT) {
+            const float f = (float)jvl->valuedouble;
+            uint32_t bits;
+            memcpy(&bits, &f, sizeof(bits));
+            raw = bits;
+        } else if (iotdata_config_type_is_signed(type))
+            raw = (uint64_t)(int64_t)jvl->valuedouble;
+        else
+            raw = (uint64_t)jvl->valuedouble;
+        for (uint8_t b = 0; b < w; b++)
+            out[at++] = (uint8_t)(raw >> (8u * (w - 1u - b)));
+    }
+    return at;
+}
+
 static void ctrl_from_message(const char *topic __attribute__((unused)), const unsigned char *payload, const int len) {
     ctrl_state_t *const st = g_ctrl;
     st->stat_req_rx++;
@@ -181,7 +260,40 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
         const iotdata_control_command_t *const c = iotdata_control_from_json(root, &args);
         const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
         const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
-        if (c != NULL) {
+        /* A config write is not a command, so it does not come through iotdata_control_from_json --
+           it is a CONFIG TLV, and it only borrows this path's targeting and staging. */
+        const bool is_config_set = (strcmp(cmd, "conf-set") == 0);
+        if (is_config_set) {
+            const char *why = "bad conf-set";
+            uint8_t built[CTRL_PAYLOAD_CONFIG_MAX];
+            const size_t n = ctrl_config_build(root, built, sizeof(built), &why);
+            uint16_t target = IOTDATA_STATION_BROADCAST;
+            const cJSON *const jt = cJSON_GetObjectItem(root, "target");
+            if (cJSON_IsString(jt) && jt->valuestring != NULL)
+                target = (uint16_t)strtoul(jt->valuestring, NULL, 0);
+            else if (cJSON_IsNumber(jt))
+                target = (uint16_t)jt->valuedouble;
+            if (n == 0) {
+                ctrl_respond_error(st, cmd, why);
+                st->stat_req_bad++;
+            } else {
+                const buffer_handle_t h = buffer_acquire(st->pool);
+                const uint32_t now_ms = hw_time_ms();
+                if (h == BUFFER_NONE) {
+                    ctrl_respond_error(st, cmd, "no frame buffer");
+                    st->stat_req_bad++;
+                } else {
+                    (void)buffer_write(st->pool, h, built, (uint16_t)n);
+                    if (buffer_queue_add(&st->queue, h, now_ms, now_ms + CTRL_QUEUE_TTL_MS, CTRL_TAG_CONFIG, target))
+                        PRINTF_INFO("ctrl: conf-set target=%03" PRIX16 " -> %zu byte config\n", target, n);
+                    else {
+                        ctrl_respond_error(st, cmd, "busy: nothing staged");
+                        st->stat_req_bad++;
+                    }
+                    buffer_unref(st->pool, h);
+                }
+            }
+        } else if (c != NULL) {
             /* Built ONCE: every target gets the same payload and differs only in where the DOWN
                frame is addressed, so the fan-out is a copy per target rather than a rebuild. */
             uint8_t built[CTRL_PAYLOAD_MAX];
@@ -396,9 +508,10 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
     if (stale > 0)
         PRINTF_WARN("ctrl: %u staged command(s) expired unsent\n", (unsigned)stale);
     uint32_t target = 0;
-    const buffer_handle_t h = buffer_queue_take(&st->queue, now_ms, NULL, &target);
+    uint8_t tag = 0;
+    const buffer_handle_t h = buffer_queue_take(&st->queue, now_ms, &tag, &target);
     if (h != BUFFER_NONE) {
-        node_on_mqtt(ns, buffer_data(st->pool, h), buffer_len(st->pool, h), (uint16_t)target);
+        node_on_mqtt(ns, buffer_data(st->pool, h), buffer_len(st->pool, h), (uint16_t)target, ctrl_tag_tlv(tag));
         buffer_unref(st->pool, h); /* the reference the queue handed over */
     }
     const time_t now = time(NULL);
