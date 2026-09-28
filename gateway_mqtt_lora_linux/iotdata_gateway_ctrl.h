@@ -19,10 +19,15 @@
 #define CTRL_PAYLOAD_CONFIG_MAX IOTDATA_TLV_VALUE_MAX
 #define CTRL_QUEUE_TTL_MS       30000 /* a command nobody could send in 30s is stale, not queued */
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 /* What a staged payload IS, so the drain knows which TLV to put it in. A command is a CONTROL kvr;
    a config write is a CONFIG record stream, because a write is not a verb and does not need one. */
 #define CTRL_TAG_CONTROL        1
 #define CTRL_TAG_CONFIG         2
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static const char *ctrl_tag_name(const uint8_t tag) {
     switch (tag) {
@@ -34,6 +39,8 @@ static const char *ctrl_tag_name(const uint8_t tag) {
         return "NONE";
     }
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 /* The TLV a tag travels as. */
 static uint8_t ctrl_tag_tlv(const uint8_t tag) {
@@ -106,6 +113,8 @@ static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
     }
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static cJSON *ctrl_respond_begin(const char *const resp, const char *const cmd) {
     cJSON *const root = cJSON_CreateObject();
     if (root != NULL) {
@@ -115,6 +124,8 @@ static cJSON *ctrl_respond_begin(const char *const resp, const char *const cmd) 
     return root;
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void ctrl_respond_diag(ctrl_state_t *const st, const char *const cmd, const char *const text) {
     cJSON *const root = ctrl_respond_begin("diag", cmd);
     if (root != NULL) {
@@ -123,6 +134,8 @@ static void ctrl_respond_diag(ctrl_state_t *const st, const char *const cmd, con
         ctrl_respond(st, root);
     }
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void ctrl_respond_diag_record(ctrl_state_t *const st, const char *const cmd, const int index, const char *const record) {
     cJSON *const root = ctrl_respond_begin("diag", cmd);
@@ -134,6 +147,8 @@ static void ctrl_respond_diag_record(ctrl_state_t *const st, const char *const c
     }
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void ctrl_respond_error(ctrl_state_t *const st, const char *const cmd, const char *const text) {
     cJSON *const root = ctrl_respond_begin("error", cmd);
     if (root != NULL) {
@@ -143,17 +158,23 @@ static void ctrl_respond_error(ctrl_state_t *const st, const char *const cmd, co
     PRINTF_ERROR("ctrl: %s: %s\n", cmd, text);
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void ctrl_diag_enable(const bool on) {
     ctrl_state_t *const st = g_ctrl;
     blackbox_enable(&st->bbox->handle, on);
     ctrl_respond_diag(st, on ? "diag-enable" : "diag-disable", on ? "enabled" : "disabled");
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void ctrl_diag_clear(void) {
     ctrl_state_t *const st = g_ctrl;
     blackbox_clear(&st->bbox->handle);
     ctrl_respond_diag(st, "diag-clear", "cleared");
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void ctrl_diag_dump(void) {
     ctrl_state_t *const st = g_ctrl;
@@ -163,6 +184,8 @@ static void ctrl_diag_dump(void) {
         ctrl_respond_diag_record(st, "diag-dump", n++, st->_buffer_blackbox_rec);
     ctrl_respond_diag(st, "diag-dump", snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "dumped %d records", n));
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 /* A CONFIG WRITE, built from JSON into the [id|type][value] record stream the node expects.
  *
@@ -225,6 +248,8 @@ static size_t ctrl_config_build(const cJSON *const root, uint8_t *const out, con
     }
     return at;
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void ctrl_from_message(const char *topic __attribute__((unused)), const unsigned char *payload, const int len) {
     ctrl_state_t *const st = g_ctrl;
@@ -335,6 +360,8 @@ static void ctrl_report_peers(const stat_state_t *const s) {
     }
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void ctrl_report_filter(const filter_t *const f) {
     PRINTF_INFO("exec: filters - %d\n", filter_count(f));
     iotdata_order_t ord[sizeof(f->e) / sizeof(f->e[0])];
@@ -407,6 +434,8 @@ static bool ctrl_action_status(process_state_t *const st, const uint8_t action, 
     }
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static bool ctrl_action_mesh(process_state_t *const st, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
     switch (action) {
     case IOTDATA_NODE_ACTION_MESH_PEERS_DUMP:
@@ -437,6 +466,8 @@ static bool ctrl_action_mesh(process_state_t *const st, const uint8_t action, co
     }
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static bool ctrl_action_diag(const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
     switch (action) {
     case IOTDATA_NODE_ACTION_DIAGNOSTICS_ENABLE: {
@@ -458,6 +489,8 @@ static bool ctrl_action_diag(const uint8_t action, const uint8_t *const val, con
         return false; /* not ours: the node layer counts it unknown */
     }
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool ctrl_from_iotdata(const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
     process_state_t *const st = g_exec;

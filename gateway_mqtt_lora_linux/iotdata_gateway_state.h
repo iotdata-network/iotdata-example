@@ -7,19 +7,17 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
-    const char *mqtt_topic_prefix;
-    bool capture_rssi_packet;
-    time_t stat_display_interval;
     time_t stat_display_interval_last;
-    time_t stat_publish_interval;
     time_t stat_publish_interval_last;
-    time_t stat_netw_interval;
     time_t stat_netw_interval_last;
     netw_t network;  /* stations heard (mesh + sensor), printed every stat-network-interval */
     filter_t filter; /* per-station RX allow/block, exactly as a relay has one */
     node_state_t *state_node;
     mesh_state_t *state_mesh;
     ddup_state_t *state_ddup;
+    /* borrowed, and NULL unless ddup auto-peering is on: the presence channel is the only thing
+       that keeps an auto peer table fresh, and it is ticked from the process loop */
+    struct peer_presence_s *state_peer;
     stat_state_t *state_stat;
     char _buffer_mqtt_topic[256], _buffer_mqtt_message[1024];
     iotdata_decode_to_json_scratch_t _iotdata_scratch;

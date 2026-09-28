@@ -119,10 +119,10 @@ typedef struct {
     stat_totals_t totals; /* rx_ok / rx_drop at that moment */
     uint32_t forwards_rx, forwards_unwrapped, duplicates, beacons_tx, acks_tx, ctrl_rx, ctrl_err;
     uint32_t send_cycles, send_entries, recv_cycles, recv_entries, injected;
+    uint32_t held, released, dropped_peer; /* the election, reported as deltas like the rest */
 } stat_delta_t;
 
 typedef struct {
-    char mqtt_topic[STAT_TOPIC_STR_MAX];
     const char *version;
     idep_node_t *inode;
     time_t start_time;
@@ -466,6 +466,38 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         cJSON_AddNumberToObject(d, "recv_errors", (double)ddup->stat_recv_errors);
         cJSON_AddNumberToObject(d, "injected", (double)ddup->stat_injected);
         cJSON_AddNumberToObject(d, "pending_overflow", (double)ddup->stat_pending_overflow);
+        /*
+         * THE ELECTION, which the counters above say nothing about. `duplicates` is what the ring
+         * killed -- copies that arrived LATER. Everything below is the other kind: copies that
+         * arrived at the SAME INSTANT on two gateways, which only the hold-and-elect can separate.
+         *
+         * held/released/dropped_peer is the whole story of it. A site where dropped_peer stays zero
+         * while held climbs is a site whose peers are not answering; hold_overflow is the queue
+         * giving up and publishing un-held, which is a degrade rather than a loss but wants seeing.
+         *
+         * The hold is TUNED, so the three rails are reported together: the dynamic value sits
+         * between the floor and the configured ceiling, and claim_latency is the measurement that
+         * moves it. A dynamic hold pinned at the ceiling with few samples means it has not learned
+         * yet; pinned at the ceiling with many means the peers really are that slow.
+         */
+        cJSON_AddNumberToObject(d, "duplicates", (double)ddup->stat_duplicates);
+        cJSON_AddNumberToObject(d, "held", (double)ddup->stat_held);
+        cJSON_AddNumberToObject(d, "released", (double)ddup->stat_released);
+        cJSON_AddNumberToObject(d, "dropped_peer", (double)ddup->stat_dropped_peer);
+        cJSON_AddNumberToObject(d, "hold_overflow", (double)ddup->stat_hold_overflow);
+        cJSON_AddNumberToObject(d, "hold_ms", (double)ddup->hold_ms);                 /* the configured ceiling */
+        cJSON_AddNumberToObject(d, "hold_ms_floor", (double)DDUP_HOLD_FLOOR_MS);      /* the floor it never goes under */
+        cJSON_AddNumberToObject(d, "hold_ms_dynamic", (double)ddup->hold_ms_dynamic); /* what it is actually using */
+        cJSON *cl = cJSON_AddObjectToObject(d, "claim_latency_ms");
+        cJSON_AddNumberToObject(cl, "avg", ddup->claim_latency_count ? (double)ddup->claim_latency_sum_ms / (double)ddup->claim_latency_count : 0.0);
+        cJSON_AddNumberToObject(cl, "max", (double)ddup->claim_latency_max_ms);
+        cJSON_AddNumberToObject(cl, "samples", (double)ddup->claim_latency_count);
+        /* the auto-peer channel: expired is a peer whose presence stopped advancing (its box or its
+           bridge died where the last will could not reach us), id_clash is two gateways sharing an
+           id -- which breaks the election outright, since neither can be the lower */
+        cJSON_AddNumberToObject(d, "peers_expired", (double)ddup->stat_peers_expired);
+        cJSON_AddNumberToObject(d, "id_clash", (double)ddup->stat_id_clash);
+        cJSON_AddNumberToObject(d, "recv_unknown", (double)ddup->stat_recv_unknown);
     }
     return root;
 }
@@ -575,8 +607,17 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
         last->ctrl_rx = ctrl_rx;
     }
     if (ddup && ddup->enabled) {
-        STAT_APPEND(", ddup{sends=%" PRIu32 "/%" PRIu32 ", recvs=%" PRIu32 "/%" PRIu32 ", injected=%" PRIu32 "}", ddup->stat_send_cycles - last->send_cycles, ddup->stat_send_entries - last->send_entries,
-                    ddup->stat_recv_cycles - last->recv_cycles, ddup->stat_recv_entries - last->recv_entries, ddup->stat_injected - last->injected);
+        /* held/won/lost are the election in three numbers, and they are DELTAS like everything else
+           on this line. hold is dynamic/ceiling, claim is avg/max over n samples -- the measurement
+           that moves the dynamic one, so the two are only readable together. */
+        const uint32_t cl_avg = ddup->claim_latency_count ? (uint32_t)(ddup->claim_latency_sum_ms / ddup->claim_latency_count) : 0;
+        STAT_APPEND(", ddup{sends=%" PRIu32 "/%" PRIu32 ", recvs=%" PRIu32 "/%" PRIu32 ", injected=%" PRIu32 ", held=%" PRIu32 ", won=%" PRIu32 ", lost=%" PRIu32 ", hold=%" PRIu32 "/%" PRIu32 "ms, claim=%" PRIu32 "/%" PRIu32 "ms(n%" PRIu32
+                    ")}",
+                    ddup->stat_send_cycles - last->send_cycles, ddup->stat_send_entries - last->send_entries, ddup->stat_recv_cycles - last->recv_cycles, ddup->stat_recv_entries - last->recv_entries, ddup->stat_injected - last->injected,
+                    ddup->stat_held - last->held, ddup->stat_released - last->released, ddup->stat_dropped_peer - last->dropped_peer, ddup->hold_ms_dynamic, ddup->hold_ms, cl_avg, ddup->claim_latency_max_ms, ddup->claim_latency_count);
+        last->held = ddup->stat_held;
+        last->released = ddup->stat_released;
+        last->dropped_peer = ddup->stat_dropped_peer;
         last->send_cycles = ddup->stat_send_cycles;
         last->send_entries = ddup->stat_send_entries;
         last->recv_cycles = ddup->stat_recv_cycles;
@@ -601,7 +642,9 @@ void stat_publish(stat_state_t *const s, const mesh_state_t *const mesh, const d
         char *json = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
         if (json) {
-            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s/%03" PRIX16, s->mqtt_topic, idep_station(s->inode)), json, (int)strlen(json));
+            const char *const mqtt_topic = iotdata_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX);
+            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s%s%03" PRIX16, mqtt_topic, (mqtt_topic[0] != '\0' && mqtt_topic[strlen(mqtt_topic) - 1] == '/') ? "" : "/", idep_station(s->inode)), json,
+                            (int)strlen(json));
             free(json);
         }
     }

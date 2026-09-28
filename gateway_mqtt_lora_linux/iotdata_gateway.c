@@ -275,18 +275,13 @@ static void gateway_state_end(store_state_t *state) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#include "iotdata_gateway_util.h"
-#include "iotdata_gateway_mesh.h"
-#include "iotdata_gateway_ddup.h"
-#include "iotdata_gateway_stat.h"
-#include "iotdata_gateway_node.h"
-#include "iotdata_gateway_netw.h"
-#include "iotdata_gateway_state.h"
-#include "iotdata_gateway_ctrl.h"
-#include "iotdata_gateway_exec.h"
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
+static bool gateway_config_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
+#define IOTDATA_CONFIG_LORA_NOTIFY gateway_config_changed
+#define IOTDATA_CONFIG_MESH_NOTIFY gateway_config_changed
+#define IOTDATA_CONFIG_DDUP_NOTIFY gateway_config_changed
+#define IOTDATA_CONFIG_MQTT_NOTIFY gateway_config_changed
+#define IOTDATA_CONFIG_STAT_NOTIFY gateway_config_changed
+#define IOTDATA_GATEWAY_NOTIFY     gateway_config_changed
 
 #include "iotdata_gateway_conf.h"
 #include "iotdata_node_config.h"
@@ -300,69 +295,16 @@ static const iotdata_console_t s_gateway_cons[] = {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
-    *cfg = (lora_config_t){ 0 };
-    iotdata_config_lora_apply(cfg);
-    *cfg_port = iotdata_config_string(LORA_PORT);
-    cfg->rssi_channel = false;
-    cfg->rssi_packet = true;
-    cfg->debug = iotdata_config_bool(LORA_DEBUG);
-    PRINTF_INFO("config: lora: port=%s, module=USB, address=0x%03" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", packet-size=%" PRIu8 "B, air-rate=%" PRIu16 "bps, transmit-power=%" PRIu8
-                "dBm, listen-before-transmit=%s, rssi-channel=%s, rssi-packet=%s, debug=%s\n",
-                *cfg_port, cfg->e22_address, cfg->e22_network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->air_data_rate, cfg->transmit_power, cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
-                cfg->rssi_packet ? "on" : "off", cfg->debug ? "on" : "off");
-}
-
-void mesh_config_populate(mesh_state_t *cfg) {
-    *cfg = (mesh_state_t){ 0 };
-    cfg->enabled = iotdata_config_bool(MESH_ENABLE);
-    cfg->beacon_interval = (time_t)iotdata_config_u16(MESH_BEACON_INTERVAL_S);
-    cfg->debug = iotdata_config_bool(MESH_DEBUG);
-    PRINTF_INFO("config: mesh: enabled=%c, beacon-interval=%" PRIu32 "s, debug=%s\n", cfg->enabled ? 'y' : 'n', (uint32_t)cfg->beacon_interval, cfg->debug ? "on" : "off");
-}
-
-void mqtt_config_populate(mqtt_config_t *cfg) {
-    *cfg = (mqtt_config_t){ 0 };
-    cfg->client = iotdata_config_string(MQTT_CLIENT);
-    cfg->server = iotdata_config_string(MQTT_SERVER);
-    cfg->tls_insecure = iotdata_config_bool(MQTT_TLS_INSECURE);
-    cfg->synchronous = false;
-    cfg->reconnect_delay = iotdata_config_u16(MQTT_RECONNECT_DELAY);
-    cfg->reconnect_delay_max = iotdata_config_u16(MQTT_RECONNECT_DELAY_MAX);
-    cfg->debug = iotdata_config_bool(MQTT_DEBUG);
-    PRINTF_INFO("config: mqtt: client=%s, server=%s, tls=%s, sync=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, !cfg->tls_insecure ? "on" : "off", cfg->synchronous ? "on" : "off", cfg->reconnect_delay,
-                cfg->reconnect_delay_max);
-}
-
-void ddup_config_populate(ddup_state_t *cfg) {
-    *cfg = (ddup_state_t){ 0 };
-    cfg->enabled = iotdata_config_bool(DDUP_ENABLE);
-    cfg->port = iotdata_config_u16(DDUP_PORT);
-    const char *peers = iotdata_config_string(DDUP_PEERS);
-    ddup_peers_parse(cfg, peers);
-    cfg->delay_ms = iotdata_config_u16(DDUP_DELAY);
-    cfg->debug = iotdata_config_bool(DDUP_DEBUG);
-    PRINTF_INFO("config: ddup: enabled=%c, port=%" PRIu16 ", peers=%s, delay=%" PRIu32 "ms, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->port, peers, cfg->delay_ms, cfg->debug ? "on" : "off");
-}
-
-void stat_config_populate(stat_state_t *cfg) {
-    *cfg = (stat_state_t){ 0 };
-    snprintf(cfg->mqtt_topic, sizeof(cfg->mqtt_topic), "%s", iotdata_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX));
-    const size_t len = strlen(cfg->mqtt_topic);
-    if (len > 0 && cfg->mqtt_topic[len - 1] == '/')
-        cfg->mqtt_topic[len - 1] = '\0';
-    PRINTF_INFO("config: stat: mqtt-topic=%s\n", cfg->mqtt_topic);
-}
-
-void process_config_populate(process_state_t *cfg) {
-    *cfg = (process_state_t){ 0 };
-    cfg->mqtt_topic_prefix = iotdata_config_string(MQTT_TOPIC_PREFIX);
-    cfg->capture_rssi_packet = true;
-    cfg->stat_display_interval = iotdata_config_u16(STAT_DISPLAY_INTERVAL);
-    cfg->stat_publish_interval = iotdata_config_u16(STAT_PUBLISH_INTERVAL);
-    cfg->stat_netw_interval = iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL);
-    cfg->debug = iotdata_config_bool(DEBUG);
-}
+#include "iotdata_gateway_util.h"
+#include "iotdata_gateway_mesh.h"
+#include "iotdata_gateway_ddup.h"
+#include "iotdata_gateway_peer.h"
+#include "iotdata_gateway_stat.h"
+#include "iotdata_gateway_node.h"
+#include "iotdata_gateway_netw.h"
+#include "iotdata_gateway_state.h"
+#include "iotdata_gateway_ctrl.h"
+#include "iotdata_gateway_exec.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -376,6 +318,7 @@ typedef struct {
     mqtt_config_t mqtt_config;
     mesh_state_t mesh_state;
     ddup_state_t ddup_state;
+    peer_presence_t peer_presence;
     stat_state_t stat_state;
     node_state_t node_state;
     ctrl_state_t ctrl_state;
@@ -387,6 +330,31 @@ typedef struct {
 } system_t;
 
 static system_t system_state;
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static bool gateway_config_changed(__attribute__((unused)) const iotdata_config_row_t *const row, __attribute__((unused)) const iotdata_config_value_t *const was, __attribute__((unused)) const iotdata_config_info_t *const info) {
+    system_t *const state = &system_state;
+    state->lora_config.debug = iotdata_config_bool(LORA_DEBUG);
+    _log_enabled = state->lora_config.debug;
+    state->mesh_state.enabled = iotdata_config_bool(MESH_ENABLE);
+    state->mesh_state.debug = iotdata_config_bool(MESH_DEBUG);
+    state->mesh_state.beacon_interval_s = iotdata_config_u16(MESH_BEACON_INTERVAL_S);
+    state->ddup_state.hold_ms = iotdata_config_u32(DDUP_HOLD_MS);
+    if (state->ddup_state.enabled && state->ddup_state.running != NULL)
+        ddup_reconfigure(&state->ddup_state, iotdata_config_string(DDUP_PEERS), iotdata_config_u16(DDUP_DELAY), iotdata_config_bool(DDUP_DEBUG), (unsigned)iotdata_config_u32(DDUP_DEBUG_INJECT_LATENCY_MS));
+    else {
+        state->ddup_state.delay_ms = iotdata_config_u16(DDUP_DELAY);
+        state->ddup_state.debug = iotdata_config_bool(DDUP_DEBUG);
+        state->ddup_state.debug_inject_latency_ms = (unsigned)iotdata_config_u32(DDUP_DEBUG_INJECT_LATENCY_MS);
+    }
+    state->mqtt_config.reconnect_delay = iotdata_config_u16(MQTT_RECONNECT_DELAY);
+    state->mqtt_config.reconnect_delay_max = iotdata_config_u16(MQTT_RECONNECT_DELAY_MAX);
+    state->mqtt_config.debug = iotdata_config_bool(MQTT_DEBUG);
+    state->process_state.debug = iotdata_config_bool(DEBUG);
+    state->process_state.debug_data = _log_enabled;
+    return false; /* already true; FLAG_REBOOT on the row is what asks for a restart */
+}
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -415,14 +383,30 @@ bool system_config(system_t *state, const int argc, char *argv[]) {
     iotdata_config_console_attach(NULL);
     iotdata_console_init(s_gateway_cons, sizeof s_gateway_cons / sizeof s_gateway_cons[0]);
 
-    lora_config_populate(&state->lora_port, &state->lora_config);
-    _log_enabled = state->lora_config.debug;
-    mqtt_config_populate(&state->mqtt_config);
-    mesh_config_populate(&state->mesh_state);
-    ddup_config_populate(&state->ddup_state);
-    stat_config_populate(&state->stat_state);
-    process_config_populate(&state->process_state);
-    state->process_state.debug_data = _log_enabled;
+    state->lora_port = iotdata_config_string(LORA_PORT);
+    state->lora_config = (lora_config_t){ 0 };
+    iotdata_config_lora_apply(&state->lora_config);
+    state->lora_config.rssi_channel = false;
+    state->lora_config.rssi_packet = true;
+
+    state->mesh_state = (mesh_state_t){ 0 };
+
+    state->ddup_state = (ddup_state_t){ 0 };
+    state->ddup_state.enabled = iotdata_config_bool(DDUP_ENABLE);
+    state->ddup_state.port = iotdata_config_u16(DDUP_PORT);
+    ddup_peers_parse(&state->ddup_state, iotdata_config_string(DDUP_PEERS));
+
+    state->mqtt_config = (mqtt_config_t){ 0 };
+    state->mqtt_config.client = iotdata_config_string(MQTT_CLIENT);
+    state->mqtt_config.server = iotdata_config_string(MQTT_SERVER);
+    state->mqtt_config.tls_insecure = iotdata_config_bool(MQTT_TLS_INSECURE);
+    state->mqtt_config.synchronous = false;
+
+    state->stat_state = (stat_state_t){ 0 };
+
+    state->process_state = (process_state_t){ 0 };
+
+    (void)gateway_config_changed(NULL, NULL, NULL);
 
     state->running = false;
 
@@ -488,6 +472,13 @@ int main(int argc, char *argv[]) {
     }
     PRINTF_INFO("device: connect success (port=%s)\n", state->lora_port);
 
+    /* THE WILL, BEFORE THE CONNECT. A last will is registered as part of CONNECT, so setting it
+       afterwards sets it for a session that has already begun without one -- and the whole point of
+       it is to clear our presence if this process dies without saying so. Only the topic is needed
+       here; the ddup state it reads is already configured. */
+    if (state->ddup_state.enabled && state->ddup_state.auto_peer)
+        peer_presence_init(&state->peer_presence, &state->ddup_state, idep_station(&state->inode));
+
     // MQTT BROKER
     if (!mqtt_begin(&state->mqtt_config))
         goto end_device;
@@ -497,23 +488,36 @@ int main(int argc, char *argv[]) {
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
     (void)netw_begin(&state->process_state.network);
     if (!node_begin(&state->node_state, &state->inode, &state->iotd_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row,
-                    ctrl_from_iotdata_keys, (uint8_t)(sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0])), state->process_state.mqtt_topic_prefix))
+                    ctrl_from_iotdata_keys, (uint8_t)(sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0])), iotdata_config_string(MQTT_TOPIC_PREFIX)))
         goto end_mqtt;
     node_settings_attach(&state->node_state, &gateway_settings, &state->store_state.node);
     if (!mesh_begin(&state->mesh_state, &state->inode, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
         goto end_node;
-    if (!ddup_begin(&state->ddup_state, &state->inode, &state->mesh_state.dedup_ring, &state->running))
+    /* BY VALUE, not by node: ddup keeps its own copy of the gateway id because the election compares
+       it on the receive thread, and reaching through a node from there would be a second reader of
+       something the main loop can change. gateway_config_changed() refreshes it -- see there. */
+    if (!ddup_begin(&state->ddup_state, idep_station(&state->inode), &state->mesh_state.dedup_ring, &state->running))
         goto end_mesh;
-    if (!ctrl_begin(&state->ctrl_state, state->process_state.mqtt_topic_prefix, &state->inode, &state->bbox_state, &s_pool))
+    if (!ctrl_begin(&state->ctrl_state, iotdata_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->bbox_state, &s_pool))
         goto end_ddup;
+    /* AND THE SUBSCRIPTION AFTER ddup_begin(), not with the will above: a retained presence can be
+       delivered the instant we subscribe, and the handler calls into ddup's peer table -- whose
+       mutex does not exist until ddup_begin() has run. */
+    if (state->ddup_state.enabled && state->ddup_state.auto_peer) {
+        peer_presence_start(&state->peer_presence);
+        state->process_state.state_peer = &state->peer_presence; /* NULL otherwise: the loop skips it */
+    }
 
     // PROCESS
     gateway_state_restore(&state->store_state);
-    stat_begin(&state->stat_state, state->process_state.mqtt_topic_prefix, &state->inode, IOTDATA_GATEWAY_VERSION, &state->lora_config, &s_pool);
+    stat_begin(&state->stat_state, iotdata_config_string(MQTT_TOPIC_PREFIX), &state->inode, IOTDATA_GATEWAY_VERSION, &state->lora_config, &s_pool);
     state->process_state.pool = &s_pool;
     ret = process_run(&state->process_state, &state->store_state.node, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
     stat_end(&state->stat_state);
 
+    /* say we have gone, rather than leaving the broker to notice: a clean exit clears the retained
+       presence at once, where the will only fires when the connection drops */
+    peer_presence_shutdown(&state->peer_presence);
     ctrl_end(&state->ctrl_state);
 end_ddup:
     ddup_end(&state->ddup_state);

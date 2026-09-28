@@ -28,6 +28,21 @@ typedef struct {
 
 struct mosquitto *mosq = NULL;
 void (*mqtt_message_callback)(const char *, const unsigned char *, const int) = NULL;
+
+/*
+ * A SECOND SUBSCRIBER, ROUTED BY TOPIC PREFIX.
+ *
+ * mqtt_subscribe() keeps ONE global callback, so a second call used to silently replace the first
+ * -- which was fine while the control channel was the only subscriber and is not fine now that ddup
+ * peer presence is another. Rather than give every caller a router, the one extra channel gets a
+ * prefix and a handler of its own, and the dispatcher below sends a message to whichever matches.
+ *
+ * Two is not a general mechanism and does not pretend to be. A third subscriber is the point at
+ * which this wants a real table.
+ */
+static char mqtt_aux_prefix[96] = "";
+static void (*mqtt_aux_callback)(void *, const char *, const void *, int) = NULL;
+static void *mqtt_aux_ctx = NULL;
 bool mqtt_synchronous = false;
 bool mqtt_connected = false;
 uint32_t mqtt_stat_connects = 0;
@@ -66,8 +81,59 @@ bool mqtt_send(const char *topic, const char *message, const int length) {
 static void __mqtt_message_callback_wrapper(struct mosquitto *m, void *o __attribute__((unused)), const struct mosquitto_message *message) {
     if (m != mosq)
         return;
+    /* the aux channel first and exclusively: its prefix is what distinguishes it, and a message it
+       owns must not also reach the control handler, which would try to parse it as a command */
+    if (mqtt_aux_callback != NULL && mqtt_aux_prefix[0] != '\0' && strncmp((const char *)message->topic, mqtt_aux_prefix, strlen(mqtt_aux_prefix)) == 0) {
+        mqtt_aux_callback(mqtt_aux_ctx, (const char *)message->topic, message->payload, message->payloadlen);
+        return;
+    }
     if (mqtt_message_callback)
         mqtt_message_callback((const char *)message->topic, message->payload, message->payloadlen);
+}
+
+/* Subscribe a second channel, with its own context. `prefix` is what the dispatcher matches on --
+   the subscription pattern's fixed part, e.g. "iotdata/ddup/" for "iotdata/ddup/#". */
+bool mqtt_subscribe_aux(const char *const pattern, const char *const prefix, void (*callback)(void *, const char *, const void *, int), void *const ctx) {
+    if (!mosq)
+        return false;
+    snprintf(mqtt_aux_prefix, sizeof(mqtt_aux_prefix), "%s", prefix);
+    mqtt_aux_callback = callback;
+    mqtt_aux_ctx = ctx;
+    const int result = mosquitto_subscribe(mosq, NULL, pattern, MQTT_PUBLISH_QOS);
+    if (result != MOSQ_ERR_SUCCESS) {
+        PRINTF_ERROR("mqtt: subscribe error: %s\n", mosquitto_strerror(result));
+        return false;
+    }
+    PRINTF_INFO("mqtt: subscribed to aux topic '%s'\n", pattern);
+    return true;
+}
+
+/*
+ * RETAINED publish, and a NULL payload is how a retained topic is CLEARED -- an empty retained
+ * message is the broker's own way of saying "this is no longer true", and it is what a last will
+ * publishes on our behalf if we die without saying it.
+ */
+bool mqtt_send_retained(const char *const topic, const char *const message, const int length) {
+    if (!mosq || !mqtt_connected) {
+        mqtt_stat_publish_errors++;
+        return false;
+    }
+    const int result = mosquitto_publish(mosq, NULL, topic, length, (length > 0) ? message : NULL, MQTT_PUBLISH_QOS, true);
+    if (result != MOSQ_ERR_SUCCESS) {
+        mqtt_stat_publish_errors++;
+        PRINTF_ERROR("mqtt: retained publish error: %s\n", mosquitto_strerror(result));
+        return false;
+    }
+    mqtt_stat_publishes++;
+    mqtt_stat_publish_bytes += (uint64_t)((length > 0) ? length : 0);
+    return true;
+}
+
+/* THE WILL IS REGISTERED AT CONNECT, so this has to be called BEFORE mqtt_begin(). Held here and
+   applied there, rather than taking a second connect path. */
+static char mqtt_will_topic[96] = "";
+void mqtt_set_will(const char *const topic) {
+    snprintf(mqtt_will_topic, sizeof(mqtt_will_topic), "%s", (topic != NULL) ? topic : "");
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -212,6 +278,10 @@ bool mqtt_begin(const mqtt_config_t *cfg) {
             PRINTF_INFO("mqtt: WARNING tls certificate validation disabled\n");
         }
     }
+    /* BEFORE the connect: a will set afterwards is a will the broker never heard about. Empty and
+       retained, so a death clears our presence exactly as a clean shutdown would. */
+    if (mqtt_will_topic[0] != '\0')
+        (void)mosquitto_will_set(mosq, mqtt_will_topic, 0, NULL, MQTT_PUBLISH_QOS, true);
     mosquitto_connect_callback_set(mosq, __mqtt_connect_callback);
     mosquitto_disconnect_callback_set(mosq, __mqtt_disconnect_callback);
     mosquitto_message_callback_set(mosq, __mqtt_message_callback_wrapper);

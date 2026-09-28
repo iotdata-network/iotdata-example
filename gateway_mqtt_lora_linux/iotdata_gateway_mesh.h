@@ -15,10 +15,13 @@ typedef struct {
 } mesh_ctrl_stat_t;
 
 typedef struct {
-    /* CONFIGURATION, from the shared mesh rows -- see mesh_config_populate(). */
+    /* CACHED FROM THE CONFIG TABLE, and kept fresh by gateway_config_recache() rather than re-read.
+       The receive path touches these per frame and the beacon interval every loop, which is the
+       whole reason they are copies; the cost of a copy is that something has to refresh it, and
+       that is what the notify on these rows is for. */
     bool enabled;
-    time_t beacon_interval; /* seconds between beacon transmissions (MESH_BEACON_INTERVAL_S) */
     bool debug;
+    uint16_t beacon_interval_s; /* the root's cadence -- ours, and stated in every beacon we send */
 
     uint16_t beacon_generation;           /* increments each beacon round */
     time_t beacon_last;                   /* last beacon TX time */
@@ -86,7 +89,7 @@ bool mesh_transmit_beacon(mesh_state_t *st) {
                                                      .cost = 0,
                                                      .flags = IOTDATA_MESH_FLAG_ACCEPTING,
                                                      .generation = st->beacon_generation,
-                                                     .interval_s = (uint16_t)st->beacon_interval,
+                                                     .interval_s = st->beacon_interval_s,
                                                  });
         if (st->debug)
             PRINTF_INFO("mesh: tx BEACON generation=%" PRIu16 ", station=%03" PRIX16 "\n", st->beacon_generation, idep_station(st->inode));
@@ -250,21 +253,14 @@ bool mesh_receive_pong(mesh_state_t *st, const uint8_t *buf, int len) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool mesh_begin(mesh_state_t *st, idep_node_t *inode, buffer_pool_t *pool, mesh_packet_handler_t packet_handler, mesh_dedup_handler_t dedup_handler, void *dedup_handler_ctx) {
-    st->pool = pool; /* before the enabled check: a disabled mesh never transmits, but never half-built either */
+    assert(packet_handler);
+    st->pool = pool;
     st->inode = inode;
-    if (!st->enabled) {
-        PRINTF_INFO("mesh: disabled, not starting\n");
-        return true;
-    }
-    if (!packet_handler) {
-        PRINTF_INFO("mesh: packet handler is required, not starting\n");
-        return true;
-    }
     st->packet_handler = packet_handler;
     st->dedup_handler = dedup_handler;
     st->dedup_handler_ctx = dedup_handler_ctx;
     iotdata_mesh_dedup_init(&st->dedup_ring);
-    PRINTF_INFO("mesh: enabled, station=%03" PRIX16 ", beacon-interval=%" PRIu32 "s\n", idep_station(st->inode), (uint32_t)st->beacon_interval);
+    PRINTF_INFO("mesh: %s, station=%03" PRIX16 ", beacon-interval=%" PRIu16 "s\n", st->enabled ? "enabled" : "disabled", idep_station(st->inode), st->beacon_interval_s);
     return true;
 }
 
