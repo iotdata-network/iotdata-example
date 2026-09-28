@@ -1373,7 +1373,7 @@ static bool stat_peer_present(const stat_state_t *s, uint16_t station_id) {
    nothing ever reads past the count. What that gives up is the ability to spot a stale slot, so the
    duplicate check below is doing the work of catching a removal that forgot to decrement. */
 static bool stat_is_dense(const stat_state_t *s) {
-    if (s->stations_count < 0 || s->stations_count > STAT_MAX_STATIONS || s->peers_count < 0 || s->peers_count > STAT_MESH_PEERS_MAX)
+    if (s->stations_count < 0 || s->stations_count > STAT_STATIONS_MAX || s->peers_count < 0 || s->peers_count > STAT_MESH_PEERS_MAX)
         return false;
     for (int i = 0; i < s->stations_count; i++) {
         if (s->stations[i].station_id == 0)
@@ -1413,35 +1413,35 @@ static bool test_stat_station_create_and_find(void) {
 static bool test_stat_station_fill_and_evict(void) {
     static stat_state_t s;
     memset(&s, 0, sizeof(s));
-    for (int i = 0; i < STAT_MAX_STATIONS; i++) {
+    for (int i = 0; i < STAT_STATIONS_MAX; i++) {
         stat_station_t *const e = stat_station_find_or_create(&s, (uint16_t)(0x400 + i), time(NULL));
         e->last_seen = 9000 - i; /* DEscending: the stalest is the LAST slot, not the first, so an
                                     "always evict index 0" bug cannot pass by coincidence */
     }
-    ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);
+    ASSERT_EQ_INT(s.stations_count, STAT_STATIONS_MAX);
     ASSERT_COUNT_STAT(&s);
 
     (void)stat_station_find_or_create(&s, 0xABC, time(NULL)); /* full -> evicts the stalest */
-    ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);       /* count saturates */
+    ASSERT_EQ_INT(s.stations_count, STAT_STATIONS_MAX);       /* count saturates */
     ASSERT_COUNT_STAT(&s);
     ASSERT(stat_station_present(&s, 0xABC));
-    ASSERT(!stat_station_present(&s, 0x400 + STAT_MAX_STATIONS - 1)); /* the stalest went */
+    ASSERT(!stat_station_present(&s, 0x400 + STAT_STATIONS_MAX - 1)); /* the stalest went */
     ASSERT(stat_station_present(&s, 0x400));                          /* the freshest stayed */
-    ASSERT(stat_station_present(&s, 0x400 + STAT_MAX_STATIONS - 2));  /* and only one went */
+    ASSERT(stat_station_present(&s, 0x400 + STAT_STATIONS_MAX - 2));  /* and only one went */
     return true;
 }
 
 static bool test_stat_station_all_findable(void) {
     static stat_state_t s;
     memset(&s, 0, sizeof(s));
-    for (int i = 0; i < STAT_MAX_STATIONS; i++)
+    for (int i = 0; i < STAT_STATIONS_MAX; i++)
         (void)stat_station_find_or_create(&s, (uint16_t)(0x600 + i), time(NULL));
     int found = 0; /* a scan bound that cut short would re-create instead of finding */
     for (int i = 0; i < s.stations_count; i++)
         if (stat_station_find_or_create(&s, s.stations[i].station_id, time(NULL)) == &s.stations[i])
             found++;
-    ASSERT_EQ_INT(found, STAT_MAX_STATIONS);
-    ASSERT_EQ_INT(s.stations_count, STAT_MAX_STATIONS);
+    ASSERT_EQ_INT(found, STAT_STATIONS_MAX);
+    ASSERT_EQ_INT(s.stations_count, STAT_STATIONS_MAX);
     ASSERT_COUNT_STAT(&s);
     return true;
 }
@@ -2321,7 +2321,7 @@ __attribute__((format(printf, 1, 2))) static void test_quiet_emit(const char *fm
     (void)fmt;
 }
 
-static bool test_gateway_config_adapters_and_overlay(void) {
+static bool test_gateway_config_load_and_overlay(void) {
     char dir[] = "/tmp/iotdata-gwcfg-XXXXXX";
     ASSERT(mkdtemp(dir) != NULL);
     char cfg[256], ovl[256], line[512];
@@ -2330,21 +2330,30 @@ static bool test_gateway_config_adapters_and_overlay(void) {
 
     FILE *f = fopen(cfg, "w");
     ASSERT(f != NULL);
-    fputs("# the operator's file\nmqtt-server = mqtt://10.0.0.1:1883\nlora-channel = 42\nmesh-beacon-interval = 90\n", f);
+    fputs("# the operator's file\nmqtt-server = mqtt://10.0.0.1:1883\nlora-channel = 42\nmesh-beacon-interval-s = 90\n", f);
     fclose(f);
 
-    /* the adapters read the table, and the table is at its defaults until something loads */
+    /* the table is at its defaults until something loads */
     iotdata_config_defaults();
-    ASSERT(!strcmp(config_get_string("mqtt-server", "?"), MQTT_SERVER_DEFAULT));
-    ASSERT_EQ_INT(config_get_integer("lora-channel", -1), IOTDATA_CONFIG_LORA_CHANNEL);
+    /* against the SHARED block's default, which is where the gateway's now comes from: the local
+       MQTT_*_DEFAULT overrides are gone, so this is the one statement of it left to test against */
+    ASSERT(!strcmp(iotdata_config_string(MQTT_SERVER), IOTDATA_CONFIG_MQTT_SERVER));
+    ASSERT_EQ_INT(iotdata_config_u8(LORA_CHANNEL), IOTDATA_CONFIG_LORA_CHANNEL);
 
     /* the operator's file, then the overlay (absent), then nothing on the command line */
     char *argv[] = { (char *)(uintptr_t)"gw", (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl };
     ASSERT(gateway_config_load(5, argv));
-    ASSERT(!strcmp(config_get_string("mqtt-server", "?"), "mqtt://10.0.0.1:1883"));
-    ASSERT_EQ_INT(config_get_integer("lora-channel", -1), 42);
-    ASSERT_EQ_INT(config_get_integer("mesh-beacon-interval", -1), 90);
-    ASSERT(!config_get_bool("mesh-enable", true)); /* untouched: the table's default stands */
+    ASSERT(!strcmp(iotdata_config_string(MQTT_SERVER), "mqtt://10.0.0.1:1883"));
+    ASSERT_EQ_INT(iotdata_config_u8(LORA_CHANNEL), 42);
+    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 90);
+    ASSERT(!iotdata_config_bool(MESH_ENABLE)); /* untouched: the table's default stands */
+
+    /* BY NAME, which is the only way the file loader can reach a row: every other read in this
+       test is a compile-time id, so without this nothing would notice the day a row's spelling and
+       its key stopped agreeing. Dashes for underscores, and case-insensitive, as a file writes it. */
+    ASSERT_EQ_INT(iotdata_config_index_by_name("mesh-beacon-interval-s"), (int)IOTDATA_CFG_IX_MESH_BEACON_INTERVAL_S);
+    ASSERT_EQ_INT(iotdata_config_index_by_name("MESH_BEACON_INTERVAL_S"), (int)IOTDATA_CFG_IX_MESH_BEACON_INTERVAL_S);
+    ASSERT_EQ_INT(iotdata_config_index_by_name("nonesuch"), -1);
 
     /* THROUGH THE CONSOLE, which is the path an operator actually uses: `conf debug true`. */
     gateway_config_overlay_path = ovl;
@@ -2353,7 +2362,7 @@ static bool test_gateway_config_adapters_and_overlay(void) {
     {
         char *cargv[3] = { (char *)(uintptr_t)"conf", (char *)(uintptr_t)"debug", (char *)(uintptr_t)"true" };
         iotdata_config_console(test_quiet_emit, 3, cargv);
-        ASSERT(config_get_bool("debug", false));
+        ASSERT(iotdata_config_bool(DEBUG));
         f = fopen(ovl, "r");
         ASSERT(f != NULL);
         bool wrote = false;
@@ -2375,7 +2384,7 @@ static bool test_gateway_config_adapters_and_overlay(void) {
             if (line[0] == '#' || line[0] == '\n')
                 continue;
             keys++;
-            if (strstr(line, "mqtt-server") != NULL || strstr(line, "lora-channel") != NULL || strstr(line, "mesh-beacon-interval") != NULL)
+            if (strstr(line, "mqtt-server") != NULL || strstr(line, "lora-channel") != NULL || strstr(line, "mesh-beacon-interval-s") != NULL)
                 leaked_theirs = true; /* these came from the .cfg, not from a runtime change */
         }
         fclose(f);
@@ -2389,17 +2398,17 @@ static bool test_gateway_config_adapters_and_overlay(void) {
     {
         iotdata_config_update_t u;
         iotdata_config_update_begin(&u);
-        ASSERT(iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL, &(iotdata_config_value_t){ .u = 120 }));
+        ASSERT(iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
         ASSERT(iotdata_config_update_commit(&u, NULL, NULL));
     }
-    ASSERT_EQ_INT(config_get_integer("mesh-beacon-interval", -1), 120);
+    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 120);
 
     /* the overlay is TEXT, beside the operator's file, and names the key the way the file does */
     f = fopen(ovl, "r");
     ASSERT(f != NULL);
     bool seen = false;
     while (fgets(line, sizeof(line), f) != NULL)
-        if (strstr(line, "mesh-beacon-interval") != NULL && strstr(line, "120") != NULL)
+        if (strstr(line, "mesh-beacon-interval-s") != NULL && strstr(line, "120") != NULL)
             seen = true;
     fclose(f);
     ASSERT(seen);
@@ -2409,7 +2418,7 @@ static bool test_gateway_config_adapters_and_overlay(void) {
     ASSERT(f != NULL);
     bool original = false;
     while (fgets(line, sizeof(line), f) != NULL)
-        if (strstr(line, "mesh-beacon-interval") != NULL && strstr(line, "90") != NULL)
+        if (strstr(line, "mesh-beacon-interval-s") != NULL && strstr(line, "90") != NULL)
             original = true;
     fclose(f);
     ASSERT(original);
@@ -2419,8 +2428,8 @@ static bool test_gateway_config_adapters_and_overlay(void) {
     iotdata_config_defaults();
     memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
     ASSERT(gateway_config_load(5, argv));
-    ASSERT_EQ_INT(config_get_integer("mesh-beacon-interval", -1), 120); /* the overlay beat the file */
-    ASSERT_EQ_INT(config_get_integer("lora-channel", -1), 42);          /* and the file still holds what it holds */
+    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 120); /* the overlay beat the file */
+    ASSERT_EQ_INT(iotdata_config_u8(LORA_CHANNEL), 42);          /* and the file still holds what it holds */
 
     (void)remove(cfg);
     (void)remove(ovl);
@@ -2445,7 +2454,7 @@ static bool test_gateway_settings_fused_and_pinned(void) {
 
     FILE *f = fopen(cfg, "w");
     ASSERT(f != NULL);
-    fputs("station-id = 7\nnode-interval = 90\nnode-report-status-period = 1800\n", f);
+    fputs("node-station = 7\nnode-interval = 90\nnode-report-status-period = 1800\n", f);
     fclose(f);
 
     iotdata_config_defaults();
@@ -2457,7 +2466,8 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     char *argv[] = { (char *)(uintptr_t)"gw", (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl };
     ASSERT(gateway_config_load(5, argv));
 
-    /* the config row SEEDS the station, and the node- lines are read into the settings */
+    /* the station is a SETTING and nothing else: no config row seeds it any more, so a file that
+       says nothing leaves this node answering as whatever its hardware derived */
     ASSERT_EQ_INT(iotdata_settings_station(&gateway_settings), 7);
     ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 1000u, 90);
     ASSERT_EQ_INT(iotdata_settings_period_s(&gateway_settings, IOTDATA_NODE_TLV_STATUS), 1800);
@@ -2496,6 +2506,28 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 2500);
     ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 1000u, 90);
 
+    /* AND WITH NO LINE AT ALL it derives, rather than falling back to some number a config row
+       used to hold: the station is the hardware's answer until somebody states otherwise. */
+    {
+        char bare[256];
+        snprintf(bare, sizeof(bare), "%s/bare.cfg", dir);
+        FILE *b = fopen(bare, "w");
+        ASSERT(b != NULL);
+        fputs("# nothing said about the station\n", b);
+        fclose(b);
+        char barov[256];
+        snprintf(barov, sizeof(barov), "%s/bare.runtime.cfg", dir);
+        iotdata_config_defaults();
+        memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
+        memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
+        char *bargv[] = { (char *)(uintptr_t) "gw", (char *)(uintptr_t) "--config", bare, (char *)(uintptr_t) "--overlay", barov };
+        ASSERT(gateway_config_load(5, bargv));
+        ASSERT_EQ_INT(iotdata_settings_station(&gateway_settings), iotdata_node_station_from_mac("test"));
+        ASSERT(iotdata_station_is_assignable(iotdata_settings_station(&gateway_settings)));
+        (void)remove(bare);
+        (void)remove(barov);
+    }
+
     /* PINNING. Restart again, this time stating two values on the command line: one config row and
        one setting. Both take, and then neither can be moved. */
     iotdata_config_defaults();
@@ -2504,13 +2536,13 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     _iotdata_settings_pin = 0;
     _iotdata_settings_pin_report = 0;
     {
-        char *pargv[] = { (char *)(uintptr_t)"gw",           (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl, (char *)(uintptr_t)"--mesh-beacon-interval", (char *)(uintptr_t)"45",
+        char *pargv[] = { (char *)(uintptr_t)"gw",           (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl, (char *)(uintptr_t)"--mesh-beacon-interval-s", (char *)(uintptr_t)"45",
                           (char *)(uintptr_t)"--node-window", (char *)(uintptr_t)"7000" };
         ASSERT(gateway_config_load(9, pargv));
     }
-    ASSERT_EQ_INT(config_get_integer("mesh-beacon-interval", -1), 45);
+    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 45);
     ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 7000); /* the argument beat the overlay */
-    ASSERT(iotdata_config_is_pinned(IOTDATA_CFG_MESH_BEACON_INTERVAL));
+    ASSERT(iotdata_config_is_pinned(IOTDATA_CFG_MESH_BEACON_INTERVAL_S));
     ASSERT(iotdata_settings_is_pinned(IOTDATA_SETTINGS_PIN_WINDOW));
     ASSERT(!iotdata_settings_is_pinned(IOTDATA_SETTINGS_PIN_INTERVAL)); /* that one came from the file */
 
@@ -2518,16 +2550,16 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     {
         iotdata_config_update_t u;
         iotdata_config_update_begin_remote(&u);
-        ASSERT(!iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL, &(iotdata_config_value_t){ .u = 120 }));
+        ASSERT(!iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
     }
     /* and refused from the console, which is the part that is a decision rather than a mechanism */
     {
         iotdata_config_update_t u;
         iotdata_config_update_begin(&u);
-        ASSERT(!iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL, &(iotdata_config_value_t){ .u = 120 }));
+        ASSERT(!iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
     }
-    ASSERT_EQ_INT(config_get_integer("mesh-beacon-interval", -1), 45);
-    ASSERT(iotdata_config_refusal(IOTDATA_CFG_MESH_BEACON_INTERVAL, false) != NULL);
+    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 45);
+    ASSERT(iotdata_config_refusal(IOTDATA_CFG_MESH_BEACON_INTERVAL_S, false) != NULL);
 
     /* a pinned SETTING likewise, over the air: the RECEIVE triple arrives whole and the pinned
        field alone stays put, which is why it is pinned per field rather than per key */
@@ -3007,7 +3039,7 @@ int main(void) {
     RUN_TEST(mesh_node_peers_update_and_clear);
     RUN_TEST(mesh_node_filter_update_takes_a_list);
     RUN_TEST(console_poll_never_blocks);
-    RUN_TEST(gateway_config_adapters_and_overlay);
+    RUN_TEST(gateway_config_load_and_overlay);
     RUN_TEST(gateway_settings_fused_and_pinned);
     RUN_TEST(config_set_builds_records);
     RUN_TEST(config_set_rejects_malformed);

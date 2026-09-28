@@ -15,12 +15,14 @@ typedef struct {
 } mesh_ctrl_stat_t;
 
 typedef struct {
+    /* CONFIGURATION, from the shared mesh rows -- see mesh_config_populate(). */
     bool enabled;
-    time_t beacon_interval;               /* seconds between beacon transmissions */
+    time_t beacon_interval; /* seconds between beacon transmissions (MESH_BEACON_INTERVAL_S) */
+    bool debug;
+
     uint16_t beacon_generation;           /* increments each beacon round */
     time_t beacon_last;                   /* last beacon TX time */
     iotdata_mesh_dedup_ring_t dedup_ring; /* dedup ring */
-    bool debug;
     /* handlers */
     mesh_packet_handler_t packet_handler;
     buffer_pool_t *pool; /* frames are built in pooled buffers, as everywhere else */

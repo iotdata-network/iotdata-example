@@ -58,17 +58,7 @@
 #include "iotdata_config.h"
 #include "iotdata_hardware.h"
 
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-#define MQTT_CONNECT_TIMEOUT    60
-#define MQTT_PUBLISH_QOS        0
-#define MQTT_PUBLISH_RETAIN     false
-
 #define IOTDATA_GATEWAY_VERSION IOTDATA_VERSION_SEMVER
-
-#define SERIAL_RATE_DEFAULT           9600
-#define SERIAL_BITS_DEFAULT           SERIAL_8N1
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -142,9 +132,7 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #define PIN_DEVICE_LORA_AUX GPIO_NUM_NC
 #define PIN_DEVICE_LORA_M0  GPIO_NUM_NC
 #define PIN_DEVICE_LORA_M1  GPIO_NUM_NC
-
 #include "d_interface_e22900t22.h"
-/* The transmit hook the node/mesh/ctrl layers take: bool(const uint8_t *, int). */
 static bool lora_packet_write(const uint8_t *const packet, const int length) {
     return length > 0 && lora_write(packet, (size_t)length) == ESP_OK;
 }
@@ -154,6 +142,9 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#define MQTT_CONNECT_TIMEOUT    60
+#define MQTT_PUBLISH_QOS        0
+#define MQTT_PUBLISH_RETAIN     false
 #include "mqtt_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -193,8 +184,8 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 typedef struct {
     bool enabled;
     const char *directory;
-    int max_records, max_seconds, max_bytes;
-    int generations;
+    uint32_t max_records, max_seconds, max_bytes;
+    uint8_t generations;
 } bbox_conf_t;
 typedef struct {
     blackbox_handle_t handle;
@@ -207,13 +198,11 @@ static void gateway_blackbox_begin(bbox_state_t *state, const bbox_conf_t *conf)
     state->config = (blackbox_config_t){
         .pool = state->pool,
         .pool_sz = sizeof(state->pool),
-        .flush = (conf->max_seconds > 0) ? BLACKBOX_FLUSH_BATCH_TIME : BLACKBOX_FLUSH_WRITE_THROUGH,
-        .flush_ms = (conf->max_seconds > 0) ? (uint32_t)conf->max_seconds * 1000u : 0u,
-        .max_records = (conf->max_records > 0) ? (uint32_t)conf->max_records : 0u,
-        .max_bytes = (conf->max_bytes > 0) ? (uint32_t)conf->max_bytes : 0u,
-        .generations = (uint8_t)((conf->generations < 0)     ? 0
-                                 : (conf->generations > 255) ? 255
-                                                             : conf->generations),
+        .flush = (conf->max_seconds > 0u) ? BLACKBOX_FLUSH_BATCH_TIME : BLACKBOX_FLUSH_WRITE_THROUGH,
+        .flush_ms = conf->max_seconds * 1000u,
+        .max_records = conf->max_records,
+        .max_bytes = conf->max_bytes,
+        .generations = conf->generations,
         .persist_arg = snprintf_inline(state->path, sizeof(state->path), "%s/iotdata_gateway_blackbox.csv", conf->directory),
         .enabled = conf->enabled,
     };
@@ -299,17 +288,10 @@ static void gateway_state_end(store_state_t *state) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#include "iotdata_gateway_conf.h"
+#include "iotdata_node_config.h"
+#include "iotdata_gateway_conf.h"
 
-/* HERE and not with the other node headers: the table's defaults are stated by the modules above
-   -- MQTT_SERVER_DEFAULT, DDUP_PORT_DEFAULT, STAT_MQTT_TOPIC_DEFAULT. Nothing reads a setting
-   before this point, and config_linux.h -- which used to parse into a list of its own -- is gone:
-   the table is the store, and the loader beside it writes straight into it. */
-#include "iotdata_gateway_conf.h" /* the table */
-#include "iotdata_node_config.h"    /* expand it */
-#include "iotdata_gateway_conf.h" /* and now the adapters, the adopt and the overlay writer */
-
-/* `conf` is not written here: the config framework brings its own, and it is the only handler that
-   can resolve a NAME because it is the only thing holding the table. */
 static const iotdata_console_t s_gateway_cons[] = {
     IOTDATA_CONFIG_CONSOLE_COMMAND,
     IOTDATA_SETTINGS_CONSOLE_COMMAND,
@@ -320,85 +302,62 @@ static const iotdata_console_t s_gateway_cons[] = {
 
 void lora_config_populate(const char **cfg_port, lora_config_t *cfg) {
     *cfg = (lora_config_t){ 0 };
-    *cfg_port = config_get_string("lora-port", SERIAL_PORT_DEFAULT);
-    cfg->module = LORA_MODULE_USB; /* this gateway is the USB dongle: no GPIO, software mode switch */
-    cfg->e22_address = (uint16_t)config_get_integer("lora-address", IOTDATA_CONFIG_LORA_ADDRESS);
-    cfg->e22_network = (uint8_t)config_get_integer("lora-network", IOTDATA_CONFIG_LORA_NETWORK);
-    cfg->channel = (uint8_t)config_get_integer("lora-channel", IOTDATA_CONFIG_LORA_CHANNEL);
-    cfg->crypt = (uint16_t)config_get_integer("lora-crypt", 0x0000);
-    cfg->packet_size = (uint8_t)config_get_integer("lora-packet-size", 240);
-    cfg->air_data_rate = (uint16_t)config_get_integer("lora-air-rate", 2400);
-    cfg->transmit_power = (uint8_t)config_get_integer("lora-tx-power", 22);
-    cfg->listen_before_transmit = config_get_bool("lora-lbt", true);
-    /* Same key, same default as the read interval below: off also stops the module computing it. */
-    cfg->rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT) > 0;
-    cfg->rssi_packet = config_get_bool("lora-rssi-packet", true);
-    _log_enabled = config_get_bool("lora-debug", false); /* app-side debug logging; the driver has no such flag */
-
-    PRINTF_INFO("config: lora: port=%s, module=USB, "
-                "address=0x%03" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", "
-                "packet-size=%" PRIu8 "B, air-rate=%" PRIu16 "bps, transmit-power=%" PRIu8 "dBm, "
-                "listen-before-transmit=%s, rssi-channel=%s, rssi-packet=%s\n",
-                *cfg_port, cfg->e22_address, cfg->e22_network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->air_data_rate, cfg->transmit_power, cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off",
-                cfg->rssi_packet ? "on" : "off");
-}
-
-void mqtt_config_populate(mqtt_config_t *cfg) {
-    *cfg = (mqtt_config_t){ 0 };
-    cfg->client = config_get_string("mqtt-client", MQTT_CLIENT_DEFAULT);
-    cfg->server = config_get_string("mqtt-server", MQTT_SERVER_DEFAULT);
-    cfg->tls_insecure = config_get_bool("mqtt-tls-insecure", MQTT_TLS_DEFAULT);
-    cfg->synchronous = MQTT_SYNCHRONOUS_DEFAULT;
-    cfg->reconnect_delay = (unsigned int)config_get_integer("mqtt-reconnect-delay", MQTT_RECONNECT_DELAY_DEFAULT);
-    cfg->reconnect_delay_max = (unsigned int)config_get_integer("mqtt-reconnect-delay-max", MQTT_RECONNECT_DELAY_MAX_DEFAULT);
-    cfg->debug = config_get_bool("mqtt-debug", false);
-
-    PRINTF_INFO("config: mqtt: client=%s, server=%s, tls=%s, sync=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, !cfg->tls_insecure ? "on" : "off", cfg->synchronous ? "on" : "off", cfg->reconnect_delay,
-                cfg->reconnect_delay_max);
+    iotdata_config_lora_apply(cfg);
+    *cfg_port = iotdata_config_string(LORA_PORT);
+    cfg->rssi_channel = false;
+    cfg->rssi_packet = true;
+    cfg->debug = iotdata_config_bool(LORA_DEBUG);
+    PRINTF_INFO("config: lora: port=%s, module=USB, address=0x%03" PRIX16 ", network=0x%02" PRIX8 ", channel=%d, crypt=0x%04" PRIX16 ", packet-size=%" PRIu8 "B, air-rate=%" PRIu16 "bps, transmit-power=%" PRIu8 "dBm, listen-before-transmit=%s, rssi-channel=%s, rssi-packet=%s, debug=%s\n", *cfg_port, cfg->e22_address, cfg->e22_network, cfg->channel, cfg->crypt, cfg->packet_size, cfg->air_data_rate, cfg->transmit_power, cfg->listen_before_transmit ? "on" : "off", cfg->rssi_channel ? "on" : "off", cfg->rssi_packet ? "on" : "off", cfg->debug ? "on" : "off");
 }
 
 void mesh_config_populate(mesh_state_t *cfg) {
     *cfg = (mesh_state_t){ 0 };
-    cfg->enabled = config_get_bool("mesh-enable", false);
-    cfg->beacon_interval = (time_t)config_get_integer("mesh-beacon-interval", INTERVAL_BEACON_DEFAULT);
-    cfg->debug = config_get_bool("mesh-debug", false);
-
+    cfg->enabled = iotdata_config_bool(MESH_ENABLE);
+    cfg->beacon_interval = (time_t)iotdata_config_u16(MESH_BEACON_INTERVAL_S);
+    cfg->debug = iotdata_config_bool(MESH_DEBUG);
     PRINTF_INFO("config: mesh: enabled=%c, beacon-interval=%" PRIu32 "s, debug=%s\n", cfg->enabled ? 'y' : 'n', (uint32_t)cfg->beacon_interval, cfg->debug ? "on" : "off");
+}
+
+void mqtt_config_populate(mqtt_config_t *cfg) {
+    *cfg = (mqtt_config_t){ 0 };
+    cfg->client = iotdata_config_string(MQTT_CLIENT);
+    cfg->server = iotdata_config_string(MQTT_SERVER);
+    cfg->tls_insecure = iotdata_config_bool(MQTT_TLS_INSECURE);
+    cfg->synchronous = false;
+    cfg->reconnect_delay = iotdata_config_u16(MQTT_RECONNECT_DELAY);
+    cfg->reconnect_delay_max = iotdata_config_u16(MQTT_RECONNECT_DELAY_MAX);
+    cfg->debug = iotdata_config_bool(MQTT_DEBUG);
+    PRINTF_INFO("config: mqtt: client=%s, server=%s, tls=%s, sync=%s, reconnect-delay=%ds, reconnect-delay-max=%ds\n", cfg->client, cfg->server, !cfg->tls_insecure ? "on" : "off", cfg->synchronous ? "on" : "off", cfg->reconnect_delay, cfg->reconnect_delay_max);
 }
 
 void ddup_config_populate(ddup_state_t *cfg) {
     *cfg = (ddup_state_t){ 0 };
-    cfg->enabled = config_get_bool("ddup-enable", false);
-    cfg->port = (uint16_t)config_get_integer("ddup-port", DDUP_PORT_DEFAULT);
-    const char *peers = config_get_string("ddup-peers", "");
+    cfg->enabled = iotdata_config_bool(DDUP_ENABLE);
+    cfg->port = iotdata_config_u16(DDUP_PORT);
+    const char *peers = iotdata_config_string(DDUP_PEERS);
     ddup_peers_parse(cfg, peers);
-    cfg->delay_ms = (uint32_t)config_get_integer("ddup-delay", DDUP_DELAY_MS_DEFAULT);
-    cfg->debug = config_get_bool("ddup-debug", false);
-
+    cfg->delay_ms = iotdata_config_u16(DDUP_DELAY);
+    cfg->debug = iotdata_config_bool(DDUP_DEBUG);
     PRINTF_INFO("config: ddup: enabled=%c, port=%" PRIu16 ", peers=%s, delay=%" PRIu32 "ms, debug=%s\n", cfg->enabled ? 'y' : 'n', cfg->port, peers, cfg->delay_ms, cfg->debug ? "on" : "off");
 }
 
 void stat_config_populate(stat_state_t *cfg) {
     *cfg = (stat_state_t){ 0 };
-    snprintf(cfg->mqtt_topic, sizeof(cfg->mqtt_topic), "%s", config_get_string("stat-publish-mqtt-topic-prefix", STAT_MQTT_TOPIC_DEFAULT));
+    snprintf(cfg->mqtt_topic, sizeof(cfg->mqtt_topic), "%s", iotdata_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX));
     const size_t len = strlen(cfg->mqtt_topic);
     if (len > 0 && cfg->mqtt_topic[len - 1] == '/')
         cfg->mqtt_topic[len - 1] = '\0';
-
     PRINTF_INFO("config: stat: mqtt-topic=%s\n", cfg->mqtt_topic);
 }
 
 void process_config_populate(process_state_t *cfg) {
     *cfg = (process_state_t){ 0 };
-    cfg->mqtt_topic_prefix = config_get_string("mqtt-topic-prefix", MQTT_TOPIC_PREFIX_DEFAULT);
-    cfg->interval_rssi_channel = config_get_integer("lora-rssi-channel", INTERVAL_RSSI_CHANNEL_DEFAULT); /* same key, same default as the module flag above */
-    cfg->capture_rssi_channel = (cfg->interval_rssi_channel > 0);
-    cfg->capture_rssi_packet = config_get_bool("lora-rssi-packet", true); /* same key as the module register bit */
-    cfg->stat_display_interval = config_get_integer("stat-display-interval", STAT_INTERVAL_DEFAULT);
-    cfg->stat_publish_interval = config_get_integer("stat-publish-interval", STAT_INTERVAL_DEFAULT);
-    cfg->stat_netw_interval = config_get_integer("stat-network-interval", STAT_INTERVAL_DEFAULT);
-    cfg->debug = config_get_bool("debug", false);
-    cfg->debug_data = config_get_bool("debug-data", false);
+    cfg->mqtt_topic_prefix = iotdata_config_string(MQTT_TOPIC_PREFIX);
+    cfg->capture_rssi_packet = true;
+    cfg->stat_display_interval = iotdata_config_u16(STAT_DISPLAY_INTERVAL);
+    cfg->stat_publish_interval = iotdata_config_u16(STAT_PUBLISH_INTERVAL);
+    cfg->stat_netw_interval = iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL);
+    cfg->debug = iotdata_config_bool(DEBUG);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -440,7 +399,7 @@ bool system_config(system_t *state, const int argc, char *argv[]) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             iotdata_config_help(gateway_help_emit, argv[0]);
             static iotdata_settings_t help_settings;
-            iotdata_settings_defaults(&help_settings, iotdata_config_u16(STATION_ID));
+            iotdata_settings_defaults(&help_settings, iotdata_node_station_from_mac("gateway"));
             iotdata_settings_help(gateway_help_emit, &help_settings);
             exit(EXIT_SUCCESS);
         }
@@ -453,11 +412,13 @@ bool system_config(system_t *state, const int argc, char *argv[]) {
     iotdata_console_init(s_gateway_cons, sizeof s_gateway_cons / sizeof s_gateway_cons[0]);
 
     lora_config_populate(&state->lora_port, &state->lora_config);
+    _log_enabled = state->lora_config.debug;
     mqtt_config_populate(&state->mqtt_config);
     mesh_config_populate(&state->mesh_state);
     ddup_config_populate(&state->ddup_state);
     stat_config_populate(&state->stat_state);
     process_config_populate(&state->process_state);
+    state->process_state.debug_data = _log_enabled;
 
     state->running = false;
 
@@ -499,13 +460,13 @@ int main(int argc, char *argv[]) {
         PRINTF_WARN("version: build stamp is unset -- this binary cannot say when it was built\n");
 
     BUFFER_POOL_INIT(s_pool, BUFFER_SLOTS_TOTAL, BUFFER_LENGTH_TOTAL, BUFFER_LENGTH_PREFIX);
-    gateway_blackbox_begin(&state->bbox_state, &(const bbox_conf_t){ .enabled = config_get_bool("blackbox-enabled", false),
-                                                                     .directory = config_get_string("blackbox-file-directory", "."),
-                                                                     .max_records = (int)config_get_integer("blackbox-ram-max-records", 0),
-                                                                     .max_seconds = (int)config_get_integer("blackbox-ram-max-seconds", 0),
-                                                                     .max_bytes = (int)config_get_integer("blackbox-file-max-bytes", 0),
-                                                                     .generations = (int)config_get_integer("blackbox-file-generations", 10) });
-    gateway_state_begin(&state->store_state, &(const store_conf_t){ .directory = config_get_string("state", STATE_PATH_DEFAULT) });
+    gateway_blackbox_begin(&state->bbox_state, &(const bbox_conf_t){ .enabled = iotdata_config_bool(BLACKBOX_ENABLED),
+                                                                     .directory = iotdata_config_string(BLACKBOX_FILE_DIRECTORY),
+                                                                     .max_records = iotdata_config_u32(BLACKBOX_MAX_RECORDS),
+                                                                     .max_seconds = iotdata_config_u32(BLACKBOX_MAX_SECONDS),
+                                                                     .max_bytes = iotdata_config_u32(BLACKBOX_MAX_BYTES),
+                                                                     .generations = iotdata_config_u8(BLACKBOX_FILE_GENERATIONS) });
+    gateway_state_begin(&state->store_state, &(const store_conf_t){ .directory = iotdata_config_string(STATE) });
     idep_node_init(&state->inode, iotdata_settings_station(&gateway_settings), &state->store_state.node, STATE_NODE_TAG);
     iotdata_settings_console_attach(&gateway_settings, &state->store_state.node);
     PRINTF_INFO("node: station=%03" PRIX16 "\n", idep_station(&state->inode));

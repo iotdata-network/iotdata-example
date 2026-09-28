@@ -3,27 +3,11 @@
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // iotdata_gateway_config.h - the gateway's configuration, as an iotdata_node_config table.
-//
-// WHAT CHANGED IS THE STORE, NOT THE CALLERS. config_get_string/integer/bool still read the way
-// they always did; they just read out of the node table now instead of a parallel key/value list.
-// That is deliberate: forty-odd call sites is a lot of surface to disturb in one step, and the
-// point of this one is to prove the table, the file loading and the write-back -- not to rewrite
-// everything that reads a setting.
-//
-// THE TABLE OWNS THE DEFAULTS. Every call site still passes one, and it is now ignored: two
-// statements of the same default is one too many, and the one in the table is the one the console
-// reports and the one a reset returns to. The values here are transcribed from those call sites
-// exactly, so this change moves where a default lives and not what it is.
-//
-// WHERE A VALUE COMES FROM, weakest first:
-//
-//   the table       what this build believes, below
-//   the .cfg file   the operator's, hand-edited, and never written back to
-//   the overlay     what was changed at runtime, beside the file rather than in it
-//   the command line for this run only, and never persisted
-//
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#ifndef MQTT_CLIENT_DEFAULT
+#define MQTT_CLIENT_DEFAULT "iotdata_gateway"
+#endif
 #ifndef CONFIG_FILE_DEFAULT
 #define CONFIG_FILE_DEFAULT "iotdata_gateway.cfg"
 #endif
@@ -33,90 +17,45 @@
 #ifndef STATE_PATH_DEFAULT
 #define STATE_PATH_DEFAULT "/var/lib/iotdata"
 #endif
-#ifndef SERIAL_PORT_DEFAULT
-#define SERIAL_PORT_DEFAULT "/dev/e22900t22u"
-#endif
-#ifndef STAT_INTERVAL_DEFAULT
-#define STAT_INTERVAL_DEFAULT (5 * 60)
-#endif
-#ifndef INTERVAL_RSSI_CHANNEL_DEFAULT
-#define INTERVAL_RSSI_CHANNEL_DEFAULT 0
-#endif
-#ifndef INTERVAL_BEACON_DEFAULT
-#define INTERVAL_BEACON_DEFAULT 60 /* seconds */
-#endif
-#ifndef GATEWAY_STATION_ID_DEFAULT
-#define GATEWAY_STATION_ID_DEFAULT 1
+#ifndef LORA_PORT_DEFAULT
+#define LORA_PORT_DEFAULT "/dev/e22900t22u"
 #endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* The E22's own validators, from the shared block. The radio settings are REAL VALUES here -- bps,
-   bytes, dBm -- and not the module's register indices, which is what they used to be: the driver
-   took an index, the config file said "2", and only a lookup table three functions long knew that
-   meant 2400bps. The sensors always stated the real thing; now the gateway does too, and the same
-   validators refuse a value the module cannot actually take. */
+#define IOTDATA_CONFIG_LORA_MODULE LORA_MODULE_USB
 #include "iotdata_node_config_device_e22900t22.h"
+#define IOTDATA_CONFIG_MESH_ENABLE 0
+#include "iotdata_node_mesh_tuning.h"
+#include "iotdata_node_config_mesh.h"
+#include "iotdata_node_config_ddup.h"
+#define IOTDATA_CONFIG_MQTT_CLIENT MQTT_CLIENT_DEFAULT
+#include "iotdata_node_config_mqtt.h"
+#include "iotdata_node_config_bbox.h"
+#include "iotdata_node_config_stat.h"
 
-/* The string maxima are the storage, so they are sized for what each actually holds: a URL and a
-   peer list want room, a client id does not. See THE EXPANSION in iotdata_node_config.h. */
 #define IOTDATA_CONFIG_ENTRIES(X) \
     /*  NAME                           id     TYPE    min max                   default                            flags                      validate notify */ \
     X(CONFIG, 0x001, STRING, 1, 127, CONFIG_FILE_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL | IOTDATA_CONFIG_FLAG_STARTUP, NULL, NULL, "the settings file to read") \
     X(OVERLAY, 0x002, STRING, 1, 127, CONFIG_OVERLAY_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL | IOTDATA_CONFIG_FLAG_STARTUP, NULL, NULL, "where a setting changed at runtime is written, beside that file") \
-    X(LORA_PORT, 0x101, STRING, 1, 127, SERIAL_PORT_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the serial device the E22 radio is on") \
-    X(LORA_ADDRESS, 0x102, U16, 0, 0xFFFF, IOTDATA_CONFIG_LORA_ADDRESS, 0, NULL, NULL, "Lora E22 module address (hex)") \
-    X(LORA_NETWORK, 0x103, U8, 0, 0xFF, IOTDATA_CONFIG_LORA_NETWORK, 0, NULL, NULL, "Lora E22 module network ID (hex)") \
-    X(LORA_CHANNEL, 0x104, U8, 0, 83, IOTDATA_CONFIG_LORA_CHANNEL, 0, NULL, NULL, "Lora E22 module channel") \
-    X(LORA_CRYPT, 0x105, U16, 0, 0xFFFF, 0x0000, 0, NULL, NULL, "Lora E22 encryption key") \
-    X(LORA_PACKET_SIZE, 0x106, U8, 32, 240, IOTDATA_CONFIG_LORA_PACKET_SIZE, 0, iotdata_config_lora_packet_size_ok, NULL, "the E22 sub-packet size in bytes: 32, 64, 128 or 240") \
-    X(LORA_AIR_RATE, 0x107, U16, 300, 62500, IOTDATA_CONFIG_LORA_AIR_RATE, 0, iotdata_config_lora_air_rate_ok, NULL, "on-air bit rate in bps; lower reaches further and takes longer") \
-    X(LORA_TX_POWER, 0x108, U8, 10, 22, IOTDATA_CONFIG_LORA_TX_POWER, 0, iotdata_config_lora_tx_power_ok, NULL, "transmit power in dBm: 10, 13, 17 or 22") \
-    X(LORA_RSSI_CHANNEL, 0x109, U16, 0, 3600, INTERVAL_RSSI_CHANNEL_DEFAULT, 0, NULL, NULL, "Lora E22 channel (ambient) RSSI poll interval in seconds") \
-    X(LORA_RSSI_PACKET, 0x10A, BOOL, 0, 1, true, 0, NULL, NULL, "Lora E22 enable packet RSSI capture") \
-    X(LORA_LBT, 0x10B, BOOL, 0, 1, IOTDATA_CONFIG_LORA_LBT, 0, NULL, NULL, "listen before transmitting, so two radios do not talk over each other") \
-    X(LORA_DEBUG, 0x10C, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "Lora E22 debug output (true/false)") \
+    X(STATE, 0x003, STRING, 1, 127, STATE_PATH_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the directory this gateway keeps its state in") \
+    X(DEBUG, 0x004, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "Debug output (true/false)") \
 \
-    X(MQTT_CLIENT, 0x110, STRING, 1, 63, MQTT_CLIENT_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the client id to connect to the broker as") \
-    X(MQTT_SERVER, 0x111, STRING, 1, 191, MQTT_SERVER_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the broker URL to publish telemetry to") \
-    X(MQTT_TOPIC_PREFIX, 0x112, STRING, 1, 63, MQTT_TOPIC_PREFIX_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "what every published topic starts with") \
-    X(MQTT_TLS_INSECURE, 0x113, BOOL, 0, 1, MQTT_TLS_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "MQTT disable TLS verification") \
-    X(MQTT_RECONNECT_DELAY, 0x114, U16, 1, 3600, MQTT_RECONNECT_DELAY_DEFAULT, 0, NULL, NULL, "MQTT reconnect delay in seconds") \
-    X(MQTT_RECONNECT_DELAY_MAX, 0x115, U16, 1, 3600, MQTT_RECONNECT_DELAY_MAX_DEFAULT, 0, NULL, NULL, "MQTT max reconnect delay in seconds") \
-    X(MQTT_DEBUG, 0x116, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "MQTT debug output (true/false)") \
+    X(LORA_PORT, 0x101, STRING, 1, 127, LORA_PORT_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the serial device the E22 radio is on") \
+    IOTDATA_CONFIG_ENTRIES_LORA(X) \
+    IOTDATA_CONFIG_ENTRIES_MESH(X) \
+    IOTDATA_CONFIG_ENTRIES_MESH_GATEWAY(X) \
+    IOTDATA_CONFIG_ENTRIES_DDUP(X) \
+    IOTDATA_CONFIG_ENTRIES_MQTT(X) \
 \
-    X(MESH_ENABLE, 0x120, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_REBOOT, NULL, NULL, "Mesh enable (iotdata networking)") \
-    /* NOT a mesh row, despite the 0x12x realm it still sits in: it is what this node is CALLED, and \
-       it applies whether or not the mesh is enabled. It is the default under the SETTINGS station -- \
-       the host's equivalent of a device's MAC-derived id -- so a commissioned station overrides it, \
-       and this is what a node that was never commissioned comes up as. (The id belongs in a node \
-       realm rather than the mesh one; moving it is a registry decision, not this change's.) */ \
-    X(STATION_ID, 0x121, U16, 1, IOTDATA_STATION_ASSIGNABLE_MAX, GATEWAY_STATION_ID_DEFAULT, IOTDATA_CONFIG_FLAG_REBOOT, NULL, NULL, "Station ID this node comes up as, before commissioning") \
-    X(MESH_BEACON_INTERVAL, 0x122, U16, 5, 3600, INTERVAL_BEACON_DEFAULT, 0, NULL, NULL, "Mesh beacon transmission interval in seconds") \
-    X(MESH_DEBUG, 0x123, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "Mesh debug output (true/false)") \
+    IOTDATA_CONFIG_ENTRIES_STAT_DISPLAY(X) \
+    IOTDATA_CONFIG_ENTRIES_STAT_DISPLAY_MESH(X) \
+    IOTDATA_CONFIG_ENTRIES_STAT_PUBLISH(X) \
+    IOTDATA_CONFIG_ENTRIES_STAT_PUBLISH_MQTT(X) \
 \
-    X(DDUP_ENABLE, 0x130, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_REBOOT, NULL, NULL, "Ddup enable (cross-gateway deduplication)") \
-    X(DDUP_PORT, 0x131, U16, 1, 65535, DDUP_PORT_DEFAULT, IOTDATA_CONFIG_FLAG_REBOOT, NULL, NULL, "Ddup UDP port for peer communication") \
-    X(DDUP_PEERS, 0x132, STRING, 0, 255, "", IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "Ddup peers comma-separated list (host:port)") \
-    X(DDUP_DELAY, 0x133, U16, 0, 10000, DDUP_DELAY_MS_DEFAULT, 0, NULL, NULL, "Ddup batch send delay in milliseconds") \
-    X(DDUP_DEBUG, 0x134, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "Ddup debug output (true/false)") \
-\
-    X(STAT_DISPLAY_INTERVAL, 0x140, U16, 0, 3600, STAT_INTERVAL_DEFAULT, 0, NULL, NULL, "Stat display stdout interval in seconds") \
-    X(STAT_PUBLISH_INTERVAL, 0x141, U16, 0, 3600, STAT_INTERVAL_DEFAULT, 0, NULL, NULL, "Stat publish MQTT interval in seconds") \
-    X(STAT_NETWORK_INTERVAL, 0x142, U16, 0, 3600, STAT_INTERVAL_DEFAULT, 0, NULL, NULL, "Network/stations table stdout interval in seconds") \
-    X(STAT_PUBLISH_MQTT_TOPIC_PREFIX, 0x143, STRING, 1, 63, STAT_MQTT_TOPIC_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "Stat publish MQTT topic prefix") \
-\
-    X(BLACKBOX_ENABLED, 0x150, BOOL, 0, 1, false, 0, NULL, NULL, "Enable the blackbox diagnostic recorder (true/false, default: false)") \
-    X(BLACKBOX_RAM_MAX_RECORDS, 0x151, U32, 0, 1000000, 0, 0, NULL, NULL, "RAM pool maximum records (0 = unbounded, default: 0)") \
-    X(BLACKBOX_RAM_MAX_SECONDS, 0x152, U32, 0, 31536000, 0, 0, NULL, NULL, "RAM pool maximum seconds before flush to file (0 = write-through, default: 0)") \
-    X(BLACKBOX_FILE_DIRECTORY, 0x153, STRING, 1, 127, ".", IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "CSV file directory") \
-    X(BLACKBOX_FILE_MAX_BYTES, 0x154, U32, 0, 0xFFFFFFFF, 0, 0, NULL, NULL, "CSV file maximum bytes, rotates past this (0 = unbounded, default: 0)") \
-    X(BLACKBOX_FILE_GENERATIONS, 0x155, U8, 0, 255, 10, 0, NULL, NULL, "CSV file maximum rotated generations to keep (<file>.1 .. .N; 0 = overwrite/no backup, default: 10)") \
-\
-    X(STATE, 0x160, STRING, 1, 127, STATE_PATH_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the directory this gateway keeps its state in") \
-    X(DEBUG, 0x161, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "Debug output (true/false)") \
-    X(DEBUG_DATA, 0x162, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "Debug data (hex dump of received packet data) output (true/false)")
+    IOTDATA_CONFIG_ENTRIES_BBOX(X) \
+    IOTDATA_CONFIG_ENTRIES_BBOX_FILE(X)
 
 #endif /* IOTDATA_GATEWAY_CONF_H */
 
@@ -124,6 +63,14 @@
 
 #if defined(IOTDATA_NODE_CONFIG_EXPANDED) && !defined(IOTDATA_GATEWAY_CONFIG_APPLIED)
 #define IOTDATA_GATEWAY_CONFIG_APPLIED
+
+#include "iotdata_node_config_device_e22900t22.h"
+#include "iotdata_node_config_mesh.h"
+#include "iotdata_node_config_mqtt.h"
+#include "iotdata_node_config_ddup.h"
+#include "iotdata_node_config_mqtt.h"
+#include "iotdata_node_config_bbox.h"
+#include "iotdata_node_config_stat.h"
 
 /* Which rows a later write must persist: the ones changed at RUNTIME, and the ones a previous run
    already put in the overlay. Not the ones that came out of the operator's file -- those are theirs
@@ -150,62 +97,13 @@ static bool gateway_settings_owned[IOTDATA_SETTINGS_KEY_COUNT];
    That is the exact mistake the config side already made once. */
 static iotdata_settings_t gateway_settings_loaded;
 
-/* THE FILE IS READ TWICE, and this says which pass is running.
+/* ONE PASS, since STATION_ID went away.
  *
- * Not for tidiness: the settings' DEFAULTS depend on the configuration -- a host's station default
- * is whatever `station-id` says -- so the settings cannot be seeded until the config is complete,
- * and a "node-" line cannot be applied before the seeding that would overwrite it. Two passes over
- * a small text file is the honest way to say that, and cheaper than a pending list that would have
- * to reproduce the precedence rules a second time. */
-typedef enum { GATEWAY_PASS_CONFIG, GATEWAY_PASS_SETTINGS } gateway_pass_t;
-static gateway_pass_t gateway_config_pass = GATEWAY_PASS_CONFIG;
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// THE ADAPTERS
-//
-// The same three functions the gateway has always called, reading out of the table. The `default`
-// argument is accepted and IGNORED: the table states it, which is the whole point of moving it
-// there -- two statements of one default is how they come to disagree. A key that is not in the
-// table is a typo in the code rather than a missing setting, so it says so loudly and then falls
-// back, which is what the old ones did.
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-static const iotdata_config_row_t *gateway_config_lookup(const char *const key) {
-    const int i = iotdata_config_index_by_name(key);
-    if (i < 0) {
-        PRINTF_ERROR("config: no such entry '%s' -- the caller and the table disagree\n", key);
-        return NULL;
-    }
-    return &iotdata_config_table[i];
-}
-
-const char *config_get_string(const char *const key, const char *const default_value) {
-    const iotdata_config_row_t *const row = gateway_config_lookup(key);
-    if (row == NULL)
-        return default_value;
-    if (row->type != IOTDATA_CONFIG_TYPE_STRING) {
-        PRINTF_ERROR("config: '%s' is a %s, not a string\n", key, "scalar");
-        return default_value;
-    }
-    iotdata_config_value_t v;
-    return (iotdata_config_get(row->id, &v) && v.s.p != NULL) ? v.s.p : default_value;
-}
-
-int config_get_integer(const char *const key, const int default_value) {
-    const iotdata_config_row_t *const row = gateway_config_lookup(key);
-    iotdata_config_value_t v;
-    if (row == NULL || !iotdata_config_get(row->id, &v))
-        return default_value;
-    return iotdata_config_type_is_signed(row->type) ? (int)v.i : (int)v.u;
-}
-
-bool config_get_bool(const char *const key, const bool default_value) {
-    const iotdata_config_row_t *const row = gateway_config_lookup(key);
-    iotdata_config_value_t v;
-    if (row == NULL || !iotdata_config_get(row->id, &v))
-        return default_value;
-    return (row->type == IOTDATA_CONFIG_TYPE_BOOL) ? v.b : (v.u != 0u);
-}
+ * It used to be two. The settings' defaults depended on the configuration -- the station's default
+ * was whatever a `station-id` row said -- so nothing "node-" could be applied until the config was
+ * complete, or the seeding would overwrite it. That row is gone: the station now defaults the way
+ * it does on a device, from the hardware, which needs nothing read first. So the settings are
+ * seeded before the file is opened and both kinds of line are applied in the one walk. */
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // LOADING
@@ -227,8 +125,6 @@ static bool gateway_config_set(const char *const key, const char *const text, co
        this build does not have is an error here rather than a config lookup that would fail with a
        misleading message about config. */
     if (iotdata_settings_key_is_ours(key)) {
-        if (gateway_config_pass != GATEWAY_PASS_SETTINGS)
-            return true; /* pass one: the settings are not seeded yet, so this line is not ours to read */
         const int k = iotdata_settings_key_index(key);
         if (k < 0) {
             PRINTF_ERROR("config: '%s' is not a protocol setting this build has\n", key);
@@ -242,8 +138,6 @@ static bool gateway_config_set(const char *const key, const char *const text, co
             gateway_settings_owned[k] = true;
         return true;
     }
-    if (gateway_config_pass != GATEWAY_PASS_CONFIG)
-        return true; /* pass two reads only the settings; the rows were done in pass one */
     const int i = iotdata_config_index_by_name(key);
     if (i < 0) {
         PRINTF_ERROR("config: '%s' is not a setting this build has\n", key);
@@ -340,10 +234,9 @@ static bool gateway_config_argv(const int argc, char **const argv) {
         /* PINNED, and pinned AFTER it was applied -- pinning first would make the command line
            refuse its own argument. From here the value is immutable for this run: the console and
            a manager on the radio are both told no, and the way out is to restart without it. */
-        if (iotdata_settings_key_is_ours(name)) {
-            if (gateway_config_pass == GATEWAY_PASS_SETTINGS)
-                iotdata_settings_key_pin(iotdata_settings_key_index(name));
-        } else if (gateway_config_pass == GATEWAY_PASS_CONFIG) {
+        if (iotdata_settings_key_is_ours(name))
+            iotdata_settings_key_pin(iotdata_settings_key_index(name));
+        else {
             const int row = iotdata_config_index_by_name(name);
             if (row >= 0)
                 (void)iotdata_config_pin(iotdata_config_table[row].id);
@@ -394,26 +287,21 @@ static bool gateway_config_load(const int argc, char **const argv) {
             return false;
         }
 
-    gateway_config_pass = GATEWAY_PASS_CONFIG;
+    /* SEEDED BEFORE ANYTHING IS READ, from the hardware -- the same answer a device gets, by the
+       same call. A host has no config row saying who it is any more: that was one more place for
+       an identity to live, and a gateway commissioned over the air would have had a file still
+       insisting otherwise. The station is a SETTING, so `node-station` in the file below overrides
+       this, and a `--node-station` argument overrides and pins it.
+       Frozen straight after, because the console's "(default N)" has to come from somewhere and on
+       a host there is no state block doing it. */
+    iotdata_settings_defaults(&gateway_settings, iotdata_node_station_from_mac("gateway"));
+    iotdata_settings_freeze(&gateway_settings);
+
     if (!gateway_config_read(file, named != NULL, false) && named != NULL)
         return false;
     (void)gateway_config_read(gateway_config_overlay_path, false, true);
     if (!gateway_config_argv(argc, argv))
         return false;
-
-    /* SEEDED FROM THE CONFIGURATION, between the passes: on a host "what this node is called before
-       anybody commissioned it" is what `station-id` says, which is the same role a MAC-derived id
-       plays on a device. Frozen straight after, because the console's "(default N)" has to come
-       from somewhere and on a host there is no state block doing it. */
-    iotdata_settings_defaults(&gateway_settings, iotdata_config_u16(STATION_ID));
-    iotdata_settings_freeze(&gateway_settings);
-
-    gateway_config_pass = GATEWAY_PASS_SETTINGS;
-    (void)gateway_config_read(file, false, false);
-    (void)gateway_config_read(gateway_config_overlay_path, false, true);
-    if (!gateway_config_argv(argc, argv))
-        return false;
-    gateway_config_pass = GATEWAY_PASS_CONFIG;
     gateway_settings_loaded = gateway_settings; /* the baseline a later write is a change FROM */
 
     PRINTF_INFO("config: %d settings + %d node value(s) from '%s' (+ overlay '%s')\n", (int)IOTDATA_CFG_COUNT, (int)IOTDATA_SETTINGS_KEY_COUNT, file, gateway_config_overlay_path);

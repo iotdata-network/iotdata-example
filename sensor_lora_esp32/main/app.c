@@ -435,6 +435,9 @@ void app_cycle(void) {
         if (!app_state.operating->lora_present) {
             lora_config_t lora_cfg;
             iotdata_config_lora_apply(&lora_cfg);
+            /* the driver's own ESP_LOGD calls, gated by the log level: raising it for its tag is
+               what `lora-debug` means until the flag is wired into the driver itself */
+            esp_log_level_set(__tag_device_e22900t22, lora_cfg.debug ? ESP_LOG_DEBUG : ESP_LOG_INFO);
             app_state.operating->lora_present = lora_setup(&lora_cfg) == ESP_OK;
         }
         const bool lora_started = app_state.operating->lora_present && lora_start() == ESP_OK;

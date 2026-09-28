@@ -7,31 +7,6 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#ifndef MQTT_CLIENT_DEFAULT
-#define MQTT_CLIENT_DEFAULT "iotdata_gateway"
-#endif
-#ifndef MQTT_SERVER_DEFAULT
-#define MQTT_SERVER_DEFAULT "mqtt://localhost"
-#endif
-#ifndef MQTT_TLS_DEFAULT
-#define MQTT_TLS_DEFAULT false
-#endif
-#ifndef MQTT_SYNCHRONOUS_DEFAULT
-#define MQTT_SYNCHRONOUS_DEFAULT false
-#endif
-#ifndef MQTT_TOPIC_PREFIX_DEFAULT
-#define MQTT_TOPIC_PREFIX_DEFAULT "iotdata"
-#endif
-#ifndef MQTT_RECONNECT_DELAY_DEFAULT
-#define MQTT_RECONNECT_DELAY_DEFAULT 5
-#endif
-#ifndef MQTT_RECONNECT_DELAY_MAX_DEFAULT
-#define MQTT_RECONNECT_DELAY_MAX_DEFAULT 60
-#endif
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
 /* Staged commands waiting for the main loop. Bounded on purpose: they come out of the same pool
    the receive path draws from, so an operator hammering the request topic must not be able to
    starve it. A full queue is an answer ("busy"), not a silent overwrite. */

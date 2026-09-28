@@ -7,8 +7,8 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#ifndef STAT_MAX_STATIONS
-#define STAT_MAX_STATIONS 128
+#ifndef STAT_STATIONS_MAX
+#define STAT_STATIONS_MAX 128
 #endif
 #ifndef STAT_RING_SIZE
 #define STAT_RING_SIZE 256
@@ -25,7 +25,6 @@
 #ifndef STAT_EMA_TIMED_TAU_SECS_DEFAULT
 #define STAT_EMA_TIMED_TAU_SECS_DEFAULT 300.0f
 #endif
-#define STAT_MQTT_TOPIC_DEFAULT "iotdata/stats"
 #define STAT_WINDOW_COUNT       8
 static const time_t stat_windows_secs[STAT_WINDOW_COUNT] = { 5 * 60, 15 * 60, 60 * 60, 3 * 3600, 12 * 3600, 24 * 3600, 3 * 86400, 7 * 86400 };
 static const char *const stat_windows_names[STAT_WINDOW_COUNT] = { "5m", "15m", "1h", "3h", "12h", "24h", "3d", "7d" };
@@ -96,10 +95,6 @@ typedef struct {
     uint32_t rssi_packet_cnt;
     uint32_t rssi_packet_err;
     time_t rssi_packet_last_time;
-    int16_t rssi_channel_ema;
-    uint32_t rssi_channel_cnt;
-    uint32_t rssi_channel_err;
-    time_t rssi_channel_last_time;
     /* ring for window rates */
     stat_ring_t rx_ring;
 } stat_link_t;
@@ -132,7 +127,7 @@ typedef struct {
     idep_node_t *inode;
     time_t start_time;
     stat_link_t link;
-    stat_station_t stations[STAT_MAX_STATIONS];
+    stat_station_t stations[STAT_STATIONS_MAX];
     int stations_count;
     stat_variant_t variants[IOTDATA_VARIANT_MAPS_COUNT];
     stat_peer_t peers[STAT_MESH_PEERS_MAX];
@@ -213,12 +208,6 @@ void stat_on_link_rssi_packet(stat_state_t *s, int dbm) {
 }
 void stat_on_link_rssi_packet_error(stat_state_t *s) {
     s->link.rssi_packet_err++;
-}
-void stat_on_link_rssi_channel(stat_state_t *s, int dbm) {
-    ema_update_timed((int16_t)dbm, &s->link.rssi_channel_ema, &s->link.rssi_channel_cnt, &s->link.rssi_channel_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
-}
-void stat_on_link_rssi_channel_error(stat_state_t *s) {
-    s->link.rssi_channel_err++;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -353,9 +342,6 @@ cJSON *stat_build_links_json(const stat_state_t *const s, const time_t now, cons
         cJSON_AddNumberToObject(rssi, "packet_dbm", (double)s->link.rssi_packet_ema);
         cJSON_AddNumberToObject(rssi, "packet_samples", (double)s->link.rssi_packet_cnt);
         cJSON_AddNumberToObject(rssi, "packet_errors", (double)s->link.rssi_packet_err);
-        cJSON_AddNumberToObject(rssi, "channel_dbm", (double)s->link.rssi_channel_ema);
-        cJSON_AddNumberToObject(rssi, "channel_samples", (double)s->link.rssi_channel_cnt);
-        cJSON_AddNumberToObject(rssi, "channel_errors", (double)s->link.rssi_channel_err);
         cJSON *rx = cJSON_AddObjectToObject(link, "rx");
         cJSON_AddNumberToObject(rx, "packets", (double)s->link.rx_packets);
         cJSON_AddNumberToObject(rx, "bytes", (double)s->link.rx_bytes);
@@ -569,12 +555,8 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
     last->when = now;
     const uint32_t rate_okay = (delta_okay * 6000U) / period_stat, rate_drop = (delta_drop * 6000U) / period_stat;
     STAT_APPEND("packets{okay=%" PRIu32 " (%" PRIu32 ".%02" PRIu32 "/min), drop=%" PRIu32 " (%" PRIu32 ".%02" PRIu32 "/min)}", delta_okay, rate_okay / 100, rate_okay % 100, delta_drop, rate_drop / 100, rate_drop % 100);
-    if (s->link.rssi_channel_cnt > 0 || s->link.rssi_packet_cnt > 0) {
+    if (s->link.rssi_packet_cnt > 0) {
         STAT_APPEND(", rssi{");
-        if (s->link.rssi_channel_cnt > 0)
-            STAT_APPEND("channel=%d dBm (%" PRIu32 ")", s->link.rssi_channel_ema, s->link.rssi_channel_cnt);
-        if (s->link.rssi_channel_cnt > 0 && s->link.rssi_packet_cnt > 0)
-            STAT_APPEND(", ");
         if (s->link.rssi_packet_cnt > 0)
             STAT_APPEND("packet=%d dBm (%" PRIu32 ")", s->link.rssi_packet_ema, s->link.rssi_packet_cnt);
         STAT_APPEND("}");

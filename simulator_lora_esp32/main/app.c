@@ -366,6 +366,9 @@ bool app_init(void) {
     esp_err_t lerr;
     lora_config_t lora_cfg;
     iotdata_config_lora_apply(&lora_cfg);
+    /* the driver's own ESP_LOGD calls, gated by the log level: raising it for its tag is what
+       `lora-debug` means until the flag is wired into d_interface_e22900t22 itself */
+    esp_log_level_set(__tag_device_e22900t22, lora_cfg.debug ? ESP_LOG_DEBUG : ESP_LOG_INFO);
     if ((lerr = lora_setup(&lora_cfg)) != ESP_OK) {
         ESP_LOGE(__tag_app, "device: e22 setup failed: %s", esp_err_to_name(lerr));
         iotdata_diagnostics_event(IOTDATA_BB_LC_ERROR, 2);

@@ -11,8 +11,8 @@
 #ifndef NETW_HEARS_MAX
 #define NETW_HEARS_MAX 16 /* stations we record a relay hearing (from its NEIGHBOUR_REPORT) */
 #endif
-#ifndef NETW_SEQ_MAX_GAP
-#define NETW_SEQ_MAX_GAP 256 /* a forward jump beyond this is treated as a sensor reset/resync, not loss */
+#ifndef NETW_SEQ_GAP_MAX
+#define NETW_SEQ_GAP_MAX 256 /* a forward jump beyond this is treated as a sensor reset/resync, not loss */
 #endif
 #ifndef NETW_STALE_SEC
 #define NETW_STALE_SEC 3600 /* a sensor unheard this long is hidden from the snapshot + summary (record kept) */
@@ -155,7 +155,7 @@ static inline void netw_seq_track(netw_pathstat_t *p, uint16_t seq) {
     } else {
         const uint16_t delta = (uint16_t)(seq - p->seq_last);
         if (delta != 0) {
-            if (delta <= NETW_SEQ_MAX_GAP)
+            if (delta <= NETW_SEQ_GAP_MAX)
                 p->gaps += (uint32_t)(delta - 1u);
             p->seq_last = seq; /* advance (or resync, if the jump was a discontinuity) */
         }

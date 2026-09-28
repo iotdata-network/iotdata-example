@@ -9,9 +9,6 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
 bool ddup_insert_handler(void *ctx, uint16_t station_id, uint16_t sequence) {
     return ddup_insert(((process_state_t *)ctx)->state_ddup, station_id, sequence);
 }
@@ -332,8 +329,8 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
     st->rx_held = BUFFER_NONE;
 
     char buf[16];
-    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu32 "s, stats-publish=%" PRIu32 "s, rssi=%" PRIu32 "s [packets=%c, channel=%c], topic-prefix=%s) :: mesh=%c%s\n", (uint32_t)st->stat_display_interval,
-                (uint32_t)st->stat_publish_interval, (uint32_t)st->interval_rssi_channel, st->capture_rssi_packet ? 'y' : 'n', st->capture_rssi_channel ? 'y' : 'n', st->mqtt_topic_prefix, st->state_mesh->enabled ? 'y' : 'n',
+    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu32 "s, stats-publish=%" PRIu32 "s, [packets=%c], topic-prefix=%s) :: mesh=%c%s\n", (uint32_t)st->stat_display_interval,
+                (uint32_t)st->stat_publish_interval, st->capture_rssi_packet ? 'y' : 'n', st->mqtt_topic_prefix, st->state_mesh->enabled ? 'y' : 'n',
                 st->state_mesh->enabled ? snprintf_inline(buf, sizeof(buf), ", beacon=%" PRIu32 "s", (uint32_t)st->state_mesh->beacon_interval) : "");
 
     for (int i = 0; i < IOTDATA_VARIANT_MAPS_COUNT; i++) {
@@ -406,15 +403,6 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
         } else {
             stat_on_link_rx_drop(st->state_stat);
             PRINTF_ERROR("exec: no frame buffer (pool %u/%u): not reading this cycle\n", (unsigned)buffer_pool_used(st->pool), (unsigned)buffer_pool_total(st->pool));
-        }
-
-        // rssi update
-        if (*running && st->capture_rssi_channel && intervalable_and_initial(st->interval_rssi_channel, &st->interval_rssi_channel_last)) {
-            int channel_rssi_dbm;
-            if (lora_read_channel_rssi(&channel_rssi_dbm) == ESP_OK)
-                stat_on_link_rssi_channel(st->state_stat, channel_rssi_dbm);
-            else
-                stat_on_link_rssi_channel_error(st->state_stat);
         }
 
         // mesh beacons
