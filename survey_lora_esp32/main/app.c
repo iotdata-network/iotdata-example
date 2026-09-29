@@ -5,18 +5,7 @@
  * IoT Sensor Telemetry Protocol
  * Copyright(C) 2026 Matthew Gream (https://libiotdata.org)
  *
- * sensor_lora.c - BME280/LTR390 weather sensor on esp32
- *
- * Reads a Bosch BME280 (temperature / pressure / humidity) amd/or an LTR390
- * (solar irradiance and ultraviolet) over I2C, encodes the reading as an
- * iotdata packet using the "weather_station" variant, transmits it via the
- * E22 LoRa radio module. It LISTENS CONTINUOUSLY and speaks only when told to -- see app_survey.h.
- *
- * Every wake is a complete, self-contained cycle: measure, transmit, sleep.
- * Nothing carries over except a small block of RTC-retained state (station id,
- * packet sequence, BME280 factory calibration), and that block is purely a
- * cache — anything missing is re-acquired on the next wake. So a cycle can be
- * repeated, or missed, without disturbing the ones around it.
+ * survey_lora_esp32
  *
  */
 
@@ -41,6 +30,10 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // EXAMPLE config + hardware
 // -----------------------------------------------------------------------------------------------------------------------------------------
+
+#ifndef IOTDATA_CONFIG_LORA_ADDRESS
+#define IOTDATA_CONFIG_LORA_ADDRESS LORA_E22_ADDRESS_MONITOR
+#endif
 
 #include "iotdata_config.h"
 #include "iotdata_hardware.h"
@@ -99,12 +92,19 @@
    The SDS's 10s/20s long presses are retuned here: that was a sealed outdoor unit where an
    accidental press mattered more than a convenient one. This is a handheld being operated on
    purpose, and waiting ten seconds to do something deliberate is its own kind of wrong. */
-#define PIN_BUTTON            GPIO_NUM_3
+#define PIN_BUTTON            PIN_I2C_SDA /* GPIO5 on the carrier map */
+#define PIN_LED               PIN_I2C_SCL /* GPIO6 on the carrier map */
 
-/* PIN_I2C_SDA/SCL are UNUSED on this build -- there is no I2C sensor here, and the board's pull-ups
-   are optional solder. That leaves two pins free for indication, which is what this node most
-   wants next: a survey is started and stopped blind, and the only confirmation today is the
-   monitor on a phone. */
+/* THE I2C PINS ARE THE CONTROLS NOW. There is no I2C sensor on this board, so the header's pull-ups
+   were cut and a combined LED+button fitted in their place -- SDA takes the button, SCL drives the
+   LED. That is what a handheld most needed: a survey was started and stopped blind, with the only
+   confirmation being a monitor on a phone.
+     button   one side to GND, the other to SDA with a 10k pull-up to VCC and 100nF to GND.
+              Pressed reads LOW, which is why the driver leaves its internal pull-up off.
+     LED      LED+ through 470R to VCC, LED- to SCL, with a 10k pull-up to VCC on the control side.
+              ACTIVE LOW -- and that pull-up is what holds it dark while the pin floats at boot or
+              in sleep, so a wedged app cannot leave it lit.
+   GPIO3 is free again, having been the button's temporary home. */
 
 /* The directive is short-lived and RE-ISSUED while the walk continues, rather than issued once for
    an optimistic duration. Re-issue is idempotent by design -- a relay already holding the id passes
@@ -117,7 +117,7 @@
    relay worth keeping. Three intervals tolerates two consecutive misses. What this number really
    governs is how long relays keep spending airtime AFTER the walk ends; the cadence that actually
    costs airtime during it is SURVEY_BATCH_S. */
-#define SURVEY_LOOP_MS        20u    /* how often the loop comes round: receive, fix, button */
+#define SURVEY_LOOP_MS        100u
 #define SURVEY_FIX_REFRESH_MS 5000u  /* how often to look for a newer fix */
 #define SURVEY_FIX_STALE_MS   60000u /* after this, report NO position rather than an old one */
 #define SURVEY_LIVENESS_MS    30000u
@@ -131,6 +131,7 @@
 #include "d_interface_e22900t22.h"
 #include "d_interface_at6558.h"
 #include "d_interface_button.h"
+#include "d_interface_led.h"
 #include "d_module_datastore_esp32.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -311,7 +312,7 @@ static void app_exec_receive(void) {
     for (;;) {
         static uint8_t buf[IOTDATA_MAX_PACKET_SIZE]; // XXX
         int len = 0, rssi_dbm = LORA_RSSI_NONE;
-        if (!app_state.operating->lora_present || lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) != ESP_OK || len <= 0)
+        if (!app_state.operating->lora_present || lora_read(buf, sizeof(buf), &len, &rssi_dbm, SURVEY_LOOP_MS) != ESP_OK || len <= 0)
             return;
         uint8_t variant = 0;
         uint16_t station = 0, sequence = 0;
@@ -335,12 +336,11 @@ static void app_exec_receive(void) {
  *                 view, rather than here with one point in view.
  */
 static const gnss_strategy_t survey_gnss_strategy = {
-    .fix_timeout_ms = GNSS_FIX_TIMEOUT_MS_DEFAULT,
-    .nmea_timeout_ms = GNSS_NMEA_TIMEOUT_MS_DEFAULT,
-    .max_fix_retries = 0,
-    .min_satellites = 4,
-    .min_quality = GNSS_QUALITY_GPS,
-    .hdop_max = 0.0f,
+    /* SHORT, deliberately. The 45s default is for a node that gets ONE attempt before sleeping;
+       this one retries every SURVEY_FIX_REFRESH_MS and the module keeps tracking regardless, so a
+       long budget buys nothing and costs everything: gnss_read() blocks, so a cold start froze the
+       whole node -- no receive, no button -- for the entire window. Fail fast, try again. */
+    .fix_timeout_ms = 2500u, .nmea_timeout_ms = 1000u, .max_fix_retries = 0, .min_satellites = 4, .min_quality = GNSS_QUALITY_GPS, .hdop_max = 0.0f,
 };
 
 static void app_exec_refresh_gnss(void) {
@@ -385,12 +385,12 @@ static void app_exec_status(void) {
 bool app_exec(void) {
     for (;;) {
         app_exec_receive();
+        (void)esp_task_wdt_reset();
         app_exec_refresh_gnss();
         survey_poll(&app_state.operating->survey);
         app_exec_status();
         (void)iotdata_diagnostics_pump();
         app_state.operating->cycles++;
-        hw_delay_ms_yieldable(SURVEY_LOOP_MS);
     }
 }
 
@@ -446,6 +446,7 @@ bool app_init(void) {
     static const survey_config_t survey_config = {
         .node = &_state_operating.node,
         .button_gpio = PIN_BUTTON,
+        .led_gpio = PIN_LED,
         .send = _app_exec_transmit,
         .position = _app_exec_position,
         .tx_count = &_state_operating.tx_count,

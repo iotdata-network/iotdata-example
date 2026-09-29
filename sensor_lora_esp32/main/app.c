@@ -87,13 +87,13 @@
 // (C) VCC -> (1) VCC + (5) CSB
 // (D) GND -> (2) GND + (6) SD0
 
-#define PIN_DEVICE_UART_TX  PIN_E22_RXD
-#define PIN_DEVICE_UART_RX  PIN_E22_TXD
-#define PIN_DEVICE_LORA_AUX PIN_E22_AUX
-#define PIN_DEVICE_LORA_M0  PIN_E22_M0
-#define PIN_DEVICE_LORA_M1  PIN_E22_M1
-#define PIN_DEVICE_I2C_SDA  PIN_I2C_SDA
-#define PIN_DEVICE_I2C_SCL  PIN_I2C_SCL
+#define PIN_DEVICE_UART_TX        PIN_E22_RXD
+#define PIN_DEVICE_UART_RX        PIN_E22_TXD
+#define PIN_DEVICE_LORA_AUX       PIN_E22_AUX
+#define PIN_DEVICE_LORA_M0        PIN_E22_M0
+#define PIN_DEVICE_LORA_M1        PIN_E22_M1
+#define PIN_DEVICE_I2C_SDA        PIN_I2C_SDA
+#define PIN_DEVICE_I2C_SCL        PIN_I2C_SCL
 
 #include "d_platform_esp32.h"
 #include "d_common.h"

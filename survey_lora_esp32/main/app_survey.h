@@ -75,6 +75,19 @@ static const char *__tag_survey = "survey";
 #define SURVEY_PRESS_XLONG_MS 8000u
 #endif
 
+/* WHAT THE LIGHT SAYS. One LED, so it gets three resting states and one event -- about the limit
+   before it needs a manual.
+     no fix          fast pulse   "not ready; a point pressed now carries no position"
+     surveying       slow pulse   "a directive of mine is out there"
+     idle, fix       dark, with a blink every few seconds so dark is distinguishable from DEAD,
+                     which on a handheld is worth the current
+     report sent     two blinks, then back to whichever of the above applies
+   NO FIX OUTRANKS SURVEYING, because it is the one that changes what you do next. */
+#ifndef SURVEY_LED_BEAT_MS
+#define SURVEY_LED_BEAT_MS 5000u
+#endif
+#define SURVEY_LED_EVENT_BLINKS 2u
+
 #ifndef SURVEY_OBSERVE_MAX
 #define SURVEY_OBSERVE_MAX 16
 #endif
@@ -86,10 +99,16 @@ static const char *__tag_survey = "survey";
 typedef struct {
     idep_node_t *node; /* our station, and the sequence a frame is spent from */
     gpio_num_t button_gpio;
+    gpio_num_t led_gpio;
     bool (*send)(const uint8_t *buf, size_t len);      /* the radio is already up; put these bytes out */
     bool (*position)(iotdata_mesh_diag_position_t *p); /* false when this node does not have a fix */
     uint32_t *tx_count, *tx_errors;
 } survey_config_t;
+
+/* survey_init() RETAINS a pointer to the config above for the life of the node, so whatever is
+   passed must outlive the call. A compound literal will NOT: it dies with the enclosing block, and
+   the first call through a function pointer afterwards jumps into whatever the stack has since
+   become -- an instruction fetch from a data address, which is a confusing way to find out. */
 
 typedef struct {
     bool active;
@@ -97,6 +116,9 @@ typedef struct {
     uint32_t issued_ms;
     bool auto_report;
     uint32_t auto_last_ms;
+    led_pattern_t led_rest;
+    uint16_t led_rest_arg;
+    uint32_t led_event_until_ms, led_beat_ms;
     iotdata_mesh_diag_survey_entry_t obs[SURVEY_OBSERVE_MAX];
     int obs_count;
     uint32_t obs_total, obs_dropped;
@@ -107,17 +129,72 @@ typedef struct {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static const survey_config_t *_survey_cfg = NULL;
+static led_config_t _survey_led_config;
+static led_handle_t _survey_led;
+
+static bool survey_have_fix(void) {
+    iotdata_mesh_diag_position_t p;
+    return _survey_cfg->position != NULL && _survey_cfg->position(&p);
+}
+
+/* A momentary indication. It restores NOTHING itself -- survey_led_tick() does that once the window
+   has passed, so no call site can forget to. A light that forgets is a light that lies. */
+static void survey_led_event(survey_t *const s, const unsigned blinks) {
+    led_start(&_survey_led, LED_PATTERN_BLINK, (uint16_t)blinks);
+    s->led_event_until_ms = hw_time_ms() + (blinks * 2u * LED_BLINK_MS_DEFAULT) + 50u;
+    s->led_rest = LED_PATTERN_OFF; /* forget what was showing; the tick re-applies it */
+    s->led_rest_arg = 0;
+}
+
+static void survey_led_tick(survey_t *const s) {
+    if (s->led_event_until_ms != 0u) {
+        if ((int32_t)(hw_time_ms() - s->led_event_until_ms) < 0)
+            return; /* an event is still playing */
+        s->led_event_until_ms = 0u;
+        s->led_rest = LED_PATTERN_OFF; /* the blink left it dark; re-apply below */
+    }
+    led_pattern_t want = LED_PATTERN_OFF;
+    uint16_t arg = 0;
+    if (!survey_have_fix()) {
+        want = LED_PATTERN_PULSE;
+        arg = LED_PULSE_FAST_MS_DEFAULT;
+    } else if (s->active) {
+        want = LED_PATTERN_PULSE;
+        arg = LED_PULSE_SLOW_MS_DEFAULT;
+    }
+    if (want != s->led_rest || arg != s->led_rest_arg) {
+        if (want == LED_PATTERN_OFF)
+            led_stop(&_survey_led);
+        else
+            led_start(&_survey_led, want, arg);
+        s->led_rest = want;
+        s->led_rest_arg = arg;
+        s->led_beat_ms = hw_time_ms();
+    }
+    if (want == LED_PATTERN_OFF && (hw_time_ms() - s->led_beat_ms) >= SURVEY_LED_BEAT_MS) {
+        s->led_beat_ms = hw_time_ms();
+        survey_led_event(s, 1u);
+    }
+}
 
 static void survey_observe(survey_t *const s, const uint16_t station, const uint16_t sequence, const int rssi_dbm) {
     s->obs_total++;
-    if (s->obs_count < SURVEY_OBSERVE_MAX) {
+    /* A RING, DROPPING THE OLDEST. A full batch that refuses the newest keeps the observations
+       taken furthest away and discards the ones taken here -- and where an observation was taken
+       is the whole of its meaning on a node that is being carried. Whatever is dropped is counted;
+       nothing is lost quietly. */
+    if (s->obs_count >= SURVEY_OBSERVE_MAX) {
+        memmove(&s->obs[0], &s->obs[1], (size_t)(SURVEY_OBSERVE_MAX - 1) * sizeof(s->obs[0]));
+        s->obs_count = SURVEY_OBSERVE_MAX - 1;
+        s->obs_dropped++;
+    }
+    {
         iotdata_mesh_diag_survey_entry_t *const e = &s->obs[s->obs_count++];
         e->station = station;
         e->sequence = sequence;
         e->rssi_dbm = rssi_dbm; /* the driver's own convention, untranslated */
         e->snr_q4 = IOTDATA_MESH_DIAG_SNR_NONE;
-    } else
-        s->obs_dropped++;
+    }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -140,6 +217,7 @@ static void survey_report(survey_t *const s, const char *const why) {
             (*c->tx_count)++;
             ESP_LOGI(__tag_survey, "report: %s -- %d heard, %s (%d bytes)", why, s->obs_count, have_posn ? "positioned" : "no fix", flen);
             s->obs_count = 0;
+            survey_led_event(s, SURVEY_LED_EVENT_BLINKS);
         } else {
             (*c->tx_errors)++;
             ESP_LOGW(__tag_survey, "report: %s would not go out", why);
@@ -215,6 +293,8 @@ static void survey_poll(survey_t *const s) {
         } else if (ev.type == BUTTON_EVENT_STUCK)
             ESP_LOGW(__tag_survey, "button reads stuck -- check the pull-up and the wiring");
     }
+    survey_led_tick(s);
+
     if (s->auto_report && (hw_time_ms() - s->auto_last_ms) >= SURVEY_AUTO_MS) {
         s->auto_last_ms = hw_time_ms();
         survey_report(s, "auto");
@@ -243,6 +323,23 @@ static bool survey_init(survey_t *const s, const survey_config_t *const cfg) {
     button_hardware_init(&s->button_handle);
     const button_status_t bs = button_status(&s->button_handle);
     if (bs == BUTTON_STATUS_OK) {
+        _survey_led_config = (led_config_t){
+            .pins = { .gpio_led = cfg->led_gpio },
+            .blink_ms = LED_BLINK_MS_DEFAULT,
+            .pulse_slow_ms = LED_PULSE_SLOW_MS_DEFAULT,
+            .pulse_fast_ms = LED_PULSE_FAST_MS_DEFAULT,
+        };
+        if (led_conf(&_survey_led, &_survey_led_config)) {
+            led_hardware_init(&_survey_led); /* led_conf() only validates and stores; this drives the pin */
+            const led_status_t ls = led_status(&_survey_led);
+            ESP_LOGI(__tag_survey, "led GPIO%d, %s -- fast pulse = no fix, slow pulse = surveying, two blinks = report sent", (int)cfg->led_gpio, led_status_to_str(ls));
+        } else
+            ESP_LOGW(__tag_survey, "led would not configure -- this node has no way to tell you anything");
+        s->led_rest = LED_PATTERN_OFF;
+        s->led_rest_arg = 0;
+        s->led_event_until_ms = 0u;
+        s->led_beat_ms = hw_time_ms();
+
         button_events_clear();
         ESP_LOGI(__tag_survey, "button GPIO%d, %s -- single=report, double=survey on/off, %us=auto on/off (every %us), %us=cancel all + reboot", (int)cfg->button_gpio, button_status_to_str(bs), (unsigned)(SURVEY_PRESS_LONG_MS / 1000u),
                  (unsigned)(SURVEY_AUTO_MS / 1000u), (unsigned)(SURVEY_PRESS_XLONG_MS / 1000u));
