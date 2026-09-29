@@ -16,7 +16,7 @@ VERSION  = 0.9.9
 
 ##
 
-BENCH_BUSY_SLEEP ?=
+BENCH_BUSY_SLEEP ?= 1
 
 ##
 

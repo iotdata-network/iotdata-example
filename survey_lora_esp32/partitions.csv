@@ -1,0 +1,12 @@
+# iotdata sensor (bme280) — ESP32-C3, 4 MB flash.
+# Dual-OTA app (1 MB each) + a storage partition + a dedicated `diag` partition for the blackbox
+# ESP_FLASH recorder. `diag` is a custom data subtype (0x40) so it is decoupled from NVS and SPIFFS
+# — its own failure domain. Partition table lives at 0x8000; app partitions are 64 KB-aligned.
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x6000,
+otadata,    data, ota,      0xf000,    0x2000,
+phy_init,   data, phy,      0x11000,   0x1000,
+ota_0,      app,  ota_0,    0x20000,   0x100000,
+ota_1,      app,  ota_1,    0x120000,  0x100000,
+storage,    data, spiffs,   0x220000,  0x100000,
+diag,       data, 0x40,     0x320000,  0xe0000,

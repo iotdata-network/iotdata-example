@@ -45,6 +45,11 @@
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+/* The survey encoding reuses the radio driver's own dBm convention so that a caller can pass a
+   reading straight through untranslated. That only holds while the two agree about what "no
+   reading" is -- if they ever diverge, an absent reading becomes a number again, silently. */
+_Static_assert(LORA_RSSI_NONE == IOTDATA_MESH_DIAG_RSSI_NONE, "radio and survey disagree about 'no rssi reading'");
+
 typedef struct {
     bool used;
     uint16_t directive_id;
@@ -76,8 +81,8 @@ static const char *survey_tag_name(const uint8_t tag) {
 
 static int survey_locate(const survey_state_t *const st, const uint16_t directive_id, int *const spare) {
     int slot = -1, free_slot = -1;
-    for (int i = 0; i < (int)(sizeof (st->d)/sizeof(st->d[0])); i++) {
-        const gw_survey_directive_t* const d = &st->d[i];
+    for (int i = 0; i < (int)(sizeof(st->d) / sizeof(st->d[0])); i++) {
+        const gw_survey_directive_t *const d = &st->d[i];
         if (!d->used) {
             if (free_slot < 0)
                 free_slot = i;
@@ -95,7 +100,7 @@ static int survey_locate(const survey_state_t *const st, const uint16_t directiv
 
 static int survey_count(const survey_state_t *const st) {
     int n = 0;
-    for (int i = 0; i < (int)(sizeof (st->d)/sizeof(st->d[0])); i++)
+    for (int i = 0; i < (int)(sizeof(st->d) / sizeof(st->d[0])); i++)
         if (st->d[i].used)
             n++;
     return n;
@@ -106,7 +111,8 @@ static int survey_count(const survey_state_t *const st) {
 /* One observation, from wherever it was made. `observer` is the node that heard it -- this
    gateway for a direct reception, a relay for one that arrived in a response -- and that
    distinction is the entire point of the survey, so it is never implied. */
-static void survey_publish(survey_state_t *const st, const uint16_t directive_id, const uint16_t observer, const uint16_t station, const uint16_t sequence, const int rssi_dbm, const int8_t snr_q4) {
+static void survey_publish(survey_state_t *const st, const uint16_t directive_id, const uint16_t observer, const uint16_t station, const uint16_t sequence, const int rssi_dbm, const int8_t snr_q4,
+                           const iotdata_mesh_diag_position_t *const observer_pos) {
     cJSON *const root = cJSON_CreateObject();
     if (root == NULL)
         return;
@@ -117,10 +123,23 @@ static void survey_publish(survey_state_t *const st, const uint16_t directive_id
     cJSON_AddStringToObject(root, "observer", snprintf_inline(b_obs, sizeof(b_obs), "%03" PRIX16, observer));
     cJSON_AddStringToObject(root, "station", snprintf_inline(b_sta, sizeof(b_sta), "%03" PRIX16, station));
     cJSON_AddNumberToObject(root, "seq", (double)sequence);
-    cJSON_AddNumberToObject(root, "rssi", (double)rssi_dbm);
+    /* OMITTED when there is no reading, rather than sent as a sentinel: anything that averages or
+       plots an rssi column would fold a sentinel silently into the result. Saturation is a
+       category of its own and says so -- it is a real reception, just not a measurable one. */
+    if (iotdata_mesh_rssi_is_reading(rssi_dbm))
+        cJSON_AddNumberToObject(root, "rssi", (double)rssi_dbm);
+    else if (rssi_dbm == IOTDATA_MESH_DIAG_RSSI_SAT)
+        cJSON_AddBoolToObject(root, "rssi_saturated", true);
     /* Absent, not zero: a radio that cannot measure SNR must not appear to have measured 0 dB. */
     if (snr_q4 != IOTDATA_MESH_DIAG_SNR_NONE)
         cJSON_AddNumberToObject(root, "snr", (double)snr_q4 / 4.0);
+    /* Carried with every observation rather than published once and left to be joined: an
+       observer that says where it stands is what turns a column of numbers into a map. */
+    if (observer_pos != NULL) {
+        cJSON_AddNumberToObject(root, "obs_lat", (double)observer_pos->latitude_e7 / 1e7);
+        cJSON_AddNumberToObject(root, "obs_lon", (double)observer_pos->longitude_e7 / 1e7);
+        cJSON_AddNumberToObject(root, "obs_alt", (double)observer_pos->altitude_m);
+    }
     cJSON_AddNumberToObject(root, "ts", (double)time(NULL));
     char *const out = cJSON_PrintUnformatted(root);
     if (out != NULL) {
@@ -239,8 +258,8 @@ static bool survey_cancel(survey_state_t *const st, const uint16_t directive_id,
         return false;
     }
     idep_sequence_used(st->inode);
-    for (int i = 0; i < (int)(sizeof (st->d)/sizeof(st->d[0])); i++) {
-        gw_survey_directive_t* const d = &st->d[i];
+    for (int i = 0; i < (int)(sizeof(st->d) / sizeof(st->d[0])); i++) {
+        gw_survey_directive_t *const d = &st->d[i];
         if (d->used && (all || d->directive_id == directive_id))
             d->used = false;
     }
@@ -253,12 +272,12 @@ static bool survey_cancel(survey_state_t *const st, const uint16_t directive_id,
    here, and a batch would only add latency to the one observation that did not need any. */
 static int survey_on_direct(survey_state_t *const st, const uint16_t station, const uint16_t sequence, const int rssi_dbm) {
     int n = 0;
-    for (int i = 0; i < (int)(sizeof (st->d)/sizeof(st->d[0])); i++) {
+    for (int i = 0; i < (int)(sizeof(st->d) / sizeof(st->d[0])); i++) {
         gw_survey_directive_t *const d = &st->d[i];
         if (d->used) {
             for (int j = 0; j < d->station_count; j++)
                 if (d->station[j] == station) {
-                    survey_publish(st, d->directive_id, idep_station(st->inode), station, sequence, rssi_dbm, IOTDATA_MESH_DIAG_SNR_NONE);
+                    survey_publish(st, d->directive_id, idep_station(st->inode), station, sequence, rssi_dbm, IOTDATA_MESH_DIAG_SNR_NONE, NULL);
                     d->observed++;
                     st->stat_observed++;
                     n++;
@@ -279,25 +298,28 @@ static bool survey_on_frame(survey_state_t *const st, const uint8_t *const buf, 
     if (iotdata_mesh_unpack_diag(buf, len, &dg) && dg.kind == IOTDATA_MESH_DIAG_SURVEY) {
         char note[160];
         if (dg.op == IOTDATA_MESH_DIAG_OP_RESPONSE) {
-            int count = 0;
-            if (iotdata_mesh_unpack_diag_survey_response(buf, len, &count)) {
-                for (int i = 0; i < count; i++) {
-                    iotdata_mesh_diag_survey_entry_t e;
-                    if (iotdata_mesh_diag_survey_response_entry(buf, len, i, &e)) {
-                        survey_publish(st, dg.directive_id, dg.sender_station, e.station, e.sequence, e.rssi_dbm, e.snr_q4);
-                        st->stat_collected++;
-                    }
-                }
-                if (count == 0)
-                    survey_publish_note(st, "survey", snprintf_inline(note, sizeof(note), "%03" PRIX16 ": directive %03" PRIX16 " live, heard nothing this window", dg.sender_station, dg.directive_id));
-                return true;
+            if (!iotdata_mesh_diag_survey_response_ok(buf, len)) {
+                survey_publish_note(st, "survey", snprintf_inline(note, sizeof(note), "%03" PRIX16 ": malformed response -- body is not a whole number of records", dg.sender_station));
+                return false;
             }
+            iotdata_mesh_diag_position_t pos;
+            const bool has_pos = iotdata_mesh_diag_survey_position(buf, len, &pos);
+            int off = IOTDATA_MESH_DIAG_SURVEY_RSP_SIZE, count = 0;
+            iotdata_mesh_diag_survey_entry_t e;
+            while (iotdata_mesh_diag_survey_entry_next(buf, len, &off, &e)) {
+                survey_publish(st, dg.directive_id, dg.sender_station, e.station, e.sequence, e.rssi_dbm, e.snr_q4, has_pos ? &pos : NULL);
+                st->stat_collected++;
+                count++;
+            }
+            if (count == 0)
+                survey_publish_note(st, "survey", snprintf_inline(note, sizeof(note), "%03" PRIX16 ": directive %03" PRIX16 " live, heard nothing this window", dg.sender_station, dg.directive_id));
+            return true;
         } else if (dg.op == IOTDATA_MESH_DIAG_OP_ERROR) {
             const uint8_t reason = (len > IOTDATA_MESH_DIAG_HDR_SIZE) ? buf[IOTDATA_MESH_DIAG_HDR_SIZE] : 0xFFu;
             const char *const text = (reason == IOTDATA_MESH_DIAG_ERR_FULL)          ? "no room for another directive"
-                                    : (reason == IOTDATA_MESH_DIAG_ERR_MALFORMED)   ? "could not parse the request"
-                                    : (reason == IOTDATA_MESH_DIAG_ERR_UNSUPPORTED) ? "does not implement survey"
-                                                                                    : "refused";
+                                     : (reason == IOTDATA_MESH_DIAG_ERR_MALFORMED)   ? "could not parse the request"
+                                     : (reason == IOTDATA_MESH_DIAG_ERR_UNSUPPORTED) ? "does not implement survey"
+                                                                                     : "refused";
             st->stat_refused++;
             survey_publish_note(st, "survey", snprintf_inline(note, sizeof(note), "%03" PRIX16 " refused directive %03" PRIX16 ": %s", dg.sender_station, dg.directive_id, text));
             return true;
@@ -327,7 +349,7 @@ static void survey_tick(survey_state_t *const st, mesh_state_t *const mesh) {
         buffer_unref(st->pool, h);
     }
     const time_t now = time(NULL);
-    for (int i = 0; i < (int)(sizeof (st->d)/sizeof(st->d[0])); i++) {
+    for (int i = 0; i < (int)(sizeof(st->d) / sizeof(st->d[0])); i++) {
         gw_survey_directive_t *const d = &st->d[i];
         if (d->used && now >= d->expiry) {
             d->used = false;

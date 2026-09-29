@@ -417,7 +417,11 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
                     // (always true when mesh is off). Track the reception either way for observability.
                     /* a packet may carry system TLVs (node reports) as well as telemetry */
                     (void)node_on_packet(st->state_node, rxbuf, (size_t)packet_length, station_id);
-                    (void)survey_on_direct(st->state_survey, station_id, sequence, (packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0);
+                    /* The driver's value goes in UNTRANSLATED. It already distinguishes a reading
+                       (< 0) from saturation (0) from none (LORA_RSSI_NONE), and the survey
+                       encoding uses the same convention -- mapping "none" onto 0 here, as this
+                       once did, published an absent reading as the strongest one possible. */
+                    (void)survey_on_direct(st->state_survey, station_id, sequence, packet_rssi_dbm);
                     if (process_packet_decodes(st, rxbuf, packet_length)) {
                         /* ADMIT DECIDES, and the network table is told what it decided. A HOLD is
                            "new" as far as the table is concerned -- the reading was genuinely heard
