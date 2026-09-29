@@ -151,21 +151,31 @@ static void _node_diagnostics_emit(const char *const line) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
+static bool on_batt_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
 
 #define IOTDATA_CONFIG_LORA_NOTIFY on_lora_changed
+#define IOTDATA_CONFIG_BATT_NOTIFY on_batt_changed
 #include "iotdata_node_config_device_e22900t22.h"
+#include "iotdata_node_config_device_batt.h"
 
 #define IOTDATA_CONFIG_ENTRIES(X) \
     /*NAME  id  TYPE  min  max  default  flags  validate  notify */ \
     X(TRANSMIT_PERIOD_S, 0x001, U16, 10, 3600, (IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS / 1000), 0, NULL, NULL, "how often a reading goes out") \
-    IOTDATA_CONFIG_ENTRIES_LORA(X)
+    IOTDATA_CONFIG_ENTRIES_LORA(X) \
+    IOTDATA_CONFIG_ENTRIES_BATT(X)
 
 #include "iotdata_node_config.h"
 #include "iotdata_node_config_device_e22900t22.h"
+#include "iotdata_node_config_device_batt.h"
 
 static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, __attribute__((unused)) const iotdata_config_info_t *info) {
     ESP_LOGW("config", "%s changed (was %llu); the radio is configured once, so this needs a restart", row->name, (unsigned long long)was->u);
     return true;
+}
+static bool on_batt_changed(const iotdata_config_row_t *row, __attribute__((unused)) const iotdata_config_value_t *was, __attribute__((unused)) const iotdata_config_info_t *info) {
+    if (!iotdata_config_batt_apply())
+        ESP_LOGW("config", "%s changed, but the profile was refused (min/max crossed)", row->name);
+    return false;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -495,12 +505,12 @@ bool app_init(void) {
     (void)battery_test(BENCH_BATTERY_SELFTEST_MS);
 #endif
 
-    if (!_RTC_DATA_VALID(app_state.operating, STATE_MAGIC)) {
+    const bool cold_boot = !_RTC_DATA_VALID(app_state.operating, STATE_MAGIC);
+    if (cold_boot) {
         _RTC_DATA_INIT(app_state.operating, STATE_MAGIC);
         idep_node_init(&app_state.operating->node, iotdata_node_station_from_mac(__tag_app), NULL, 0u);
         iotdata_version_caps_init(&app_state.operating->caps);
         app_state.operating->battery_present = battery_probe();
-        power_describe(app_state.operating->battery_present);
         if ((app_state.operating->bme280_present = (bme280_setup(&bme280_config_default) == ESP_OK)))
             iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAPS_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
         if ((app_state.operating->ltr390_present = (ltr390_setup(&ltr390_config_default) == ESP_OK)))
@@ -515,7 +525,6 @@ bool app_init(void) {
     if (datastore_open(&app_state.running->datastore, "iotdata")) {
         iotdata_state_init(&app_state.running->node, &app_state.running->datastore, "state");
         iotdata_settings_defaults(&app_state.running->settings, idep_station(&app_state.operating->node));
-        /* a state block like any other, so it registers BEFORE the load below */
         if (!iotdata_settings_attach(&app_state.running->settings, &app_state.running->node))
             ESP_LOGW(__tag_app, "state: settings block not registered -- protocol settings will not persist");
         if (!idep_node_bind(&app_state.operating->node, &app_state.running->node, STATE_TAG))
@@ -526,8 +535,13 @@ bool app_init(void) {
             ESP_LOGI(__tag_app, "node: station=%" PRIu16 " restored from settings", idep_station(&app_state.operating->node));
         if (!iotdata_config_load(&app_state.running->datastore))
             ESP_LOGI(__tag_app, "config: nothing stored yet -- every row at its default");
+        if (!iotdata_config_batt_apply())
+            ESP_LOGW(__tag_app, "battery: stored profile refused (min/max crossed) -- keeping the built-in one");
     } else
         ESP_LOGW(__tag_app, "state: persistence disabled (no datastore)");
+
+    if (cold_boot)
+        power_describe(app_state.operating->battery_present);
 
     return true;
 }
