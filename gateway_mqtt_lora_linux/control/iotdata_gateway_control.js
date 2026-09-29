@@ -20,6 +20,14 @@
 //   {"resp":"diag", "station":"0001","cmd":"diag","source":"blackbox","text":"..."}
 //   {"resp":"diag", "station":"0001","cmd":"diag-dump","source":"blackbox","index":0,"record":"..."}
 //   {"resp":"error","station":"0001","cmd":"node-foo","text":"unknown tlv 'foo'"}
+//   {"resp":"survey","directive":"321","observer":"101","station":"537","seq":77,"rssi":-119,"snr":-10}
+//
+// A SURVEY is the one command here that is NOT a node CONTROL key. It is a mesh directive: it
+// asks every relay that takes it to report which packets it hears DIRECTLY from the named
+// stations, and at what margin. Observations stream back on the same response topic, one per
+// observer per packet -- join them on {station, seq} to get the reception pattern for a single
+// transmission. An observer reporting zero for a window says so in words; that is a result (no
+// coverage there) and not the same as a relay that never got the directive and stays silent.
 // A diag names its source because the blackbox recorder is one possible diagnostic, not the
 // definition of one. Records stay strings: decoding one needs the @blackbox definitions header,
 // which this tool has and the gateway does not -- pass --definitions and it is decoded in place.
@@ -36,6 +44,9 @@
 //   ./iotdata_gateway_control.js conf --target 0x5BF
 //   ./iotdata_gateway_control.js conf-set --target 0x5BF 0x051:u8=20 0x042:u32=300000
 //   ./iotdata_gateway_control.js raw '{"cmd":"status","target":"all"}'
+//   ./iotdata_gateway_control.js survey 0x537 --duration 20 --batch 10 --watch 300
+//   ./iotdata_gateway_control.js survey 0x537,0x538 --duration 120 --batch 600
+//   ./iotdata_gateway_control.js survey-cancel all
 //
 // Setup:  npm install        (in this dir; pulls in mqtt)
 //
@@ -51,9 +62,11 @@ const DEFAULTS = {
     prefix: process.env.IOTDATA_PREFIX || 'iotdata',
     target: 'all',
     watch: 10, // seconds, when --watch is given with no number
+    duration: 10, // minutes a survey directive lives for
+    batch: 30, // seconds between a relay's survey reports
 };
 
-const opts = { broker: DEFAULTS.broker, prefix: DEFAULTS.prefix, target: DEFAULTS.target, watch: 0, dryRun: false, verbose: false, debug: false, definitions: null };
+const opts = { broker: DEFAULTS.broker, prefix: DEFAULTS.prefix, target: DEFAULTS.target, watch: 0, dryRun: false, verbose: false, debug: false, definitions: null, duration: DEFAULTS.duration, batch: DEFAULTS.batch, id: null };
 
 const display = {
     log: (...a) => console.log(...a),
@@ -157,6 +170,10 @@ const COMMANDS = {
     'mesh-filters-clear': { summary: 'remove all filters', takes: 'scope', scopes: 'all | manual | auto   (default: all)' },
     'mesh-filters-dump': { summary: 'print the table on the node\'s console' },
 
+    // --- mesh diagnostics: a DIRECTIVE, not a node command --------------------------------------
+    'survey': { summary: 'ask the mesh who hears a station, and how well', takes: 'stations', stations: '<station> [<station> ...] or a comma-separated list, with --duration/--batch/--id' },
+    'survey-cancel': { summary: 'retire a survey directive (or every one)', takes: 'id', ids: '<id in hex> | all   (default: all)' },
+
     // --- compatibility ------------------------------------------------------------------------
     'status': { summary: 'the MESH group of STATUS' },
 
@@ -254,6 +271,21 @@ function buildRequest(name, args) {
         if (args[1] !== undefined) req.action = args[1];
     } else if (spec.takes === 'scope' && args[0] !== undefined) req.scope = args[0];
     else if (spec.takes === 'config') req.set = parseConfigAssignments(args);
+    else if (spec.takes === 'stations') {
+        /* A survey is not addressed to anybody: the gateway airs it and whoever hears it decides.
+           Sending a target would suggest otherwise, so it is left off. */
+        delete req.target;
+        const words = args.join(',').split(',').map((w) => w.trim()).filter((w) => w.length > 0);
+        if (words.length === 0) throw new Error('survey: name at least one station to watch for');
+        req.stations = words.map(parseStation);
+        req.duration = opts.duration;
+        req.batch = opts.batch;
+        if (opts.id !== null) req.id = opts.id;
+    } else if (spec.takes === 'id') {
+        delete req.target;
+        const word = (args[0] ?? 'all').toLowerCase();
+        if (word !== 'all' && word !== '*') req.id = word;
+    }
     return req;
 }
 
@@ -269,6 +301,10 @@ function usage() {
     display.log(`  --watch [secs]   after sending, print live telemetry for N seconds (default ${DEFAULTS.watch})`);
     display.log('  --definitions <hdr>  blackbox record header (with // @blackbox tag=...); while watching,');
     display.log('                   convert recognised record lines (e.g. a blackbox-dump reply) CSV -> JSON');
+    display.log(`  --duration <min> survey: how long the directive lives, in MINUTES (default ${DEFAULTS.duration})`);
+    display.log(`  --batch <secs>   survey: how often each relay reports, in SECONDS (default ${DEFAULTS.batch})`);
+    display.log('  --id <hex>       survey: the directive id (default: the gateway picks one).');
+    display.log('                   Re-sending the SAME id is safe -- relays already surveying pass it on and carry on unchanged');
     display.log('  --dry-run | -n   print the request that would be sent, do not connect');
     display.log('  --verbose | --debug | --help\n');
     display.log('Commands  (spaced or hyphenated: `mesh peers clear`):');
@@ -277,6 +313,8 @@ function usage() {
         if (c.takes === 'station') display.log(`  ${''.padEnd(18)}   takes <station>`);
         if (c.takes === 'station+action') display.log(`  ${''.padEnd(18)}   takes <station> <action>`);
         if (c.takes === 'config') display.log(`  ${''.padEnd(18)}   takes ${c.config}`);
+        if (c.takes === 'stations') display.log(`  ${''.padEnd(18)}   takes ${c.stations}`);
+        if (c.takes === 'id') display.log(`  ${''.padEnd(18)}   takes ${c.ids}`);
         if (c.actions) display.log(`  ${''.padEnd(18)}   action: ${c.actions}`);
         if (c.scopes) display.log(`  ${''.padEnd(18)}   scope: ${c.scopes}`);
     }
@@ -292,6 +330,9 @@ function parseArgv(argv) {
         else if (a === '--prefix') opts.prefix = argv[++i];
         else if (a === '--target') opts.target = parseTarget(argv[++i]);
         else if (a === '--definitions' || a === '--records') opts.definitions = argv[++i];
+        else if (a === '--duration') opts.duration = Number(argv[++i]);
+        else if (a === '--batch') opts.batch = Number(argv[++i]);
+        else if (a === '--id') opts.id = argv[++i];
         else if (a === '--watch') {
             const n = Number(argv[i + 1]);
             if (!Number.isNaN(n) && argv[i + 1] !== undefined) {

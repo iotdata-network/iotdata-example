@@ -302,6 +302,7 @@ static const iotdata_console_t s_gateway_cons[] = {
 #include "iotdata_gateway_stat.h"
 #include "iotdata_gateway_node.h"
 #include "iotdata_gateway_netw.h"
+#include "iotdata_gateway_survey.h"
 #include "iotdata_gateway_state.h"
 #include "iotdata_gateway_ctrl.h"
 #include "iotdata_gateway_exec.h"
@@ -322,6 +323,7 @@ typedef struct {
     stat_state_t stat_state;
     node_state_t node_state;
     ctrl_state_t ctrl_state;
+    survey_state_t survey_state;
     bbox_state_t bbox_state;
     store_state_t store_state;
     idep_node_t inode;
@@ -498,7 +500,8 @@ int main(int argc, char *argv[]) {
        something the main loop can change. gateway_config_changed() refreshes it -- see there. */
     if (!ddup_begin(&state->ddup_state, idep_station(&state->inode), &state->mesh_state.dedup_ring, &state->running))
         goto end_mesh;
-    if (!ctrl_begin(&state->ctrl_state, iotdata_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->bbox_state, &s_pool))
+    survey_begin(&state->survey_state, iotdata_config_string(MQTT_TOPIC_PREFIX), &state->inode, &s_pool);
+    if (!ctrl_begin(&state->ctrl_state, iotdata_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->bbox_state, &state->survey_state, &s_pool))
         goto end_ddup;
     /* AND THE SUBSCRIPTION AFTER ddup_begin(), not with the will above: a retained presence can be
        delivered the instant we subscribe, and the handler calls into ddup's peer table -- whose
@@ -512,13 +515,14 @@ int main(int argc, char *argv[]) {
     gateway_state_restore(&state->store_state);
     stat_begin(&state->stat_state, iotdata_config_string(MQTT_TOPIC_PREFIX), &state->inode, IOTDATA_GATEWAY_VERSION, &state->lora_config, &s_pool);
     state->process_state.pool = &s_pool;
-    ret = process_run(&state->process_state, &state->store_state.node, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
+    ret = process_run(&state->process_state, &state->store_state.node, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->survey_state, &state->running) ? EXIT_SUCCESS : EXIT_FAILURE;
     stat_end(&state->stat_state);
 
     /* say we have gone, rather than leaving the broker to notice: a clean exit clears the retained
        presence at once, where the will only fires when the connection drops */
     peer_presence_shutdown(&state->peer_presence);
     ctrl_end(&state->ctrl_state);
+    survey_end(&state->survey_state);
 end_ddup:
     ddup_end(&state->ddup_state);
 end_mesh:

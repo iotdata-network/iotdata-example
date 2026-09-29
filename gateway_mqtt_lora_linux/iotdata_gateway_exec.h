@@ -164,7 +164,13 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
             if (inner_ok) /* no rssi: that hop is relay->gateway, not sensor->gateway */
                 netw_note_receive(&st->network, fw.origin_station, inner_variant, fw.origin_sequence, NETW_PATH_MESH, is_new, 0, fw.sender_station, now);
             if (is_new) {
-                if (inner_ok) {
+                /* A mesh frame can now travel INSIDE a forward -- a survey response is carried
+                   like data precisely so it is acknowledged and retried. It is not telemetry and
+                   must not be handed to the sensor path, which would fail to decode it. */
+                if (inner_ok && inner_variant == IOTDATA_MESH_VARIANT) {
+                    if (!survey_on_frame(st->state_survey, fw.inner_packet, fw.inner_len))
+                        PRINTF_INFO("exec: mesh frame inside a FORWARD from %03" PRIX16 " not handled (%s)\n", fw.origin_station, iotdata_mesh_ctrl_name(iotdata_mesh_peek_ctrl_type(fw.inner_packet, fw.inner_len)));
+                } else if (inner_ok) {
                     /* A forwarded packet carries system TLVs exactly as a direct one does -- a node
                        two hops out can only ever be heard this way, so without this its reports are
                        handed to the telemetry path alone and never reach the node topic. Addressed
@@ -200,6 +206,10 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
             netw_note_neighbour_report(&st->network, packet_buffer, packet_length, &r, now);   /* relay hears[] + both-ends RSSI */
         break;
     }
+    case IOTDATA_MESH_CTRL_DIAG:
+        mesh_stat_frame(st->state_mesh, ctrl_type, packet_length, true);
+        (void)survey_on_frame(st->state_survey, packet_buffer, packet_length);
+        break;
     case IOTDATA_MESH_CTRL_PONG:
         (void)mesh_receive_pong(st->state_mesh, packet_buffer, packet_length);
         break;
@@ -341,8 +351,9 @@ static bool exec_node_table_row(const uint8_t entry, const uint8_t index, uint8_
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *state_ctrl, volatile bool *running) {
-    assert(st && state_node && state_mesh && state_ddup && state_stat && state_ctrl && running);
+bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *state_ctrl, survey_state_t *state_survey,
+                 volatile bool *running) {
+    assert(st && state_node && state_mesh && state_ddup && state_stat && state_ctrl && state_survey && running);
 
     g_exec = st;
     filter_init(&st->filter);
@@ -350,6 +361,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
     st->state_mesh = state_mesh;
     st->state_ddup = state_ddup;
     st->state_stat = state_stat;
+    st->state_survey = state_survey;
     st->rx_held = BUFFER_NONE;
 
     char buf[16];
@@ -405,6 +417,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
                     // (always true when mesh is off). Track the reception either way for observability.
                     /* a packet may carry system TLVs (node reports) as well as telemetry */
                     (void)node_on_packet(st->state_node, rxbuf, (size_t)packet_length, station_id);
+                    (void)survey_on_direct(st->state_survey, station_id, sequence, (packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0);
                     if (process_packet_decodes(st, rxbuf, packet_length)) {
                         /* ADMIT DECIDES, and the network table is told what it decided. A HOLD is
                            "new" as far as the table is concerned -- the reading was genuinely heard
@@ -439,6 +452,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
         // control
         if (*running) {
             ctrl_tick(state_ctrl, state_node);
+            survey_tick(state_survey, state_mesh);
             iotdata_console_poll(); /* non-blocking; a gateway with no terminal simply reads nothing */
         }
         if (*running)

@@ -69,6 +69,7 @@ typedef struct {
     buffer_queue_t queue;
     buffer_queue_entry_t queue_slot[CTRL_QUEUE_MAX];
     bbox_state_t *bbox;
+    survey_state_t *survey;
     char topic_resp[128];
     char _buffer_resp[244];
     char _buffer_blackbox_rec[BLACKBOX_LINE_MAX];
@@ -262,8 +263,64 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
         const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
         /* A config write is not a command, so it does not come through iotdata_control_from_json --
            it is a CONFIG TLV, and it only borrows this path's targeting and staging. */
+        /* A survey is a MESH directive, not a node command: it is not addressed to a station and
+           it does not travel as a DOWN frame, so it does not belong on the control path above. It
+           only shares this channel, which is the operator's one way in. */
+        const bool is_survey = (strcmp(cmd, "survey") == 0);
+        const bool is_survey_cancel = (strcmp(cmd, "survey-cancel") == 0);
         const bool is_config_set = (strcmp(cmd, "conf-set") == 0);
-        if (is_config_set) {
+        if (is_survey || is_survey_cancel) {
+            const char *why = "busy";
+            if (is_survey_cancel) {
+                const cJSON *const jid = cJSON_GetObjectItem(root, "id");
+                const bool all = !cJSON_IsString(jid) && !cJSON_IsNumber(jid);
+                const uint16_t id = all ? 0u : (uint16_t)(cJSON_IsString(jid) ? strtoul(jid->valuestring, NULL, 16) : (unsigned long)jid->valuedouble);
+                if (survey_cancel(st->survey, id, all, &why)) {
+                    cJSON *const r = ctrl_respond_begin("survey", cmd);
+                    if (r != NULL) {
+                        cJSON_AddStringToObject(r, "text", all ? "cancelled every survey" : snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "cancelled directive %03lX", (unsigned long)id));
+                        ctrl_respond(st, r);
+                    }
+                } else {
+                    ctrl_respond_error(st, cmd, why);
+                    st->stat_req_bad++;
+                }
+            } else {
+                uint16_t stations[GW_SURVEY_STATIONS_MAX];
+                int count = 0;
+                const cJSON *const js = cJSON_GetObjectItem(root, "stations");
+                if (cJSON_IsArray(js)) {
+                    const cJSON *e = NULL;
+                    cJSON_ArrayForEach(e, js) {
+                        if (count >= (int)(sizeof(stations) / sizeof(stations[0])))
+                            break;
+                        if (cJSON_IsString(e) && e->valuestring != NULL)
+                            stations[count++] = (uint16_t)strtoul(e->valuestring, NULL, 0);
+                        else if (cJSON_IsNumber(e))
+                            stations[count++] = (uint16_t)e->valuedouble;
+                    }
+                }
+                const cJSON *const jd = cJSON_GetObjectItem(root, "duration");
+                const cJSON *const jb = cJSON_GetObjectItem(root, "batch");
+                const cJSON *const jid = cJSON_GetObjectItem(root, "id");
+                const uint16_t duration_m = cJSON_IsNumber(jd) ? (uint16_t)jd->valuedouble : 10u;
+                const uint16_t batch_s = cJSON_IsNumber(jb) ? (uint16_t)jb->valuedouble : 30u;
+                const uint16_t id = cJSON_IsNumber(jid) ? (uint16_t)((uint16_t)jid->valuedouble & 0x0FFFu) : (cJSON_IsString(jid) ? (uint16_t)(strtoul(jid->valuestring, NULL, 16) & 0x0FFFu) : survey_next_id(st->survey));
+                if (survey_request(st->survey, id, duration_m, batch_s, stations, count, &why)) {
+                    cJSON *const r = ctrl_respond_begin("survey", cmd);
+                    if (r != NULL) {
+                        cJSON_AddStringToObject(r, "text",
+                                                snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "directive %03lX: %d station(s), %um lifetime, %us window (%d running here)", (unsigned long)id, count, (unsigned)duration_m,
+                                                                (unsigned)batch_s, survey_count(st->survey)));
+                        ctrl_respond(st, r);
+                    }
+                    PRINTF_INFO("ctrl: survey %03" PRIX16 " -> %d station(s), duration=%um batch=%us\n", id, count, (unsigned)duration_m, (unsigned)batch_s);
+                } else {
+                    ctrl_respond_error(st, cmd, why);
+                    st->stat_req_bad++;
+                }
+            }
+        } else if (is_config_set) {
             const char *why = "bad conf-set";
             uint8_t built[CTRL_PAYLOAD_CONFIG_MAX];
             const size_t n = ctrl_config_build(root, built, sizeof(built), &why);
@@ -531,11 +588,12 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, bbox_state_t *bbox, buffer_pool_t *pool) {
-    assert(st && bbox && pool);
+bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, bbox_state_t *bbox, survey_state_t *survey, buffer_pool_t *pool) {
+    assert(st && bbox && survey && pool);
     *st = (ctrl_state_t){ 0 };
     st->inode = inode;
     st->bbox = bbox;
+    st->survey = survey;
     st->pool = pool;
     buffer_queue_init(&st->queue, st->queue_slot, CTRL_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, ctrl_tag_name);

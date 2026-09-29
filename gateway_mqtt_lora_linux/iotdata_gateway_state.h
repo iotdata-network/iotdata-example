@@ -19,6 +19,7 @@ typedef struct {
        that keeps an auto peer table fresh, and it is ticked from the process loop */
     struct peer_presence_s *state_peer;
     stat_state_t *state_stat;
+    struct survey_state_s *state_survey;
     char _buffer_mqtt_topic[256], _buffer_mqtt_message[1024];
     iotdata_decode_to_json_scratch_t _iotdata_scratch;
     iotdata_decoder_t _iotdata_dec; /* for the validity gate below, kept out of the stack */
