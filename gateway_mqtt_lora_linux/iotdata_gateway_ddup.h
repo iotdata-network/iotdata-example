@@ -703,12 +703,17 @@ static bool ddup_is_lowest(const ddup_state_t *state) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 ddup_verdict_t ddup_admit(ddup_state_t *state, uint16_t station, uint16_t sequence) {
-    if (!state->enabled)
-        return DDUP_PUBLISH;
+    /* THE RING IS LOCAL DEDUP AND ALWAYS APPLIES. A sensor heard both directly and through a relay
+       is one reading, whether or not this gateway is contesting with another one -- what `enabled`
+       governs is the DISTRIBUTED half: the claim, the hold, the election. Returning early above
+       this skipped the ring entirely, so a direct reception never registered and the forwarded copy
+       that followed it looked new: every sensor within earshot of both published twice. */
     if (!ddup_check_and_add(state, station, sequence)) { /* rings + broadcasts our claim */
         state->stat_duplicates++;                        /* already decided: retransmit / mesh-multipath / late forward */
         return DDUP_REJECT;
     }
+    if (!state->enabled)
+        return DDUP_PUBLISH;
     if (state->hold_ms == 0 || ddup_usable_peers(state) == 0)
         return DDUP_PUBLISH; /* nobody to contest -> publish now */
     if (ddup_is_lowest(state))

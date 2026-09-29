@@ -219,9 +219,10 @@ bool mesh_receive_neighbour_report_r(mesh_state_t *st, const uint8_t *buf, int l
             PRINTF_INFO("mesh: rx NEIGHBOUR_REPORT from %03" PRIX16 " parent=%03" PRIX16 " cost=%" PRIu8 " gw=%03" PRIX16 ", %" PRIu8 " neighbour(s):\n", r->sender_station, r->parent_id, r->my_cost, r->gateway_id, r->num_neighbours);
             for (int k = 0; k < (int)r->num_neighbours; k++) {
                 iotdata_mesh_nbr_entry_t e;
+                char rbuf[STATIONS_RSSI_STR_MAX];
                 if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &e))
                     break;
-                PRINTF_INFO("      %03" PRIX16 " cost=%" PRIu8 " rssi=%ddBm\n", e.station, e.cost, iotdata_mesh_rssi_from_q4(e.rssi_q4));
+                PRINTF_INFO("      %03" PRIX16 " cost=%" PRIu8 " rssi=%s\n", e.station, e.cost, stations_rssi_str(e.rssi_dbm, rbuf, sizeof(rbuf)));
             }
         }
         return true;

@@ -250,7 +250,7 @@ void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, const io
         iotdata_mesh_nbr_entry_t ent;
         if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &ent))
             break;
-        const int rssi = iotdata_mesh_rssi_from_q4(ent.rssi_q4);
+        const int rssi = ent.rssi_dbm;
         netw_station_t *const s = netw_upsert(n, ent.station, now); /* used immediately, not held */
         if (s->kind == NETW_KIND_UNKNOWN)
             s->kind = (ent.cost == IOTDATA_MESH_NBR_COST_SENSOR) ? NETW_KIND_SENSOR : (ent.cost == 0 ? NETW_KIND_GATEWAY : NETW_KIND_RELAY);
@@ -272,7 +272,7 @@ void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, const io
         iotdata_mesh_nbr_entry_t ent;
         if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &ent))
             break;
-        rel->hears[hc++] = (netw_heard_t){ .station = ent.station, .cost = ent.cost, .rssi = iotdata_mesh_rssi_from_q4(ent.rssi_q4) };
+        rel->hears[hc++] = (netw_heard_t){ .station = ent.station, .cost = ent.cost, .rssi = ent.rssi_dbm };
     }
     rel->hears_count = hc;
 }

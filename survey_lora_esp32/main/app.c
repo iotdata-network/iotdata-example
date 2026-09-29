@@ -311,7 +311,7 @@ static void app_exec_receive(void) {
     for (;;) {
         static uint8_t buf[IOTDATA_MAX_PACKET_SIZE]; // XXX
         int len = 0, rssi_dbm = LORA_RSSI_NONE;
-        if (lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) != ESP_OK || len <= 0)
+        if (!app_state.operating->lora_present || lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) != ESP_OK || len <= 0)
             return;
         uint8_t variant = 0;
         uint16_t station = 0, sequence = 0;
@@ -379,7 +379,6 @@ static void app_exec_status(void) {
         iotdata_state_flush(&app_state.running->node);
     }
 }
-
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
