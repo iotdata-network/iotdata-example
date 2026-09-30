@@ -9,7 +9,11 @@
 #define NETW_VIA_MAX 8 /* distinct relays tracked per sensor (report shows the top 5) */
 #endif
 #ifndef NETW_HEARS_MAX
-#define NETW_HEARS_MAX 16 /* stations we record a relay hearing (from its NEIGHBOUR_REPORT) */
+/* At least STATIONS_MAX (24), which is as many as a relay can report -- otherwise the gateway
+   silently discards entries that survived the air, which is a worse place to lose them than the
+   frame. The relay sends strongest-first so that if anything IS lost it is the weakest, but the
+   point of this number is that nothing should be. */
+#define NETW_HEARS_MAX 24 /* stations we record a relay hearing (from its NEIGHBOUR_REPORT) */
 #endif
 #ifndef NETW_SEQ_GAP_MAX
 #define NETW_SEQ_GAP_MAX 256 /* a forward jump beyond this is treated as a sensor reset/resync, not loss */
@@ -346,6 +350,86 @@ static inline double netw_loss_pct(uint32_t gaps, uint32_t rx) {
 static inline bool netw_is_stale(const netw_station_t *e, time_t now) {
     return (now - e->last_seen) > NETW_STALE_SEC;
 }
+
+/* THE NETWORK, AS A DOCUMENT. netw_report() renders the same table for a console, which is for
+ * someone watching; this is for keeping. A season of terrain data is the point of several of these
+ * nodes, and until now every neighbour report ended its life in a log line that scrolled away.
+ *
+ * The graph is per-station: what we hear of it, what it hears (its NEIGHBOUR_REPORT), and -- where
+ * both exist -- BOTH ENDS of the same link, which is the number that tells you whether a path is
+ * usable rather than merely audible.
+ *
+ * `rssi` fields are omitted rather than sent as 0 when there is no reading, for the same reason
+ * they are omitted in a survey observation: a receiver that had nothing to say must not appear to
+ * have measured the strongest signal on the list.
+ */
+static cJSON *netw_build_json(const netw_t *const n, const uint16_t gateway_id, const time_t now) {
+    cJSON *const root = cJSON_CreateObject();
+    if (root == NULL)
+        return NULL;
+    char idbuf[8];
+    cJSON_AddStringToObject(root, "gateway", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, gateway_id));
+    cJSON_AddNumberToObject(root, "time", (double)now);
+    cJSON_AddNumberToObject(root, "stations", (double)n->count);
+    cJSON *const arr = cJSON_AddArrayToObject(root, "network");
+    if (arr == NULL)
+        return root;
+    for (int i = 0; i < n->count; i++) {
+        const netw_station_t *const e = &n->s[i];
+        cJSON *const o = cJSON_CreateObject();
+        if (o == NULL)
+            break;
+        cJSON_AddStringToObject(o, "id", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, e->station));
+        cJSON_AddStringToObject(o, "kind", netw_kind_name(e->kind));
+        cJSON_AddNumberToObject(o, "age_secs", (double)(now - e->last_seen));
+        cJSON_AddNumberToObject(o, "rx", (double)e->rx_count);
+        if (e->rssi < 0)
+            cJSON_AddNumberToObject(o, "rssi", (double)e->rssi); /* what WE hear it at */
+        if (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) {
+            cJSON_AddNumberToObject(o, "cost", (double)e->cost);
+            cJSON_AddBoolToObject(o, "accepting", e->accepting);
+            cJSON_AddStringToObject(o, "gw", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, e->gateway));
+            cJSON_AddNumberToObject(o, "beacons", (double)e->beacon_rx);
+            cJSON_AddNumberToObject(o, "forwards", (double)e->fwd_sent);
+        }
+        /* the other end of the stick: how well the best relay hears this station */
+        if (e->relay_rssi < 0) {
+            cJSON_AddNumberToObject(o, "relay_rssi", (double)e->relay_rssi);
+            cJSON_AddStringToObject(o, "relay_rssi_from", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, e->relay_rssi_from));
+        }
+        if (e->hears_count > 0) {
+            cJSON *const hears = cJSON_AddArrayToObject(o, "hears");
+            for (int k = 0; hears != NULL && k < e->hears_count; k++) {
+                cJSON *const hh = cJSON_CreateObject();
+                if (hh == NULL)
+                    break;
+                cJSON_AddStringToObject(hh, "id", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, e->hears[k].station));
+                cJSON_AddNumberToObject(hh, "cost", (double)e->hears[k].cost);
+                if (e->hears[k].rssi < 0)
+                    cJSON_AddNumberToObject(hh, "rssi", (double)e->hears[k].rssi);
+                cJSON_AddItemToArray(hears, hh);
+            }
+        }
+        cJSON_AddItemToArray(arr, o);
+    }
+    return root;
+}
+
+void netw_publish(const netw_t *const n, const uint16_t gateway_id, const char *const topic_prefix, char *const topic_buf, const size_t topic_len) {
+    if (!mqtt_is_connected())
+        return;
+    cJSON *const root = netw_build_json(n, gateway_id, time(NULL));
+    if (root == NULL)
+        return;
+    char *const json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json != NULL) {
+        (void)mqtt_send(snprintf_inline(topic_buf, topic_len, "%s%snetwork/%03" PRIX16, topic_prefix, (topic_prefix[0] != '\0' && topic_prefix[strlen(topic_prefix) - 1] == '/') ? "" : "/", gateway_id), json, (int)strlen(json));
+        free(json);
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 void netw_report(netw_t *n, uint16_t gateway_id) {
     const time_t now = time(NULL);

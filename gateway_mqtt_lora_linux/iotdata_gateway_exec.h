@@ -164,12 +164,18 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
             if (inner_ok) /* no rssi: that hop is relay->gateway, not sensor->gateway */
                 netw_note_receive(&st->network, fw.origin_station, inner_variant, fw.origin_sequence, NETW_PATH_MESH, is_new, 0, fw.sender_station, now);
             if (is_new) {
-                /* A mesh frame can now travel INSIDE a forward -- a survey response is carried
-                   like data precisely so it is acknowledged and retried. It is not telemetry and
-                   must not be handed to the sensor path, which would fail to decode it. */
+                /* A MESH FRAME INSIDE A FORWARD is handled exactly as one heard directly -- the
+                   wrapper is transport, not meaning. Both the survey response and the neighbour
+                   report travel this way now, precisely so they are acknowledged, retried, and
+                   carried by relays between here and their origin. Recursing keeps one dispatch
+                   rather than a second, partial copy of it; a FORWARD is excluded so a malformed
+                   frame claiming to nest cannot recurse without bound. */
                 if (inner_ok && inner_variant == IOTDATA_MESH_VARIANT) {
-                    if (!survey_on_frame(st->state_survey, fw.inner_packet, fw.inner_len))
-                        PRINTF_INFO("exec: mesh frame inside a FORWARD from %03" PRIX16 " not handled (%s)\n", fw.origin_station, iotdata_mesh_ctrl_name(iotdata_mesh_peek_ctrl_type(fw.inner_packet, fw.inner_len)));
+                    const uint8_t inner_ctrl = iotdata_mesh_peek_ctrl_type(fw.inner_packet, fw.inner_len);
+                    if (inner_ctrl == IOTDATA_MESH_CTRL_FORWARD)
+                        PRINTF_ERROR("exec: FORWARD nested inside a FORWARD from %03" PRIX16 " -- refusing\n", fw.origin_station);
+                    else
+                        process_mesh_packet(st, fw.inner_packet, fw.inner_len, inner_variant, fw.origin_station, fw.origin_sequence, topic_prefix, packet_rssi_dbm);
                 } else if (inner_ok) {
                     /* A forwarded packet carries system TLVs exactly as a direct one does -- a node
                        two hops out can only ever be heard this way, so without this its reports are
@@ -478,9 +484,11 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
         if (*running && iotdata_config_u16(STAT_DISPLAY_INTERVAL) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_INTERVAL), &st->stat_display_interval_last) > 0)
             stat_display(st->state_stat, st->state_mesh, st->state_ddup);
 
-        // network / stations table
+        // network publish/display
         if (*running && iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL), &st->stat_netw_interval_last) > 0)
             netw_report(&st->network, idep_station(st->state_mesh->inode));
+        if (*running && iotdata_config_u16(STAT_PUBLISH_MESH_INTERVAL) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_MESH_INTERVAL), &st->stat_netw_publish_last) > 0)
+            netw_publish(&st->network, idep_station(st->state_mesh->inode), iotdata_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX), st->_buffer_netw_topic, sizeof(st->_buffer_netw_topic));
 
         // state
         if (*running)

@@ -9,7 +9,9 @@
 typedef struct {
     time_t stat_display_interval_last;
     time_t stat_publish_interval_last;
-    time_t stat_netw_interval_last;
+    time_t stat_netw_interval_last; /* the console print: for someone watching */
+    time_t stat_netw_publish_last;  /* the MQTT publish: for keeping */
+    char _buffer_netw_topic[160];
     netw_t network;  /* stations heard (mesh + sensor), printed every stat-network-interval */
     filter_t filter; /* per-station RX allow/block, exactly as a relay has one */
     node_state_t *state_node;
