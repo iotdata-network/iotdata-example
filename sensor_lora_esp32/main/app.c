@@ -74,9 +74,6 @@
 #define POWER_DIAGNOSTICS 1
 #endif
 
-#undef BENCH_BATTERY_SELFTEST_MS
-#define BENCH_BATTERY_SELFTEST_MS 30000
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // HARDWARE
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -372,6 +369,20 @@ static void app_receive(void) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#define QUIRK_STATION_BME280_ADDR_77 0x769
+
+static const bme280_config_t *app_bme280_config(void) {
+    static bme280_config_t config;
+    config = bme280_config_default;
+    if (idep_station(&app_state.operating->node) == QUIRK_STATION_BME280_ADDR_77) {
+        config.i2c_addr = 0x77;
+        ESP_LOGW(__tag_app, "bme280: quirk for station %03X -- i2c address 0x%02X, not 0x%02X", QUIRK_STATION_BME280_ADDR_77, config.i2c_addr, BME280_I2C_ADDR_DEFAULT);
+    }
+    return &config;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 size_t app_transmit_gather(uint8_t *const buf, const size_t len, bool advertise) {
 
     uint8_t flags = 0;
@@ -380,7 +391,7 @@ size_t app_transmit_gather(uint8_t *const buf, const size_t len, bool advertise)
 
     /* --- sensor: bme280 (enviro) ---  */
     if (!app_state.operating->bme280_present) {
-        app_state.operating->bme280_present = (bme280_setup(&bme280_config_default) == ESP_OK);
+        app_state.operating->bme280_present = (bme280_setup(app_bme280_config()) == ESP_OK);
         if (!app_state.operating->bme280_present && app_state.operating->cycles == 0)
             bme280_diagnose();
     }
@@ -514,7 +525,7 @@ bool app_init(void) {
         idep_node_init(&app_state.operating->node, iotdata_node_station_from_mac(__tag_app), NULL, 0u);
         iotdata_version_caps_init(&app_state.operating->caps);
         app_state.operating->battery_present = battery_probe();
-        if ((app_state.operating->bme280_present = (bme280_setup(&bme280_config_default) == ESP_OK)))
+        if ((app_state.operating->bme280_present = (bme280_setup(app_bme280_config()) == ESP_OK)))
             iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAPS_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
         if ((app_state.operating->ltr390_present = (ltr390_setup(&ltr390_config_default) == ESP_OK)))
             iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAPS_SENSOR, IOTDATA_VERSION_SENSOR_LTR390);
