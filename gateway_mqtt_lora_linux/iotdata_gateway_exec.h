@@ -365,7 +365,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
     st->rx_held = BUFFER_NONE;
 
     char buf[16];
-    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu16 "s, stats-publish=%" PRIu16 "s, topic-prefix=%s) :: mesh=%c%s\n", iotdata_config_u16(STAT_DISPLAY_INTERVAL), iotdata_config_u16(STAT_PUBLISH_INTERVAL),
+    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu16 "s, stats-publish=%" PRIu16 "s, topic-prefix=%s) :: mesh=%c%s\n", iotdata_config_u16(STAT_DISPLAY_INTERVAL_S), iotdata_config_u16(STAT_PUBLISH_INTERVAL_S),
                 iotdata_config_string(MQTT_TOPIC_PREFIX), st->state_mesh->enabled ? 'y' : 'n', st->state_mesh->enabled ? snprintf_inline(buf, sizeof(buf), ", beacon=%" PRIu16 "s", st->state_mesh->beacon_interval_s) : "");
 
     for (int i = 0; i < IOTDATA_VARIANT_MAPS_COUNT; i++) {
@@ -474,15 +474,15 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
             ddup_hold_release(st->state_ddup, process_release_cb, st);
 
         // stats publish/display
-        if (*running && iotdata_config_u16(STAT_PUBLISH_INTERVAL) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_INTERVAL), &st->stat_publish_interval_last) > 0)
+        if (*running && iotdata_config_u16(STAT_PUBLISH_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_INTERVAL_S), &st->stat_publish_interval_last) > 0)
             stat_publish(st->state_stat, st->state_mesh, st->state_ddup);
-        if (*running && iotdata_config_u16(STAT_DISPLAY_INTERVAL) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_INTERVAL), &st->stat_display_interval_last) > 0)
+        if (*running && iotdata_config_u16(STAT_DISPLAY_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_INTERVAL_S), &st->stat_display_interval_last) > 0)
             stat_display(st->state_stat, st->state_mesh, st->state_ddup);
 
         // network publish/display
-        if (*running && iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL), &st->stat_netw_interval_last) > 0)
+        if (*running && iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL_S), &st->stat_netw_interval_last) > 0)
             netw_report(&st->network, idep_station(st->state_mesh->inode));
-        if (*running && iotdata_config_u16(STAT_PUBLISH_MESH_INTERVAL) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_MESH_INTERVAL), &st->stat_netw_publish_last) > 0)
+        if (*running && iotdata_config_u16(STAT_PUBLISH_MESH_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_MESH_INTERVAL_S), &st->stat_netw_publish_last) > 0)
             netw_publish(&st->network, idep_station(st->state_mesh->inode), iotdata_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX), st->_buffer_netw_topic, sizeof(st->_buffer_netw_topic));
 
         // state

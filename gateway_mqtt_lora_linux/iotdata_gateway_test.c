@@ -2650,7 +2650,7 @@ static bool test_gateway_config_load_and_overlay(void) {
     iotdata_config_saver_attach(gateway_config_save);
     {
         iotdata_config_update_t u;
-        iotdata_config_update_begin(&u);
+        iotdata_config_update_begin(&u, false);
         ASSERT(iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
         ASSERT(iotdata_config_update_commit(&u, NULL, NULL));
     }
@@ -2802,13 +2802,13 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     /* refused over the air */
     {
         iotdata_config_update_t u;
-        iotdata_config_update_begin_remote(&u);
+        iotdata_config_update_begin(&u, true);
         ASSERT(!iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
     }
     /* and refused from the console, which is the part that is a decision rather than a mechanism */
     {
         iotdata_config_update_t u;
-        iotdata_config_update_begin(&u);
+        iotdata_config_update_begin(&u, false);
         ASSERT(!iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
     }
     ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 45);

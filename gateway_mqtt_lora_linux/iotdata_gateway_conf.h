@@ -160,7 +160,7 @@ static bool gateway_config_set(const char *const key, const char *const text, co
         return false;
     }
     iotdata_config_update_t u;
-    iotdata_config_update_begin(&u); /* LOCAL: a file and a command line are both a person */
+    iotdata_config_update_begin(&u, false);
     if (!iotdata_config_update_stage(&u, row->id, &v) || !iotdata_config_update_commit(&u, NULL, NULL)) {
         PRINTF_ERROR("config: '%s' refused for '%s' -- out of range, or read-only\n", text, key);
         return false;

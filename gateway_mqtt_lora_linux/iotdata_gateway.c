@@ -350,14 +350,14 @@ static bool gateway_config_changed(__attribute__((unused)) const iotdata_config_
     state->mesh_state.beacon_interval_s = iotdata_config_u16(MESH_BEACON_INTERVAL_S);
     state->ddup_state.hold_ms = iotdata_config_u32(DDUP_HOLD_MS);
     if (state->ddup_state.enabled && state->ddup_state.running != NULL)
-        ddup_reconfigure(&state->ddup_state, iotdata_config_string(DDUP_PEERS), iotdata_config_u16(DDUP_DELAY), iotdata_config_bool(DDUP_DEBUG), (unsigned)iotdata_config_u32(DDUP_DEBUG_INJECT_LATENCY_MS));
+        ddup_reconfigure(&state->ddup_state, iotdata_config_string(DDUP_PEERS), iotdata_config_u16(DDUP_DELAY_MS), iotdata_config_bool(DDUP_DEBUG), (unsigned)iotdata_config_u32(DDUP_DEBUG_INJECT_LATENCY_MS));
     else {
-        state->ddup_state.delay_ms = iotdata_config_u16(DDUP_DELAY);
+        state->ddup_state.delay_ms = iotdata_config_u16(DDUP_DELAY_MS);
         state->ddup_state.debug = iotdata_config_bool(DDUP_DEBUG);
         state->ddup_state.debug_inject_latency_ms = (unsigned)iotdata_config_u32(DDUP_DEBUG_INJECT_LATENCY_MS);
     }
-    state->mqtt_config.reconnect_delay = iotdata_config_u16(MQTT_RECONNECT_DELAY);
-    state->mqtt_config.reconnect_delay_max = iotdata_config_u16(MQTT_RECONNECT_DELAY_MAX);
+    state->mqtt_config.reconnect_delay = iotdata_config_u16(MQTT_RECONNECT_DELAY_S);
+    state->mqtt_config.reconnect_delay_max = iotdata_config_u16(MQTT_RECONNECT_DELAY_S_MAX);
     state->mqtt_config.debug = iotdata_config_bool(MQTT_DEBUG);
     state->process_state.debug = iotdata_config_bool(DEBUG);
     state->process_state.debug_data = _log_enabled;
