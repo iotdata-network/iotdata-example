@@ -480,9 +480,9 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
             stat_display(st->state_stat, st->state_mesh, st->state_ddup);
 
         // network publish/display
-        if (*running && iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_MESH_INTERVAL_S), &st->stat_netw_interval_last) > 0)
+        if (*running && iotdata_config_u16(STAT_DISPLAY_NETW_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_NETW_INTERVAL_S), &st->stat_netw_interval_last) > 0)
             netw_report(&st->network, idep_station(st->state_mesh->inode));
-        if (*running && iotdata_config_u16(STAT_PUBLISH_MESH_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_MESH_INTERVAL_S), &st->stat_netw_publish_last) > 0)
+        if (*running && iotdata_config_u16(STAT_PUBLISH_NETW_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_NETW_INTERVAL_S), &st->stat_netw_publish_last) > 0)
             netw_publish(&st->network, idep_station(st->state_mesh->inode), iotdata_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX), st->_buffer_netw_topic, sizeof(st->_buffer_netw_topic));
 
         // state
