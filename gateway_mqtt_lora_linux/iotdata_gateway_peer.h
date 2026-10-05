@@ -116,7 +116,7 @@ static void peer_presence_on_msg(void *ctx, const char *topic, const void *paylo
 // connect). The aux subscription is deferred to peer_presence_start() because the handler calls
 // into ddup, whose mutex isn't initialised until ddup_begin() (after the config connect/settle).
 static void peer_presence_init(peer_presence_t *pp, ddup_state_t *ddup, uint16_t gwid) {
-    *pp = (peer_presence_t) { 0 };
+    *pp = (peer_presence_t){ 0 };
     pp->ddup = ddup;
     pp->gwid = gwid;
     peer_presence_topic(gwid, pp->topic, sizeof(pp->topic));

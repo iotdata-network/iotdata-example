@@ -36,8 +36,9 @@ of fields.
 Hop nodes forward sensor packets toward a gateway without the sensors needing
 any mesh awareness. The protocol includes beacons (route advertisement),
 forwards (relayed sensor data with TTL), ACKs, route errors, neighbour reports,
-and ping/pong. A duplicate suppression ring buffer prevents reprocessing of
-already-seen packets.
+and DIAG -- a diagnostics envelope carrying SURVEY (who hears a station, and how
+well) and TRACE (the path a frame took, hop by hop). A duplicate suppression ring
+buffer prevents reprocessing of already-seen packets.
 
 ## simulator/ — Standalone Simulator
 

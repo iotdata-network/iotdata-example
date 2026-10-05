@@ -214,15 +214,8 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
     }
     case IOTDATA_MESH_CTRL_DIAG:
         mesh_stat_frame(st->state_mesh, ctrl_type, packet_length, true);
-        (void)survey_on_frame(st->state_survey, packet_buffer, packet_length);
-        break;
-    case IOTDATA_MESH_CTRL_PONG:
-        (void)mesh_receive_pong(st->state_mesh, packet_buffer, packet_length);
-        break;
-    case IOTDATA_MESH_CTRL_PING:
-        mesh_stat_frame(st->state_mesh, ctrl_type, packet_length, true);
-        if (st->state_mesh->debug)
-            PRINTF_INFO("exec: mesh rx %s from station=%03" PRIX16 " (not handled here)\n", iotdata_mesh_ctrl_name(ctrl_type), station_id);
+        if (!survey_on_frame(st->state_survey, packet_buffer, packet_length))
+            (void)trace_on_frame(st->state_trace, packet_buffer, packet_length, packet_rssi_dbm);
         break;
     default:
         mesh_stat_frame(st->state_mesh, ctrl_type, packet_length, false);
@@ -358,7 +351,7 @@ static bool exec_node_table_row(const uint8_t entry, const uint8_t index, uint8_
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *state_ctrl, survey_state_t *state_survey,
-                 volatile bool *running) {
+                 trace_state_t *state_trace, volatile bool *running) {
     assert(st && state_node && state_mesh && state_ddup && state_stat && state_ctrl && state_survey && running);
 
     g_exec = st;
@@ -368,6 +361,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
     st->state_ddup = state_ddup;
     st->state_stat = state_stat;
     st->state_survey = state_survey;
+    st->state_trace = state_trace;
     st->rx_held = BUFFER_NONE;
 
     char buf[16];
@@ -463,6 +457,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
         if (*running) {
             ctrl_tick(state_ctrl, state_node);
             survey_tick(state_survey, state_mesh);
+            trace_tick(state_trace, state_mesh);
             iotdata_console_poll(); /* non-blocking; a gateway with no terminal simply reads nothing */
         }
         if (*running)

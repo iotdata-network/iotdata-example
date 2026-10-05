@@ -32,8 +32,8 @@ LIBS=$(IOTDATA_LIBS_COMMON) -lmosquitto -lpthread
 
 TARGET=iotdata_gateway
 MAIN=iotdata_gateway.c
-SOURCES_TARGET=\
-    iotdata_gateway_ddup.h iotdata_gateway_exec.h iotdata_gateway_mesh.h iotdata_gateway_ctrl.h iotdata_gateway_netw.h iotdata_gateway_node.h iotdata_gateway_stat.h \
+SOURCES_TARGET=iotdata_gateway_conf.h iotdata_gateway_ctrl.h iotdata_gateway_ddup.h iotdata_gateway_exec.h iotdata_gateway_mesh.h iotdata_gateway_netw.h iotdata_gateway_node.h \
+    iotdata_gateway_peer.h iotdata_gateway_state.h iotdata_gateway_stat.h iotdata_gateway_survey.h iotdata_gateway_trace.h iotdata_gateway_util.h \
     include/mqtt_linux.h
 SOURCES_DEPEND=\
     $(IOTDATA_SRC_COMMON)/include/device/d_platform_linux.h \

@@ -140,6 +140,8 @@ static idep_node_t t_inode;
    reached from here, and the lifecycle entry points belong to main */
 #include "iotdata_gateway_peer.h"
 #include "iotdata_gateway_node.h"
+#include "iotdata_gateway_survey.h"
+#include "iotdata_gateway_trace.h"
 #include "iotdata_gateway_state.h"
 #include "iotdata_gateway_ctrl.h"
 #include "iotdata_gateway_exec.h"
@@ -523,7 +525,7 @@ static bool test_process_forward_disabled_no_ack(void) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// mesh_receive_beacon / route_error / pong
+// mesh_receive_beacon / route_error
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool test_mesh_receive_beacon_rx(void) {
@@ -585,20 +587,6 @@ static bool test_mesh_receive_route_error_rx(void) {
     buf[4] = (uint8_t)((IOTDATA_MESH_CTRL_ROUTE_ERROR << 4) | IOTDATA_MESH_REASON_PARENT_LOST);
 
     mesh_receive_route_error(&ms, buf, IOTDATA_MESH_ROUTE_ERROR_SIZE);
-    return true;
-}
-
-static bool test_mesh_receive_pong_rx(void) {
-    mesh_state_t ms;
-    memset(&ms, 0, sizeof(ms));
-    ms.pool = &t_pool;
-
-    uint8_t buf[IOTDATA_MESH_PONG_SIZE];
-    iotdata_mesh_pack_header(buf, 0x0020, 7);
-    buf[4] = (uint8_t)(IOTDATA_MESH_CTRL_PONG << 4);
-    memset(&buf[5], 0, (size_t)(IOTDATA_MESH_PONG_SIZE - 5));
-
-    mesh_receive_pong(&ms, buf, IOTDATA_MESH_PONG_SIZE);
     return true;
 }
 
@@ -2186,6 +2174,74 @@ static bool test_ctrl_mesh_update_entry_shape(void) {
     return true;
 }
 
+/* Drains a staged trace frame so a test can see exactly what the gateway put on the air. */
+static int trace_test_take(trace_state_t *const st, uint8_t *const out, const int cap) {
+    const buffer_handle_t h = buffer_queue_take(&st->queue, hw_time_ms(), NULL, NULL);
+    if (h == BUFFER_NONE)
+        return -1;
+    int n = -1;
+    const int len = (int)buffer_len(st->pool, h);
+    if (len <= cap) {
+        memcpy(out, buffer_data(st->pool, h), (size_t)len);
+        n = len;
+    }
+    buffer_unref(st->pool, h);
+    return n;
+}
+
+static bool test_trace_request_shapes_each_leg(void) {
+    trace_state_t tv;
+    uint8_t got[64];
+    iotdata_mesh_diag_t dg;
+    iotdata_mesh_diag_trace_t tr;
+    iotdata_mesh_nbr_entry_t hop;
+    const char *why = "";
+
+    idep_node_init(&t_inode, 0x001, NULL, 0u);
+    trace_begin(&tv, "pre", &t_inode, &t_pool);
+
+    /* UP asks the subject to record: a REQUEST, carrying no hops of its own. */
+    ASSERT(trace_request(&tv, 0x0A5, 0x5BF, false, false, false, &why));
+    int n = trace_test_take(&tv, got, (int)sizeof(got));
+    ASSERT_EQ_INT(n, IOTDATA_MESH_DIAG_TRACE_HDR_SIZE);
+    ASSERT(iotdata_mesh_unpack_diag(got, n, &dg));
+    ASSERT_EQ_INT(dg.kind, IOTDATA_MESH_DIAG_TRACE);
+    ASSERT_EQ_INT(dg.op, IOTDATA_MESH_DIAG_OP_REQUEST);
+    ASSERT(iotdata_mesh_unpack_diag_trace(got, n, &tr));
+    ASSERT_EQ_INT(tr.hop_count, 0);
+    ASSERT_EQ_INT(tr.subject_station, 0x5BF);
+    ASSERT_EQ_INT((tr.flags & IOTDATA_MESH_DIAG_TRACE_F_DOWN), 0);
+
+    /* DOWN cannot ask anyone -- the recording happens on the way out -- so the gateway originates
+       the RECORD itself, as hop 0, and the relays that flood it append. */
+    ASSERT(trace_request(&tv, 0x0A6, 0x5BF, true, false, true, &why));
+    n = trace_test_take(&tv, got, (int)sizeof(got));
+    ASSERT_EQ_INT(n, IOTDATA_MESH_DIAG_TRACE_HDR_SIZE + IOTDATA_MESH_DIAG_TRACE_HOP);
+    ASSERT(iotdata_mesh_unpack_diag(got, n, &dg));
+    ASSERT_EQ_INT(dg.op, IOTDATA_MESH_DIAG_OP_RECORD);
+    ASSERT(iotdata_mesh_unpack_diag_trace(got, n, &tr));
+    ASSERT_EQ_INT(tr.hop_count, 1);
+    ASSERT(iotdata_mesh_diag_trace_hop(got, n, 0, &hop));
+    ASSERT_EQ_INT(hop.station, 0x001);
+    ASSERT_EQ_INT(hop.cost, 0);
+    ASSERT((tr.flags & IOTDATA_MESH_DIAG_TRACE_F_DOWN) != 0);
+    ASSERT((tr.flags & IOTDATA_MESH_DIAG_TRACE_F_RESPOND) != 0);
+
+    /* Directive 0 means "unasked" to a node reporting on its own, so it cannot be requested --
+       otherwise a solicited record and an unsolicited one are indistinguishable at the gateway. */
+    ASSERT(!trace_request(&tv, 0u, 0x5BF, false, false, false, &why));
+    ASSERT(!trace_request(&tv, 0x0A7, IOTDATA_MESH_STATION_RESERVED, false, false, false, &why));
+    ASSERT(!trace_request(&tv, 0x0A8, IOTDATA_STATION_BROADCAST, false, false, false, &why));
+    ASSERT_EQ_INT(trace_test_take(&tv, got, (int)sizeof(got)), -1); /* and nothing was staged */
+
+    /* Ids are compared, never ordered, and 0 is stepped over. */
+    tv.next_id = 0x0FFFu;
+    ASSERT_EQ_INT(trace_next_id(&tv), 1);
+
+    trace_end(&tv);
+    return true;
+}
+
 static bool test_ctrl_response_topic_is_shared(void) {
     node_state_t ns;
     memset(&ns, 0, sizeof(ns));
@@ -2203,7 +2259,11 @@ static bool test_ctrl_response_topic_is_shared(void) {
     /* ctrl_begin sets the topics before it subscribes, so the (expected) subscribe failure with no
        broker does not stop us checking them */
     idep_node_init(&t_inode, 0x0001, NULL, 0u);
-    (void)ctrl_begin(&st, "pre", &t_inode, &bb, &t_pool);
+    survey_state_t sv;
+    trace_state_t tv;
+    survey_begin(&sv, "pre", &t_inode, &t_pool);
+    trace_begin(&tv, "pre", &t_inode, &t_pool);
+    (void)ctrl_begin(&st, "pre", &t_inode, &bb, &sv, &tv, &t_pool);
 
     ASSERT(strcmp(st.topic_req, "pre/manage/req") == 0);
     ASSERT(strcmp(st.topic_resp, "pre/manage/resp") == 0);
@@ -2662,7 +2722,7 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     /* the station is a SETTING and nothing else: no config row seeds it any more, so a file that
        says nothing leaves this node answering as whatever its hardware derived */
     ASSERT_EQ_INT(iotdata_settings_station(&gateway_settings), 7);
-    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 1000u, 90);
+    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 60000u, 90); /* the interval is MINUTES */
     ASSERT_EQ_INT(iotdata_settings_period_s(&gateway_settings, IOTDATA_NODE_TLV_STATUS), 1800);
     /* and one nobody mentioned is at the seeded default, not at zero */
     ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), IOTDATA_SETTINGS_DEFAULT_WINDOW_MS);
@@ -2697,7 +2757,7 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
     ASSERT(gateway_config_load(5, argv));
     ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 2500);
-    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 1000u, 90);
+    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 60000u, 90);
 
     /* AND WITH NO LINE AT ALL it derives, rather than falling back to some number a config row
        used to hold: the station is the hardware's answer until somebody states otherwise. */
@@ -2767,8 +2827,8 @@ static bool test_gateway_settings_fused_and_pinned(void) {
         iotdata_kvr_add(&kv, IOTDATA_NODE_SETTINGS_RECEIVE, r, (uint8_t)sizeof(r));
         ASSERT(iotdata_settings_apply(&gateway_settings, kvbuf, kv.len));
     }
-    ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 7000);         /* held */
-    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 1000u, 30); /* took */
+    ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 7000);          /* held */
+    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 60000u, 30); /* took */
 
     _iotdata_settings_pin = 0;
     _iotdata_settings_pin_report = 0;
@@ -3149,7 +3209,6 @@ int main(void) {
     RUN_TEST(process_forward_disabled_no_ack);
     RUN_TEST(mesh_receive_beacon_rx);
     RUN_TEST(mesh_receive_route_error_rx);
-    RUN_TEST(mesh_receive_pong_rx);
     RUN_TEST(mesh_seq_increments);
     RUN_TEST(mesh_end_noop);
 
@@ -3252,6 +3311,7 @@ int main(void) {
     RUN_TEST(ctrl_table_matches_key_widths);
     RUN_TEST(ctrl_status_scope_differs_from_node_status);
     RUN_TEST(ctrl_mesh_update_entry_shape);
+    RUN_TEST(trace_request_shapes_each_leg);
     RUN_TEST(ctrl_response_topic_is_shared);
     RUN_TEST(ctrl_unknown_command_stages_nothing);
     RUN_TEST(ctrl_bad_json_stages_nothing);

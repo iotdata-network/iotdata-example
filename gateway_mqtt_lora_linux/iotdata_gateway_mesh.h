@@ -235,21 +235,6 @@ bool mesh_receive_neighbour_report_r(mesh_state_t *st, const uint8_t *buf, int l
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool mesh_receive_pong(mesh_state_t *st, const uint8_t *buf, int len) {
-    uint8_t variant;
-    uint16_t station_id, sequence;
-    if (iotdata_mesh_peek_header(buf, len, &variant, &station_id, &sequence)) {
-        mesh_stat_frame(st, IOTDATA_MESH_CTRL_PONG, len, true);
-        if (st->debug)
-            PRINTF_INFO("mesh: rx PONG from station=%03" PRIX16 " (%d bytes)\n", station_id, len);
-        return true;
-    } else {
-        mesh_stat_frame(st, IOTDATA_MESH_CTRL_PONG, len, false);
-        PRINTF_ERROR("mesh: rx PONG unpack failed (len=%d)\n", len);
-        return false;
-    }
-}
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 

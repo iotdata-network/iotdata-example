@@ -22,6 +22,7 @@ typedef struct {
     struct peer_presence_s *state_peer;
     stat_state_t *state_stat;
     struct survey_state_s *state_survey;
+    struct trace_state_s *state_trace;
     char _buffer_mqtt_topic[256], _buffer_mqtt_message[1024];
     iotdata_decode_to_json_scratch_t _iotdata_scratch;
     iotdata_decoder_t _iotdata_dec; /* for the validity gate below, kept out of the stack */

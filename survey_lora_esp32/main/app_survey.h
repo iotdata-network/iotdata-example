@@ -94,6 +94,10 @@ static const char *__tag_survey = "survey";
 
 #define SURVEY_DIRECTIVE_NONE 0u
 
+#ifndef SURVEY_TRACE_MS
+#define SURVEY_TRACE_MS (5u * 60u * 1000u)
+#endif
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
@@ -122,6 +126,7 @@ typedef struct {
     iotdata_mesh_diag_survey_entry_t obs[SURVEY_OBSERVE_MAX];
     int obs_count;
     uint32_t obs_total, obs_dropped;
+    uint32_t trace_last_ms, trace_count;
     button_handle_t button_handle;
 } survey_t;
 
@@ -265,6 +270,33 @@ static void survey_end(survey_t *const s) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+static void survey_trace(survey_t *const s, const char *const why) {
+    const survey_config_t *const c = _survey_cfg;
+    if (c == NULL || c->send == NULL)
+        return;
+    const uint16_t station = idep_station(c->node), seq = idep_sequence(c->node); /* peeked: spent only if it goes */
+    const iotdata_mesh_nbr_entry_t me = { .cost = IOTDATA_MESH_NBR_COST_SENSOR, .rssi_dbm = IOTDATA_MESH_DIAG_RSSI_NONE, .station = station };
+    uint8_t inner[IOTDATA_MESH_DIAG_TRACE_HDR_SIZE + IOTDATA_MESH_DIAG_TRACE_HOP];
+    const int ilen = iotdata_mesh_pack_diag_trace(inner, (int)sizeof(inner), station, seq, IOTDATA_MESH_DIAG_OP_RECORD, SURVEY_DIRECTIVE_NONE, 0u, station, &me, 1);
+    uint8_t frame[IOTDATA_MAX_PACKET_SIZE];
+    const int flen = (ilen > 0) ? iotdata_mesh_pack_forward(frame, (int)sizeof(frame), station, seq, IOTDATA_MESH_TTL_DEFAULT, inner, ilen) : 0;
+    if (flen > 0) {
+        if (c->send(frame, (size_t)flen)) {
+            idep_sequence_used(c->node);
+            (*c->tx_count)++;
+            s->trace_count++;
+            ESP_LOGI(__tag_survey, "trace: %s -- asking the mesh to record its own path home (%d bytes)", why, flen);
+            survey_led_event(s, SURVEY_LED_EVENT_BLINKS);
+        } else {
+            (*c->tx_errors)++;
+            ESP_LOGW(__tag_survey, "trace: %s would not go out", why);
+        }
+    } else
+        ESP_LOGW(__tag_survey, "trace: %s would not build", why);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void survey_poll(survey_t *const s) {
     button_event_t ev;
     while (button_event_fetch(&ev)) {
@@ -278,7 +310,8 @@ static void survey_poll(survey_t *const s) {
         } else if (ev.type == BUTTON_EVENT_LONG_PRESS) {
             s->auto_report = !s->auto_report;
             s->auto_last_ms = hw_time_ms();
-            ESP_LOGI(__tag_survey, "automatic reporting %s", s->auto_report ? "ON" : "OFF -- relays now have nothing of ours to hear");
+            ESP_LOGI(__tag_survey, "automatic reporting and trace %s", s->auto_report ? "ON" : "OFF -- relays now have nothing of ours to hear");
+            s->trace_last_ms = hw_time_ms();
             if (s->auto_report)
                 survey_report(s, "auto start");
         } else if (ev.type == BUTTON_EVENT_EXTRA_LONG_PRESS) {
@@ -298,6 +331,10 @@ static void survey_poll(survey_t *const s) {
     if (s->auto_report && (hw_time_ms() - s->auto_last_ms) >= SURVEY_AUTO_MS) {
         s->auto_last_ms = hw_time_ms();
         survey_report(s, "auto");
+    }
+    if (s->auto_report && (hw_time_ms() - s->trace_last_ms) >= SURVEY_TRACE_MS) {
+        s->trace_last_ms = hw_time_ms();
+        survey_trace(s, "periodic");
     }
     if (s->active && (hw_time_ms() - s->issued_ms) >= SURVEY_REISSUE_MS)
         if (!survey_directive_send(s, true))

@@ -70,6 +70,7 @@ typedef struct {
     buffer_queue_entry_t queue_slot[CTRL_QUEUE_MAX];
     bbox_state_t *bbox;
     survey_state_t *survey;
+    trace_state_t *trace;
     char topic_resp[128];
     char _buffer_resp[244];
     char _buffer_blackbox_rec[BLACKBOX_LINE_MAX];
@@ -269,7 +270,37 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
         const bool is_survey = (strcmp(cmd, "survey") == 0);
         const bool is_survey_cancel = (strcmp(cmd, "survey-cancel") == 0);
         const bool is_config_set = (strcmp(cmd, "conf-set") == 0);
-        if (is_survey || is_survey_cancel) {
+        const bool is_trace = (strcmp(cmd, "trace") == 0);
+        if (is_trace) {
+            /* leg defaults to UP, which is the common question ("how does this node reach me") and
+               the one that needs no answer frame: the record ends here and is published. DOWN ends
+               at the subject instead, so it defaults to asking for an answer -- without one the
+               operator has asked a question of a node that will only write it to its own log. */
+            const cJSON *const jst = cJSON_GetObjectItem(root, "station");
+            const cJSON *const jleg = cJSON_GetObjectItem(root, "leg");
+            const cJSON *const jmode = cJSON_GetObjectItem(root, "mode");
+            const cJSON *const jresp = cJSON_GetObjectItem(root, "respond");
+            const cJSON *const jid = cJSON_GetObjectItem(root, "id");
+            const uint16_t station = cJSON_IsString(jst) ? (uint16_t)strtoul(jst->valuestring, NULL, 16) : (cJSON_IsNumber(jst) ? (uint16_t)jst->valuedouble : 0u);
+            const bool down = cJSON_IsString(jleg) && strcmp(jleg->valuestring, "down") == 0;
+            const bool one = cJSON_IsString(jmode) && strcmp(jmode->valuestring, "one") == 0;
+            const bool respond = cJSON_IsBool(jresp) ? cJSON_IsTrue(jresp) : down;
+            const uint16_t id = cJSON_IsNumber(jid) ? (uint16_t)((uint16_t)jid->valuedouble & 0x0FFFu) : (cJSON_IsString(jid) ? (uint16_t)(strtoul(jid->valuestring, NULL, 16) & 0x0FFFu) : trace_next_id(st->trace));
+            const char *why = "busy";
+            if (trace_request(st->trace, id, station, down, one, respond, &why)) {
+                cJSON *const r = ctrl_respond_begin("trace", cmd);
+                if (r != NULL) {
+                    cJSON_AddStringToObject(r, "text",
+                                            snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "directive %03lX: %s trace of %03lX, %s paths%s", (unsigned long)id, down ? "downward" : "upward", (unsigned long)station,
+                                                            one ? "single" : "all", respond ? ", answer requested" : ""));
+                    ctrl_respond(st, r);
+                }
+                PRINTF_INFO("ctrl: trace %03" PRIX16 " -> station=%03" PRIX16 " leg=%s mode=%s respond=%d\n", id, station, down ? "down" : "up", one ? "one" : "all", (int)respond);
+            } else {
+                ctrl_respond_error(st, cmd, why);
+                st->stat_req_bad++;
+            }
+        } else if (is_survey || is_survey_cancel) {
             const char *why = "busy";
             if (is_survey_cancel) {
                 const cJSON *const jid = cJSON_GetObjectItem(root, "id");
@@ -588,12 +619,13 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, bbox_state_t *bbox, survey_state_t *survey, buffer_pool_t *pool) {
-    assert(st && bbox && survey && pool);
+bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, bbox_state_t *bbox, survey_state_t *survey, trace_state_t *trace, buffer_pool_t *pool) {
+    assert(st && bbox && survey && trace && pool);
     *st = (ctrl_state_t){ 0 };
     st->inode = inode;
     st->bbox = bbox;
     st->survey = survey;
+    st->trace = trace;
     st->pool = pool;
     buffer_queue_init(&st->queue, st->queue_slot, CTRL_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, ctrl_tag_name);

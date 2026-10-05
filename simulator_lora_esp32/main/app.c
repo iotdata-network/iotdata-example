@@ -280,7 +280,7 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
 
     bool any_open = false;
     for (int i = 0; i < SIM_SENSORS && !any_open; i++)
-        any_open = idep_window_active(&s_confs[i], &s_nodes[i], now);
+        any_open = idep_window_active(&s_nodes[i], now);
     if (!any_open)
         return;
 
@@ -289,9 +289,9 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
     /* 0ms first-byte timeout: this is a poll from the main loop, not a blocking receive. */
     while (lora_read(buf, sizeof(buf), &len, &rssi_dbm, 0) == ESP_OK && len > 0) {
         for (int i = 0; i < SIM_SENSORS; i++)
-            if (idep_window_active(&s_confs[i], &s_nodes[i], hw_time_ms())) {
+            if (idep_window_active(&s_nodes[i], hw_time_ms())) {
                 bool reboot = false;
-                if (idep_on_frame(&s_confs[i], &s_nodes[i], buf, (size_t)len, &reboot))
+                if (idep_on_frame(&s_nodes[i], buf, (size_t)len, &reboot))
                     ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " acted on a downstream command", idep_station(&s_nodes[i]));
                 if (reboot) {
                     ESP_LOGW(__tag_app, "node: station=%03" PRIX16 " REBOOT commanded -- restarting", idep_station(&s_nodes[i]));
@@ -304,7 +304,7 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
     }
 
     for (int i = 0; i < SIM_SENSORS; i++)
-        if (s_nodes[i].window_open && !idep_window_active(&s_confs[i], &s_nodes[i], hw_time_ms())) {
+        if (s_nodes[i].window_open && !idep_window_active(&s_nodes[i], hw_time_ms())) {
             idep_window_end(&s_nodes[i]);
             ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " receive window closed", idep_station(&s_nodes[i]));
         }
@@ -336,8 +336,8 @@ static void transmit_packets(iotsim_t *const sim) {
             idep_sequence_used(&s_nodes[idx]); /* in lockstep with the engine's own advance */
         if (idx >= 0 && idx < SIM_SENSORS && idep_window_pending(&s_nodes[idx])) {
             s_nodes[idx].sequence = (uint16_t)(pkt.sequence + 1u);
-            if (idep_receive_announce(&s_confs[idx], &s_nodes[idx])) {
-                idep_window_begin(&s_confs[idx], &s_nodes[idx], hw_time_ms());
+            if (idep_receive_announce(&s_nodes[idx])) {
+                idep_window_begin(&s_nodes[idx], hw_time_ms());
                 ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " receive window open for %ums", idep_station(&s_nodes[idx]), (unsigned)IDEP_RECEIVE_WINDOW_MS);
             }
             hw_delay_ms_yieldable(TRANSMIT_DELAY_MS);
@@ -422,6 +422,7 @@ bool app_init(void) {
         s_nodes[i].elapsed_ms = (uint32_t)((uint64_t)IDEP_RECEIVE_EVERY_MS * (uint32_t)i / (uint32_t)SIM_SENSORS);
         s_confs[i] = s_conf_template;
         s_confs[i].settings = &s_settings[i];
+        idep_node_attach(&s_nodes[i], &s_confs[i]);
         iotdata_settings_defaults(&s_settings[i], s->station_id);
         if (!iotdata_settings_attach_as(&s_settings[i], &s_state, SIM_SETTINGS_TAG(s->station_id), &s_settings_default[i]))
             ESP_LOGW(__tag_app, "state: settings block for station %03" PRIX16 " not registered", s->station_id);
@@ -455,7 +456,7 @@ bool app_exec(void) {
         const uint32_t delta = hw_time_ms() - window_last_ms;
         window_last_ms = hw_time_ms();
         for (int i = 0; i < SIM_SENSORS; i++)
-            (void)idep_window_advance(&s_confs[i], &s_nodes[i], delta);
+            (void)idep_window_advance(&s_nodes[i], delta);
 
         transmit_packets(&g_sim);
         receive_packets(&g_sim);
