@@ -87,6 +87,9 @@
 
 // --- bme280 sensor (sensor_lora_esp32) -------------------------------------------------------------------------------------
 
+#ifndef IOTDATA_CONFIG_SENSOR_ENABLED
+#define IOTDATA_CONFIG_SENSOR_ENABLED true
+#endif
 #ifndef IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS
 #define IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS (60 * 1000) /* one measure+transmit cycle per minute */
 #endif
