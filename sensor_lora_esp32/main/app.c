@@ -89,7 +89,7 @@ typedef struct {
 #include "d_interface_batt.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// IOTDATA PROTOCOL + COMMONS
+// IOTDATA PROTOCOL + PLATFORM
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 /*
@@ -108,26 +108,13 @@ typedef struct {
 #include "iotdata.c"
 #include "iotdata_node.h"
 
-#include "iotdata_node_utils.h"
-#include "iotdata_node_partial.h"
-#define IOTDATA_NODE_VERSION_HAS_BLACKBOX
-#include "iotdata_node_version.h"
-#include "iotdata_node_variant.h"
-#include "iotdata_node_status.h"
-#include "iotdata_node_config.h"
-#include "iotdata_node_control.h"
-#define IOTDATA_NODE_DIAGNOSTICS       IOTDATA_NODE_CONFIG_BLACKBOX
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 #define IOTDATA_NODE_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
-#define IOTDATA_NODE_BLACKBOX_IMPLEMENTATION
+#include "iotdata_node_platform.h"
 static void _iotd_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
 }
-#include "iotdata_node_diagnostics.h"
-// #include "iotdata_node_content.h"
-
-#include "iotdata_node_state.h"
-#include "iotdata_node_settings.h"
-#include "iotdata_node_platform.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------

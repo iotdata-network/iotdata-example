@@ -161,27 +161,13 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_mesh.h"
 #include "iotdata_node.h"
 
-#include "iotdata_node_utils.h"
-#include "iotdata_node_partial.h"
-#define IOTDATA_NODE_VERSION_HAS_MESH
-#define IOTDATA_NODE_VERSION_HAS_BLACKBOX
-#include "iotdata_node_version.h"
-#include "iotdata_node_variant.h"
-#include "iotdata_node_status.h"
-#include "iotdata_node_config.h"
-#include "iotdata_node_control.h"
-#define IOTDATA_NODE_DIAGNOSTICS IOTDATA_NODE_CONFIG_BLACKBOX
-#define IOTDATA_NODE_BLACKBOX_IMPLEMENTATION
-#include "iotdata_node_diagnostics.h"
-// #include "iotdata_node_content.h"
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
-#include "iotdata_node_state.h"
-#include "iotdata_node_console.h"
-#include "iotdata_node_settings.h"
+#define IOTDATA_NODE_VERSION_HAS_MESH
 #define IOTDATA_NODE_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
+#include "iotdata_node_platform.h"
 #include "iotdata_node_down.h"
 #include "iotdata_node_stations.h"
-#include "iotdata_node_platform.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 

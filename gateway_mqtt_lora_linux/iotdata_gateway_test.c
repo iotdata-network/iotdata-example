@@ -106,7 +106,7 @@ typedef struct {
 #include "device/d_module_datastore_linux.h"
 #include "iotdata_node_state.h"
 #include "iotdata_node_settings.h"
-#include "iotdata_node_platform.h"
+#include "iotdata_node_runtime.h"
 #define STATE_NODE_TAG 0xB1E28004UL
 /* The station's identity, shared by the mesh exactly as iotdata_gateway.c shares it. No datastore
    behind it: an unpersisted node still counts, it just starts from 0 after a restart. */
