@@ -117,12 +117,12 @@ static void _iotd_diagnostics_emit(const char *const line) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// CONFIG
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool _iotd_on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
 #define IOTDATA_NODE_CONFIG_LORA_NOTIFY _iotd_on_lora_changed
 #include "iotdata_node_config_device_e22900t22.h"
-
 static bool _iotd_on_batt_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
 #define IOTDATA_NODE_CONFIG_BATT_NOTIFY _iotd_on_batt_changed
 #include "iotdata_node_config_device_batt.h"
@@ -134,16 +134,12 @@ static bool _iotd_on_batt_changed(const iotdata_node_config_row_t *row, const io
     IOTDATA_NODE_CONFIG_ENTRIES_BATT(X)
 
 #include "iotdata_node_config.h"
-
 #include "iotdata_node_config_device_e22900t22.h"
-
 static bool _iotd_on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, __attribute__((unused)) const iotdata_node_config_info_t *info) {
     ESP_LOGW("config", "lora %s changed (was %llu), restart required", row->name, (unsigned long long)was->u);
     return true;
 }
-
 #include "iotdata_node_config_device_batt.h"
-
 static bool _iotd_on_batt_changed(const iotdata_node_config_row_t *row, __attribute__((unused)) const iotdata_node_config_value_t *was, __attribute__((unused)) const iotdata_node_config_info_t *info) {
     if (!iotdata_node_config_batt_apply())
         ESP_LOGW("config", "batt %s changed, but values not accepted", row->name);
@@ -151,6 +147,7 @@ static bool _iotd_on_batt_changed(const iotdata_node_config_row_t *row, __attrib
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// DIAGNOSTICS
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #ifndef POWER_DIAGNOSTICS

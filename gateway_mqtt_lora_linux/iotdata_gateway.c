@@ -152,7 +152,7 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "mqtt_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// IOTDATA
+// IOTDATA PROTOCOL + PLATFORM
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #include "iotdata_variant.h"
@@ -169,6 +169,32 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #include "iotdata_node_down.h"
 #include "iotdata_node_stations.h"
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// CONFIG
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static bool gateway_config_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
+#define IOTDATA_NODE_CONFIG_LORA_NOTIFY gateway_config_changed
+#define IOTDATA_NODE_CONFIG_MESH_NOTIFY gateway_config_changed
+#define IOTDATA_NODE_CONFIG_DDUP_NOTIFY gateway_config_changed
+#define IOTDATA_NODE_CONFIG_MQTT_NOTIFY gateway_config_changed
+#define IOTDATA_NODE_CONFIG_STAT_NOTIFY gateway_config_changed
+#define IOTDATA_GATEWAY_NOTIFY          gateway_config_changed
+#include "iotdata_gateway_conf.h"
+
+#include "iotdata_node_config.h"
+#include "iotdata_gateway_conf.h"
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// CONSOLE
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static const iotdata_node_console_t s_gateway_cons[] = {
+    IOTDATA_NODE_CONFIG_CONSOLE_COMMAND,
+    IOTDATA_NODE_SETTINGS_CONSOLE_COMMAND,
+};
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
@@ -211,6 +237,7 @@ static void gateway_blackbox_end(bbox_state_t *state) {
     }
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
@@ -261,26 +288,6 @@ static void gateway_state_end(store_state_t *state) {
         state->opened = false;
     }
 }
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-static bool gateway_config_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
-#define IOTDATA_NODE_CONFIG_LORA_NOTIFY gateway_config_changed
-#define IOTDATA_NODE_CONFIG_MESH_NOTIFY gateway_config_changed
-#define IOTDATA_NODE_CONFIG_DDUP_NOTIFY gateway_config_changed
-#define IOTDATA_NODE_CONFIG_MQTT_NOTIFY gateway_config_changed
-#define IOTDATA_NODE_CONFIG_STAT_NOTIFY gateway_config_changed
-#define IOTDATA_GATEWAY_NOTIFY          gateway_config_changed
-
-#include "iotdata_gateway_conf.h"
-#include "iotdata_node_config.h"
-#include "iotdata_gateway_conf.h"
-
-static const iotdata_node_console_t s_gateway_cons[] = {
-    IOTDATA_NODE_CONFIG_CONSOLE_COMMAND,
-    IOTDATA_NODE_SETTINGS_CONSOLE_COMMAND,
-};
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------

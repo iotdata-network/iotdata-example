@@ -152,7 +152,7 @@
 #include "iotdata_variant.h"
 #include "iotdata.h"
 #include "iotdata.c"
-#include "iotdata_mesh.h" /* this node issues its own DIAG SURVEY directive */
+#include "iotdata_mesh.h"
 #include "iotdata_node.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -164,10 +164,10 @@ static void _node_diagnostics_emit(const char *const line) {
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// CONFIG
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
-
 #define IOTDATA_NODE_CONFIG_LORA_NOTIFY on_lora_changed
 #include "iotdata_node_config_device_e22900t22.h"
 
@@ -178,7 +178,6 @@ static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_
 
 #include "iotdata_node_config.h"
 #include "iotdata_node_config_device_e22900t22.h"
-
 static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, __attribute__((unused)) const iotdata_node_config_info_t *info) {
     ESP_LOGW("config", "%s changed (was %llu); the radio is configured once, so this needs a restart", row->name, (unsigned long long)was->u);
     return true;

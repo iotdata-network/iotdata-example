@@ -99,23 +99,22 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #define IOTDATA_NODE_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_BATCH_TIME
-/* two blocks per simulated sensor -- its sequence and its settings -- plus the board's own */
-#define IOTDATA_NODE_STATE_BLOCKS_MAX  (2 * IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX + 4)
+#define IOTDATA_NODE_STATE_BLOCKS_MAX  (2 * IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX + 4) /* two blocks per simulated sensor + boards own */
 #include "iotdata_node_platform.h"
 static void _node_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
+// CONFIG
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool sim_transmit_min_ok(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *v, const struct iotdata_node_config_update *u);
-static bool sim_transmit_max_ok(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *v, const struct iotdata_node_config_update *u);
 static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
-
 #define IOTDATA_NODE_CONFIG_LORA_NOTIFY on_lora_changed
 #include "iotdata_node_config_device_e22900t22.h"
 
+static bool sim_transmit_min_ok(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *v, const struct iotdata_node_config_update *u);
+static bool sim_transmit_max_ok(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *v, const struct iotdata_node_config_update *u);
 #define IOTDATA_NODE_CONFIG_ENTRIES(X) \
     /*NAME               id     TYPE min  max                                         default                                     flags                       validate       notify */ \
     X(SENSORS, 0x001, U8, 1, IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX, IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS, IOTDATA_NODE_CONFIG_FLAG_REBOOT, NULL, NULL, "how many simulated sensors this board pretends to be") \
@@ -127,7 +126,6 @@ static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_
 
 #include "iotdata_node_config.h"
 #include "iotdata_node_config_device_e22900t22.h"
-
 static bool sim_transmit_min_ok(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *v, const struct iotdata_node_config_update *u) {
     if (v->u < row->min.u || v->u > row->max.u)
         return false;
@@ -140,11 +138,19 @@ static bool sim_transmit_max_ok(const iotdata_node_config_row_t *row, const iotd
     iotdata_node_config_value_t mn;
     return iotdata_node_config_update_peek(u, IOTDATA_NODE_CFG_TRANSMIT_MIN_S, &mn) && v->u >= mn.u;
 }
-
 static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, __attribute__((unused)) const iotdata_node_config_info_t *info) {
     ESP_LOGW("config", "%s changed (was %llu); the radio is configured once, so this needs a restart", row->name, (unsigned long long)was->u);
     return true;
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// CONSOLE
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static const iotdata_node_console_t s_app_cons[] = {
+    IOTDATA_NODE_CONFIG_CONSOLE_COMMAND,
+    IOTDATA_NODE_SETTINGS_CONSOLE_COMMAND,
+};
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -235,11 +241,6 @@ static int sim_config_build(uint8_t *const buf, const size_t size, iotdata_node_
 static bool sim_config_apply(const uint8_t *const buf, const size_t len, bool *const reboot_out) {
     return iotdata_node_config_apply(buf, len, &s_datastore, reboot_out);
 }
-
-static const iotdata_node_console_t s_app_cons[] = {
-    IOTDATA_NODE_CONFIG_CONSOLE_COMMAND,
-    IOTDATA_NODE_SETTINGS_CONSOLE_COMMAND,
-};
 
 static const iotdata_node_params_t s_conf_template = {
     .caps = &s_caps,
