@@ -47,8 +47,6 @@
     X(CONFIG, 0x001, STRING, 1, 127, CONFIG_FILE_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL | IOTDATA_CONFIG_FLAG_STARTUP, NULL, NULL, "the settings file to read") \
     X(OVERLAY, 0x002, STRING, 1, 127, CONFIG_OVERLAY_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL | IOTDATA_CONFIG_FLAG_STARTUP, NULL, NULL, "where a setting changed at runtime is written, beside that file") \
     X(STATE, 0x003, STRING, 1, 127, STATE_PATH_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the directory this gateway keeps its state in") \
-    /* the notify is what makes this live: process_state caches it, so a write has to say so -- see \
-       gateway_config_recache() in iotdata_gateway.c */ \
     X(DEBUG, 0x004, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, IOTDATA_GATEWAY_NOTIFY, "Debug output (true/false)") \
 \
     X(LORA_PORT, 0x101, STRING, 1, 127, LORA_PORT_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the serial device the E22 radio is on") \
@@ -195,14 +193,14 @@ static bool gateway_config_read(const char *const path, const bool required, con
                 val++;
             for (char *e = val + strlen(val); e > val && isspace((unsigned char)e[-1]);)
                 *--e = '\0';
-            if (*key == '\0')
-                continue;
-            const int row = iotdata_config_index_by_name(key);
-            if (row >= 0 && (iotdata_config_table[row].flags & IOTDATA_CONFIG_FLAG_STARTUP) != 0u) {
-                /* By the time this line is read, the file it is trying to choose is already open. */
-                PRINTF_WARN("config: '%s' has no effect from inside a settings file -- it is a command-line option\n", key);
-            } else
-                (void)gateway_config_set(key, val, from_overlay);
+            if (*key != '\0') {
+                const int row = iotdata_config_index_by_name(key);
+                if (row >= 0 && (iotdata_config_table[row].flags & IOTDATA_CONFIG_FLAG_STARTUP) != 0u) {
+                    /* By the time this line is read, the file it is trying to choose is already open. */
+                    PRINTF_WARN("config: '%s' has no effect from inside a settings file -- it is a command-line option\n", key);
+                } else
+                    (void)gateway_config_set(key, val, from_overlay);
+            }
         }
     }
     (void)fclose(f);

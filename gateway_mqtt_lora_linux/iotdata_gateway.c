@@ -480,10 +480,6 @@ int main(int argc, char *argv[]) {
     }
     PRINTF_INFO("device: connect success (port=%s)\n", state->lora_port);
 
-    /* THE WILL, BEFORE THE CONNECT. A last will is registered as part of CONNECT, so setting it
-       afterwards sets it for a session that has already begun without one -- and the whole point of
-       it is to clear our presence if this process dies without saying so. Only the topic is needed
-       here; the ddup state it reads is already configured. */
     if (state->ddup_state.enabled && state->ddup_state.auto_peer)
         peer_presence_init(&state->peer_presence, &state->ddup_state, idep_station(&state->inode));
 
@@ -527,8 +523,6 @@ int main(int argc, char *argv[]) {
               : EXIT_FAILURE;
     stat_end(&state->stat_state);
 
-    /* say we have gone, rather than leaving the broker to notice: a clean exit clears the retained
-       presence at once, where the will only fires when the connection drops */
     peer_presence_shutdown(&state->peer_presence);
     ctrl_end(&state->ctrl_state);
     survey_end(&state->survey_state);

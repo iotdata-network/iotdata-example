@@ -11,7 +11,7 @@ IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_
 ##
 
 PLATFORM = esp32c3
-NAME     = survey-esp32
+NAME     = survey
 VERSION  = 0.9.9
 
 ##

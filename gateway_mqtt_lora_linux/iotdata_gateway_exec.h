@@ -350,6 +350,82 @@ static bool exec_node_table_row(const uint8_t entry, const uint8_t index, uint8_
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+void process_packet(process_state_t *st) {
+    if (st->rx_held == BUFFER_NONE)
+        st->rx_held = buffer_acquire(st->pool);
+    if (st->rx_held != BUFFER_NONE) {
+        (void)buffer_reset(st->pool, st->rx_held);
+        int packet_rssi_dbm = LORA_RSSI_NONE, packet_length;
+        uint8_t *rxbuf = buffer_data(st->pool, st->rx_held);
+        if (lora_read(rxbuf, buffer_room(st->pool, st->rx_held), &packet_length, &packet_rssi_dbm, LORA_READ_TIMEOUT_MS) == ESP_OK && packet_length > 0) {
+            buffer_set_len(st->pool, st->rx_held, (uint16_t)packet_length);
+            stat_on_link_rx_packet(st->state_stat, (uint16_t)packet_length);
+            if (st->debug_data)
+                debug_hexdump("data: ", rxbuf, (size_t)packet_length);
+            if (packet_rssi_dbm != LORA_RSSI_NONE)
+                stat_on_link_rssi_packet(st->state_stat, packet_rssi_dbm);
+            else
+                stat_on_link_rssi_packet_error(st->state_stat);
+            uint8_t variant_id;
+            uint16_t station_id, sequence;
+            if (iotdata_peek(rxbuf, (size_t)packet_length, &variant_id, &station_id, &sequence) != IOTDATA_OK) {
+                PRINTF_ERROR("exec: packet too short for iotdata header (size=%d)\n", packet_length);
+                stat_on_link_rx_drop(st->state_stat);
+            } else if (!filter_allows(&st->filter, station_id)) {
+                st->filter.stat_blocked++;
+                stat_on_link_rx_drop(st->state_stat);
+                if (st->debug)
+                    PRINTF_INFO("exec: FILTERED from=%03" PRIX16 " var=%" PRIu8 " len=%d (blocked)\n", station_id, variant_id, packet_length);
+            } else if (variant_id == IOTDATA_MESH_VARIANT) {
+                if (st->state_mesh->enabled)
+                    process_mesh_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), packet_rssi_dbm);
+                else {
+                    stat_on_link_rx_mesh_unexpected(st->state_stat, station_id);
+                    PRINTF_INFO("exec: mesh packet unexpected from station=%03" PRIX16 " while not enabled\n", station_id);
+                }
+            } else {
+                // Dedup direct receptions against the SAME ring the forward path uses, so a sensor
+                // heard both directly and via a relay publishes once — whichever path adds {station,
+                // seq} first wins, the other is suppressed. is_new is true unless it was a duplicate
+                // (always true when mesh is off). Track the reception either way for observability.
+                /* a packet may carry system TLVs (node reports) as well as telemetry */
+                (void)node_on_packet(st->state_node, rxbuf, (size_t)packet_length, station_id);
+                /* The driver's value goes in UNTRANSLATED. It already distinguishes a reading
+                   (< 0) from saturation (0) from none (LORA_RSSI_NONE), and the survey
+                   encoding uses the same convention -- mapping "none" onto 0 here, as this
+                   once did, published an absent reading as the strongest one possible. */
+                (void)survey_on_direct(st->state_survey, station_id, sequence, packet_rssi_dbm);
+                if (process_packet_decodes(st, rxbuf, packet_length)) {
+                    /* ADMIT DECIDES, and the network table is told what it decided. A HOLD is
+                       "new" as far as the table is concerned -- the reading was genuinely heard
+                       here, whether or not this gateway ends up being the one to publish it. */
+                    const ddup_verdict_t verdict = ddup_admit(st->state_ddup, station_id, sequence);
+                    const bool is_new = (verdict != DDUP_REJECT);
+                    netw_note_receive(&st->network, station_id, variant_id, sequence, NETW_PATH_DIRECT, is_new, (packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0, 0, time(NULL));
+                    if (verdict == DDUP_PUBLISH)
+                        process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm);
+                    else if (verdict == DDUP_HOLD && !ddup_hold_add(st->state_ddup, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm))
+                        process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm); /* queue full -> publish un-held */
+                } else {
+                    stat_on_link_rx_drop(st->state_stat);
+                    PRINTF_ERROR("exec: undecodable frame from station=%03" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station_id, sequence, packet_length,
+                                 iotdata_strerror(iotdata_decode(rxbuf, (size_t)packet_length, &st->_iotdata_dec)));
+                }
+            }
+            if (st->rx_held != BUFFER_NONE && buffer_refs(st->pool, st->rx_held) > 1) {
+                buffer_unref(st->pool, st->rx_held);
+                st->rx_held = BUFFER_NONE;
+            }
+        }
+    } else {
+        stat_on_link_rx_drop(st->state_stat);
+        PRINTF_ERROR("exec: no frame buffer (pool %u/%u): not reading this cycle\n", (unsigned)buffer_pool_used(st->pool), (unsigned)buffer_pool_total(st->pool));
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_state_t *state_node, mesh_state_t *state_mesh, ddup_state_t *state_ddup, stat_state_t *state_stat, ctrl_state_t *state_ctrl, survey_state_t *state_survey,
                  trace_state_t *state_trace, volatile bool *running) {
     assert(st && state_node && state_mesh && state_ddup && state_stat && state_ctrl && state_survey && running);
@@ -378,98 +454,24 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
     while (*running) {
 
         // packet processing
-        if (st->rx_held == BUFFER_NONE)
-            st->rx_held = buffer_acquire(st->pool);
-        if (st->rx_held != BUFFER_NONE) {
-            (void)buffer_reset(st->pool, st->rx_held);
-            int packet_rssi_dbm = LORA_RSSI_NONE, packet_length;
-            uint8_t *rxbuf = buffer_data(st->pool, st->rx_held);
-            if (lora_read(rxbuf, buffer_room(st->pool, st->rx_held), &packet_length, &packet_rssi_dbm, LORA_READ_TIMEOUT_MS) == ESP_OK && packet_length > 0) {
-                buffer_set_len(st->pool, st->rx_held, (uint16_t)packet_length);
-                stat_on_link_rx_packet(st->state_stat, (uint16_t)packet_length);
-                if (st->debug_data)
-                    debug_hexdump("data: ", rxbuf, (size_t)packet_length);
-                if (packet_rssi_dbm != LORA_RSSI_NONE)
-                    stat_on_link_rssi_packet(st->state_stat, packet_rssi_dbm);
-                else
-                    stat_on_link_rssi_packet_error(st->state_stat);
-                uint8_t variant_id;
-                uint16_t station_id, sequence;
-                if (iotdata_peek(rxbuf, (size_t)packet_length, &variant_id, &station_id, &sequence) != IOTDATA_OK) {
-                    PRINTF_ERROR("exec: packet too short for iotdata header (size=%d)\n", packet_length);
-                    stat_on_link_rx_drop(st->state_stat);
-                } else if (!filter_allows(&st->filter, station_id)) {
-                    st->filter.stat_blocked++;
-                    stat_on_link_rx_drop(st->state_stat);
-                    if (st->debug)
-                        PRINTF_INFO("exec: FILTERED from=%03" PRIX16 " var=%" PRIu8 " len=%d (blocked)\n", station_id, variant_id, packet_length);
-                } else if (variant_id == IOTDATA_MESH_VARIANT) {
-                    if (st->state_mesh->enabled)
-                        process_mesh_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), packet_rssi_dbm);
-                    else {
-                        stat_on_link_rx_mesh_unexpected(st->state_stat, station_id);
-                        PRINTF_INFO("exec: mesh packet unexpected from station=%03" PRIX16 " while not enabled\n", station_id);
-                    }
-                } else {
-                    // Dedup direct receptions against the SAME ring the forward path uses, so a sensor
-                    // heard both directly and via a relay publishes once — whichever path adds {station,
-                    // seq} first wins, the other is suppressed. is_new is true unless it was a duplicate
-                    // (always true when mesh is off). Track the reception either way for observability.
-                    /* a packet may carry system TLVs (node reports) as well as telemetry */
-                    (void)node_on_packet(st->state_node, rxbuf, (size_t)packet_length, station_id);
-                    /* The driver's value goes in UNTRANSLATED. It already distinguishes a reading
-                       (< 0) from saturation (0) from none (LORA_RSSI_NONE), and the survey
-                       encoding uses the same convention -- mapping "none" onto 0 here, as this
-                       once did, published an absent reading as the strongest one possible. */
-                    (void)survey_on_direct(st->state_survey, station_id, sequence, packet_rssi_dbm);
-                    if (process_packet_decodes(st, rxbuf, packet_length)) {
-                        /* ADMIT DECIDES, and the network table is told what it decided. A HOLD is
-                           "new" as far as the table is concerned -- the reading was genuinely heard
-                           here, whether or not this gateway ends up being the one to publish it. */
-                        const ddup_verdict_t verdict = ddup_admit(st->state_ddup, station_id, sequence);
-                        const bool is_new = (verdict != DDUP_REJECT);
-                        netw_note_receive(&st->network, station_id, variant_id, sequence, NETW_PATH_DIRECT, is_new, (packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0, 0, time(NULL));
-                        if (verdict == DDUP_PUBLISH)
-                            process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm);
-                        else if (verdict == DDUP_HOLD && !ddup_hold_add(st->state_ddup, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm))
-                            process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm); /* queue full -> publish un-held */
-                    } else {
-                        stat_on_link_rx_drop(st->state_stat);
-                        PRINTF_ERROR("exec: undecodable frame from station=%03" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station_id, sequence, packet_length,
-                                     iotdata_strerror(iotdata_decode(rxbuf, (size_t)packet_length, &st->_iotdata_dec)));
-                    }
-                }
-                if (st->rx_held != BUFFER_NONE && buffer_refs(st->pool, st->rx_held) > 1) {
-                    buffer_unref(st->pool, st->rx_held);
-                    st->rx_held = BUFFER_NONE;
-                }
-            }
-        } else {
-            stat_on_link_rx_drop(st->state_stat);
-            PRINTF_ERROR("exec: no frame buffer (pool %u/%u): not reading this cycle\n", (unsigned)buffer_pool_used(st->pool), (unsigned)buffer_pool_total(st->pool));
-        }
+        if (*running)
+            process_packet(st);
 
-        // mesh beacons
+        // mesh/ddup processing
         if (*running && st->state_mesh->enabled && intervalable_and_initial(st->state_mesh->beacon_interval_s, &st->state_mesh->beacon_last))
             mesh_transmit_beacon(st->state_mesh);
-
-        // control
-        if (*running) {
+        if (*running)
             ctrl_tick(state_ctrl, state_node);
+        if (*running)
             survey_tick(state_survey, state_mesh);
+        if (*running)
             trace_tick(state_trace, state_mesh);
-            iotdata_console_poll(); /* non-blocking; a gateway with no terminal simply reads nothing */
-        }
         if (*running)
             node_tick(state_node);
-
-        /* PRESENCE: republish ours if it went stale or our address moved, and age out peers whose
-           own presence stopped advancing. Cheap -- it compares two times and usually returns. */
+        if (*running)
+            iotdata_console_poll();
         if (*running && st->state_peer != NULL)
-            peer_presence_tick(st->state_peer, time(NULL));
-
-        /* HELD READINGS WHOSE ELECTION IS OVER. On the loop rather than a timer: the hold is tens
-           to hundreds of milliseconds and this loop turns far faster than that. */
+            peer_presence_tick(st->state_peer, time(NULL)); // ddup
         if (*running)
             ddup_hold_release(st->state_ddup, process_release_cb, st);
 
