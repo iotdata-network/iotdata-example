@@ -124,7 +124,7 @@ typedef struct {
 
 typedef struct {
     const char *version;
-    idep_node_t *inode;
+    iotdata_node_t *inode;
     time_t start_time;
     stat_link_t link;
     stat_station_t stations[STAT_STATIONS_MAX];
@@ -366,10 +366,10 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
     cJSON_AddNumberToObject(root, "count", (double)s->stations_count);
     cJSON *arr = cJSON_AddArrayToObject(root, "stations");
     /* by station id: a station keeps its line between two snapshots (iotdata_node_utils.h) */
-    iotdata_order_t ord[sizeof(s->stations) / sizeof(s->stations[0])];
+    iotdata_node_order_t ord[sizeof(s->stations) / sizeof(s->stations[0])];
     int ordered = 0;
     for (int i = 0; i < s->stations_count; i++)
-        ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->stations[i].station_id, (uint16_t)i);
+        ordered = iotdata_node_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->stations[i].station_id, (uint16_t)i);
     for (int k = 0; k < ordered; k++) {
         const stat_station_t *st = &s->stations[ord[k].slot];
         cJSON *o = cJSON_CreateObject();
@@ -408,7 +408,7 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         cJSON *m = cJSON_AddObjectToObject(root, "mesh");
         cJSON_AddBoolToObject(m, "enabled", mesh->enabled);
         char buf[4 + 1];
-        cJSON_AddStringToObject(m, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, idep_station(mesh->inode)));
+        cJSON_AddStringToObject(m, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, iotdata_node_station(mesh->inode)));
         cJSON_AddNumberToObject(m, "beacons_tx", (double)mesh->stat_beacons_tx);
         /* per frame type: only types actually seen are emitted, so the object stays small on a
            quiet link but gains a key the first time a new type appears */
@@ -436,10 +436,10 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         cJSON_AddNumberToObject(m, "tx_bytes", (double)mesh->stat_bytes_tx);
         cJSON *peers = cJSON_AddArrayToObject(m, "peers");
         /* by station id, as everywhere else (iotdata_node_utils.h) */
-        iotdata_order_t ord_peer[sizeof(s->peers) / sizeof(s->peers[0])];
+        iotdata_node_order_t ord_peer[sizeof(s->peers) / sizeof(s->peers[0])];
         int ordered_peer = 0;
         for (int i = 0; i < s->peers_count; i++)
-            ordered_peer = iotdata_order_insert(ord_peer, ordered_peer, (int)(sizeof(ord_peer) / sizeof(ord_peer[0])), s->peers[i].station_id, (uint16_t)i);
+            ordered_peer = iotdata_node_order_insert(ord_peer, ordered_peer, (int)(sizeof(ord_peer) / sizeof(ord_peer[0])), s->peers[i].station_id, (uint16_t)i);
         for (int k = 0; k < ordered_peer; k++) {
             const stat_peer_t *const e = &s->peers[ord_peer[k].slot];
             cJSON *p = cJSON_CreateObject();
@@ -541,7 +541,7 @@ cJSON *stat_build_stat_json(const stat_state_t *const s, const mesh_state_t *con
     const time_t now = time(NULL);
     cJSON *root = cJSON_CreateObject();
     char buf[4 + 1];
-    cJSON_AddStringToObject(root, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, idep_station(s->inode)));
+    cJSON_AddStringToObject(root, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, iotdata_node_station(s->inode)));
     cJSON_AddStringToObject(root, "version", s->version ? s->version : "");
     cJSON_AddNumberToObject(root, "time", (double)now);
     cJSON_AddNumberToObject(root, "uptime_secs", (double)(now - s->start_time));
@@ -642,8 +642,8 @@ void stat_publish(stat_state_t *const s, const mesh_state_t *const mesh, const d
         char *json = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
         if (json) {
-            const char *const mqtt_topic = iotdata_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX);
-            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s%s%03" PRIX16, mqtt_topic, (mqtt_topic[0] != '\0' && mqtt_topic[strlen(mqtt_topic) - 1] == '/') ? "" : "/", idep_station(s->inode)), json,
+            const char *const mqtt_topic = iotdata_node_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX);
+            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s%s%03" PRIX16, mqtt_topic, (mqtt_topic[0] != '\0' && mqtt_topic[strlen(mqtt_topic) - 1] == '/') ? "" : "/", iotdata_node_station(s->inode)), json,
                             (int)strlen(json));
             free(json);
         }
@@ -659,7 +659,7 @@ void stat_display(stat_state_t *const s, const mesh_state_t *const mesh, const d
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, idep_node_t *const inode, const char *const version, const lora_config_t *const lora_config, const buffer_pool_t *const pool) {
+bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic_prefix, iotdata_node_t *const inode, const char *const version, const lora_config_t *const lora_config, const buffer_pool_t *const pool) {
     assert(topic_prefix && version && lora_config);
 
     s->pool = pool;
@@ -676,7 +676,7 @@ bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic
     s->link.packet_rate_bps = lora_config->air_data_rate;
     s->link.transmit_power_dbm = lora_config->transmit_power;
 
-    PRINTF_INFO("stat: started (gateway=%03" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", idep_station(s->inode), s->link.name, s->link.channel, s->link.frequency_khz);
+    PRINTF_INFO("stat: started (gateway=%03" PRIX16 ", link=%s, channel=%" PRIu8 ", freq=%" PRIu32 " kHz)\n", iotdata_node_station(s->inode), s->link.name, s->link.channel, s->link.frequency_khz);
 
     return true;
 }

@@ -25,7 +25,7 @@ typedef uint8_t (*node_table_count_handler_t)(uint8_t entry);
 typedef bool (*node_table_row_handler_t)(uint8_t entry, uint8_t index, uint8_t *out_row);
 
 typedef struct {
-    idep_node_t *inode;
+    iotdata_node_t *inode;
 
     /* CONFIG: reporting cadence, indexed by TLV type. 0 = do not send periodically. */
     uint16_t period[IOTDATA_NODE_TLV_SYSTEM_COUNT];
@@ -34,7 +34,7 @@ typedef struct {
     bool startup_done;
 
     /* what we report ON: borrowed, not owned */
-    const iotdata_version_caps_t *caps;
+    const iotdata_node_version_caps_t *caps;
     bool reboot_requested; /* a REBOOT arrived: the loop stops and the supervisor restarts us */
     const stat_state_t *stat;
     bbox_state_t *bbox;
@@ -53,9 +53,9 @@ typedef struct {
        APPLICATION and this header is included before the X-macro that expands it. Both NULL today:
        the gateway keeps its configuration in its own file and has not been migrated, so it answers
        a CONFIG request with an empty report -- which is an answer, and an honest one. */
-    idep_config_build_fn config_build;
-    idep_config_apply_fn config_apply;
-    iotdata_settings_t *settings;
+    iotdata_node_config_build_fn config_build;
+    iotdata_node_config_apply_fn config_apply;
+    iotdata_node_settings_t *settings;
     iotdata_node_state_t *state;
 
     const uint8_t *control_actions;
@@ -63,7 +63,7 @@ typedef struct {
     char topic_resp[128]; /* mqtt */
 
     /* down frames we are holding for nodes that were not listening when we sent them */
-    iotdata_down_t down;
+    iotdata_node_down_t down;
 
     /* stats */
     uint32_t stat_rx, stat_requests, stat_reports, stat_commands, stat_unknown;
@@ -81,10 +81,10 @@ typedef struct {
    (The relay says exactly this in relay_node.h. The two nodes are separate modules by history, and
    the point of stating it identically is that the cadence cannot differ by accident.) */
 static inline bool node_at_startup(const node_state_t *const st, const uint8_t type) {
-    return (st->settings != NULL) ? iotdata_settings_at_startup(st->settings, type) : ((st->startup >> type) & 1u) != 0u;
+    return (st->settings != NULL) ? iotdata_node_settings_at_startup(st->settings, type) : ((st->startup >> type) & 1u) != 0u;
 }
 static inline uint16_t node_period_s(const node_state_t *const st, const uint8_t type) {
-    return (st->settings != NULL) ? iotdata_settings_period_s(st->settings, type) : st->period[type];
+    return (st->settings != NULL) ? iotdata_node_settings_period_s(st->settings, type) : st->period[type];
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -93,7 +93,7 @@ static inline uint16_t node_period_s(const node_state_t *const st, const uint8_t
 static int node_build_version(const node_state_t *st, uint8_t *buf, const size_t size) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
-    return iotdata_version_pack(&kv, st->caps);
+    return iotdata_node_version_pack(&kv, st->caps);
 }
 
 static int node_build_settings(const node_state_t *st, uint8_t *buf, const size_t size, const uint8_t *sel, const uint8_t sellen) {
@@ -101,7 +101,7 @@ static int node_build_settings(const node_state_t *st, uint8_t *buf, const size_
     iotdata_kvr_init(&kv, buf, size);
     if (st->settings == NULL)
         return kv.overflow ? -1 : (int)kv.len;
-    return iotdata_settings_pack(&kv, st->settings, sel, sellen);
+    return iotdata_node_settings_pack(&kv, st->settings, sel, sellen);
 }
 
 /* VARIANT is one key per variant this node PRODUCES, keyed by the variant number.
@@ -110,18 +110,18 @@ static int node_build_settings(const node_state_t *st, uint8_t *buf, const size_
    produce none" is an answer. Its compiled-in variant table is full, but that table is what it can
    DECODE from everybody else, which is a different question and must not be answered here; the
    mesh variant it speaks is not a telemetry variant either. A node that does produce telemetry
-   calls iotdata_variant_pack() instead (iotdata_node_variant.h). */
+   calls iotdata_node_variant_pack() instead (iotdata_node_variant.h). */
 static int node_build_variant(__attribute__((unused)) const node_state_t *st, uint8_t *buf, const size_t size) {
-    return iotdata_variant_pack_none(buf, size);
+    return iotdata_node_variant_pack_none(buf, size);
 }
 
 static int node_build_control(const node_state_t *st, uint8_t *buf, const size_t size) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
-    return iotdata_control_pack(&kv, &(const iotdata_control_report_t){ .actions = st->control_actions, .actions_count = st->control_actions_count });
+    return iotdata_node_control_pack(&kv, &(const iotdata_node_control_report_t){ .actions = st->control_actions, .actions_count = st->control_actions_count });
 }
 
-static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t size, const uint8_t scope, iotdata_partial_t *const partial) {
+static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t size, const uint8_t scope, iotdata_node_partial_t *const partial) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
     const uint32_t cursor = (partial != NULL) ? partial->cursor : 0u;
@@ -141,7 +141,7 @@ static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t 
             /* a table's size comes from the table, never from a second counter that could drift */
             s.mesh.peers = st->table_count(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY);
         }
-        if (iotdata_status_pack(&kv, &s, scope) < 0)
+        if (iotdata_node_status_pack(&kv, &s, scope) < 0)
             return -1;
     }
     if (st->table_count != NULL && st->table_row != NULL) {
@@ -178,11 +178,11 @@ static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t 
    share -- NOT kvr, because a config id is 12 bits and a kvr key is 8. Nothing is attached yet, so
    this reports EMPTY: the gateway's own settings still live in its .cfg file. An empty report is an
    answer, and the truthful one until that migration happens. */
-static int node_build_config(const node_state_t *st, uint8_t *buf, const size_t size, iotdata_partial_t *partial) {
+static int node_build_config(const node_state_t *st, uint8_t *buf, const size_t size, iotdata_node_partial_t *partial) {
     return (st->config_build != NULL) ? st->config_build(buf, size, partial) : 0;
 }
 
-static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t size, iotdata_partial_t *partial) {
+static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t size, iotdata_node_partial_t *partial) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
     iotdata_kvr_add_u8(&kv, IOTDATA_NODE_DIAGNOSTICS_TYPE, IOTDATA_NODE_DIAG_BLACKBOX);
@@ -212,7 +212,7 @@ static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t s
     return kv.overflow ? -1 : (int)kv.len;
 }
 
-static int node_build(node_state_t *st, const uint8_t type, uint8_t *buf, const size_t size, const uint8_t scope, iotdata_partial_t *partial) {
+static int node_build(node_state_t *st, const uint8_t type, uint8_t *buf, const size_t size, const uint8_t scope, iotdata_node_partial_t *partial) {
     switch (type) {
     case IOTDATA_NODE_TLV_VERSION:
         return node_build_version(st, buf, size);
@@ -337,9 +337,9 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
         if (name == NULL)
             name = snprintf_inline(namebuf, sizeof(namebuf), "0x%02X", key);
         const uint8_t width = iotdata_node_tlv_key_width(type, key);
-        if (type == IOTDATA_NODE_TLV_VERSION && iotdata_version_json_key(obj, name, key, val, vlen)) {
+        if (type == IOTDATA_NODE_TLV_VERSION && iotdata_node_version_json_key(obj, name, key, val, vlen)) {
             // empty
-        } else if (type == IOTDATA_NODE_TLV_STATUS && iotdata_status_json_key(obj, name, key, val, vlen)) {
+        } else if (type == IOTDATA_NODE_TLV_STATUS && iotdata_node_status_json_key(obj, name, key, val, vlen)) {
             /* A variant pair carries its variant number inside the value, so render it under that
                number rather than under the key -- "variant"/"names" repeated would collide. The slots
                are rendered as slots: a hex blob says nothing about which field sits where, and an
@@ -409,7 +409,7 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
     }
 }
 
-static void node_publish_from(node_state_t *st, const uint16_t station, const uint8_t type, const uint8_t *kvbuf, const size_t kvlen, const iotdata_partial_t *partial) {
+static void node_publish_from(node_state_t *st, const uint16_t station, const uint8_t type, const uint8_t *kvbuf, const size_t kvlen, const iotdata_node_partial_t *partial) {
     cJSON *root = cJSON_CreateObject();
     if (root) {
         char buf[4 + 1];
@@ -438,19 +438,19 @@ static void node_publish_from(node_state_t *st, const uint16_t station, const ui
     }
 }
 
-static bool node_report_paged(node_state_t *st, const uint8_t type, const uint8_t scope, iotdata_partial_t *partial) {
-    iotdata_partial_begin(partial, idep_sequence(st->inode));
+static bool node_report_paged(node_state_t *st, const uint8_t type, const uint8_t scope, iotdata_node_partial_t *partial) {
+    iotdata_node_partial_begin(partial, iotdata_node_sequence(st->inode));
     const int kvlen = node_build(st, type, st->_buffer_kv, sizeof(st->_buffer_kv), scope, partial);
     if (kvlen < 0) /* not 0: an empty payload is a legitimate report */
         return false;
     st->stat_reports++;
-    node_publish_from(st, idep_station(st->inode), type, st->_buffer_kv, (size_t)kvlen, iotdata_partial_needed(partial) ? partial : NULL);
-    iotdata_partial_sent(partial);
+    node_publish_from(st, iotdata_node_station(st->inode), type, st->_buffer_kv, (size_t)kvlen, iotdata_node_partial_needed(partial) ? partial : NULL);
+    iotdata_node_partial_sent(partial);
     return true;
 }
 
 static bool node_report_scoped(node_state_t *st, const uint8_t type, const uint8_t scope) {
-    iotdata_partial_t partial = { 0 };
+    iotdata_node_partial_t partial = { 0 };
     return node_report_paged(st, type, scope, &partial);
 }
 
@@ -506,7 +506,7 @@ static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const s
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool node_addressed_to_us(const node_state_t *st, const uint16_t station) {
-    return station == idep_station(st->inode) || station == IOTDATA_STATION_BROADCAST;
+    return station == iotdata_node_station(st->inode) || station == IOTDATA_STATION_BROADCAST;
 }
 
 /* `tlv` says what the payload IS. CONTROL for a command, CONFIG for a write -- a write is not a
@@ -520,8 +520,8 @@ static bool node_send_down(node_state_t *st, const uint8_t *kvbuf, const size_t 
         ok = iotdata_encode_begin(&st->_iotdata_enc, buf, buffer_room(st->pool, h), 0, target, IOTDATA_SEQUENCE_DOWN) == IOTDATA_OK && iotdata_encode_tlv(&st->_iotdata_enc, tlv, kvbuf, (uint8_t)kvlen) == IOTDATA_OK &&
              iotdata_encode_end(&st->_iotdata_enc, &len) == IOTDATA_OK;
         if (ok) {
-            const iotdata_down_ev_t ev = iotdata_down_offer(&st->down, target, buf, len, h, 0u /* the gateway does not model its own air rate: 0 means "assume it fits" */, hw_time_ms());
-            PRINTF_INFO("node: down -> %03" PRIX16 " (%zu bytes, %s, %s)\n", target, len, iotdata_down_ev_name(ev), iotdata_node_tlv_name(tlv) ? iotdata_node_tlv_name(tlv) : "?");
+            const iotdata_node_down_ev_t ev = iotdata_node_down_offer(&st->down, target, buf, len, h, 0u /* the gateway does not model its own air rate: 0 means "assume it fits" */, hw_time_ms());
+            PRINTF_INFO("node: down -> %03" PRIX16 " (%zu bytes, %s, %s)\n", target, len, iotdata_node_down_ev_name(ev), iotdata_node_tlv_name(tlv) ? iotdata_node_tlv_name(tlv) : "?");
             ok = st->tx(buf, (int)len);
         }
         buffer_unref(st->pool, h); /* written straight to the radio (and copied by the DOWN store) */
@@ -541,7 +541,7 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
             /* Snooped unconditionally: the advertisement is how the table learns this station is
                deliverable at all, so it is recorded even when nothing is held for it yet. */
             size_t held_len = 0;
-            const buffer_handle_t held = iotdata_down_window(&st->down, station, &rx, 0u /* the gateway does not model its own air rate: 0 means "assume it fits" */, hw_time_ms(), &held_len);
+            const buffer_handle_t held = iotdata_node_down_window(&st->down, station, &rx, 0u /* the gateway does not model its own air rate: 0 means "assume it fits" */, hw_time_ms(), &held_len);
             if (held != BUFFER_NONE) {
                 PRINTF_INFO("node: %03" PRIX16 " is listening -> delivering %zu byte(s) held\n", station, held_len);
                 (void)st->tx(buffer_data(st->pool, held), (int)held_len);
@@ -578,7 +578,7 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
              * echo would double-count and double-report every broadcast we send. Idempotence makes
              * that harmless rather than correct, so it waits for a way to tell them apart.
              */
-            if (station == idep_station(st->inode))
+            if (station == iotdata_node_station(st->inode))
                 for (uint8_t i = 0; i < st->_iotdata_dec.tlv_count; i++) {
                     const iotdata_decoder_tlv_t *const t = &st->_iotdata_dec.tlv[i];
                     if (t->format == IOTDATA_TLV_FMT_RAW && t->type == IOTDATA_NODE_TLV_CONTROL) {
@@ -595,11 +595,11 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
                         st->stat_rx++;
                         st->stat_commands++;
                         PRINTF_INFO("node: SETTINGS write over the air (%u byte(s))\n", (unsigned)t->length);
-                        if (st->settings != NULL && iotdata_settings_apply(st->settings, t->raw, t->length)) {
-                            (void)iotdata_settings_commit(st->settings, st->state);
+                        if (st->settings != NULL && iotdata_node_settings_apply(st->settings, t->raw, t->length)) {
+                            (void)iotdata_node_settings_commit(st->settings, st->state);
                             /* a written station takes effect NOW, so the reply goes out as who we
                             have become rather than as who we were */
-                            (void)idep_node_adopt_station(st->inode, iotdata_settings_station(st->settings));
+                            (void)iotdata_node_adopt_station(st->inode, iotdata_node_settings_station(st->settings));
                         }
                         (void)node_report(st, IOTDATA_NODE_TLV_SETTINGS);
                         ok = true;
@@ -608,11 +608,11 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
         } else
             for (uint8_t i = 0; i < st->_iotdata_dec.tlv_count; i++) {
                 const iotdata_decoder_tlv_t *const t = &st->_iotdata_dec.tlv[i];
-                if (!iotdata_partial_is(t))
+                if (!iotdata_node_partial_is(t))
                     if (iotdata_tlv_type_is_system(t->type) && t->format == IOTDATA_TLV_FMT_RAW) {
                         st->stat_rx++;
-                        iotdata_partial_t p;
-                        const bool paged = iotdata_partial_of(&st->_iotdata_dec, i, &p);
+                        iotdata_node_partial_t p;
+                        const bool paged = iotdata_node_partial_of(&st->_iotdata_dec, i, &p);
                         node_publish_from(st, station, t->type, t->raw, t->length, paged ? &p : NULL);
                         ok = true;
                     }
@@ -637,13 +637,13 @@ static void node_on_mqtt(node_state_t *const st, const uint8_t *kvbuf, const siz
             (void)node_report(st, IOTDATA_NODE_TLV_CONFIG);
         }
     }
-    if (target != idep_station(st->inode))
+    if (target != iotdata_node_station(st->inode))
         (void)node_send_down(st, kvbuf, kvlen, target, tlv);
 }
 
 /* Attach the gateway's own configuration. Separate for the reason the relay's is: the table does not
    exist yet when the node layer is set up. Unused while the gateway is unmigrated. */
-__attribute__((unused)) static void node_config_attach(node_state_t *const st, const idep_config_build_fn build, const idep_config_apply_fn apply) {
+__attribute__((unused)) static void node_config_attach(node_state_t *const st, const iotdata_node_config_build_fn build, const iotdata_node_config_apply_fn apply) {
     st->config_build = build;
     st->config_apply = apply;
 }
@@ -653,9 +653,9 @@ __attribute__((unused)) static void node_config_attach(node_state_t *const st, c
 
 static void node_tick(node_state_t *const st) {
     const time_t now = time(NULL);
-    const int stale = iotdata_down_tick(&st->down, hw_time_ms());
+    const int stale = iotdata_node_down_tick(&st->down, hw_time_ms());
     if (stale > 0)
-        PRINTF_INFO("node: %d held command(s) expired unclaimed (ttl=%" PRIu32 "s)\n", stale, iotdata_down_ttl_ms(&st->down) / 1000u);
+        PRINTF_INFO("node: %d held command(s) expired unclaimed (ttl=%" PRIu32 "s)\n", stale, iotdata_node_down_ttl_ms(&st->down) / 1000u);
     if (!st->startup_done) {
         st->startup_done = true;
         /* bit N selects type N: the mapping table this replaces said the same thing in six entries
@@ -682,14 +682,14 @@ static void node_tick(node_state_t *const st) {
 
 /* Attach the protocol settings and their store. Separate from node_begin() so its parameter list
    does not grow a pair that most callers pass as NULL. */
-static void node_settings_attach(node_state_t *st, iotdata_settings_t *settings, iotdata_node_state_t *state) {
+static void node_settings_attach(node_state_t *st, iotdata_node_settings_t *settings, iotdata_node_state_t *state) {
     if (st == NULL)
         return;
     st->settings = settings;
     st->state = state;
 }
 
-static bool node_begin(node_state_t *st, idep_node_t *const inode, const iotdata_version_caps_t *caps, const stat_state_t *stat, bbox_state_t *bbox, buffer_pool_t *pool, node_tx_handler_t tx, node_control_handler_t control,
+static bool node_begin(node_state_t *st, iotdata_node_t *const inode, const iotdata_node_version_caps_t *caps, const stat_state_t *stat, bbox_state_t *bbox, buffer_pool_t *pool, node_tx_handler_t tx, node_control_handler_t control,
                        node_status_mesh_handler_t status_mesh, node_table_count_handler_t table_count, node_table_row_handler_t table_row, const uint8_t *control_actions, const uint8_t control_actions_count, const char *topic_prefix) {
     assert(stat && bbox && pool && tx && topic_prefix);
     st->inode = inode;
@@ -704,17 +704,17 @@ static bool node_begin(node_state_t *st, idep_node_t *const inode, const iotdata
     st->table_row = table_row;
     st->control_actions = control_actions;
     st->control_actions_count = control_actions_count;
-    iotdata_down_init(&st->down, pool);
+    iotdata_node_down_init(&st->down, pool);
     /* The same defaults every other node comes up with. They used to be absent here, which left
        BOTH at zero -- no startup burst, no periodic STATUS -- so a gateway announced itself only
        when asked. Nobody decided that; it was the difference between a module that had the numbers
        and one that did not. SETTINGS still overrides either. */
     if (st->startup == 0)
-        st->startup = IOTDATA_SETTINGS_DEFAULT_STARTUP;
+        st->startup = IOTDATA_NODE_SETTINGS_DEFAULT_STARTUP;
     if (st->period[IOTDATA_NODE_TLV_STATUS] == 0)
-        st->period[IOTDATA_NODE_TLV_STATUS] = (uint16_t)IOTDATA_SETTINGS_DEFAULT_PERIOD_STATUS_S;
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_MQTT_MANAGE_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
-    PRINTF_INFO("node: station=%03" PRIX16 ", responses on %s\n", idep_station(st->inode), st->topic_resp);
+        st->period[IOTDATA_NODE_TLV_STATUS] = (uint16_t)IOTDATA_NODE_SETTINGS_DEFAULT_PERIOD_STATUS_S;
+    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
+    PRINTF_INFO("node: station=%03" PRIX16 ", responses on %s\n", iotdata_node_station(st->inode), st->topic_resp);
     return true;
 }
 

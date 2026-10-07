@@ -27,7 +27,7 @@
 #define TRACE_FRAME_GW_MAX (IOTDATA_MESH_DIAG_TRACE_HDR_SIZE + IOTDATA_MESH_DIAG_TRACE_HOP)
 
 typedef struct trace_state_s {
-    idep_node_t *inode;
+    iotdata_node_t *inode;
     buffer_pool_t *pool;
     char topic_resp[128];
     buffer_queue_t queue;
@@ -127,7 +127,7 @@ static bool trace_on_frame(trace_state_t *const st, const uint8_t *const buf, co
                     st->stat_truncated++;
                 if (dg.op == IOTDATA_MESH_DIAG_OP_RECORD) {
                     /* We are the end of this path, and the link we heard it over is part of it. */
-                    const iotdata_mesh_nbr_entry_t me = { .cost = 0u, .rssi_dbm = rssi_dbm, .station = idep_station(st->inode) };
+                    const iotdata_mesh_nbr_entry_t me = { .cost = 0u, .rssi_dbm = rssi_dbm, .station = iotdata_node_station(st->inode) };
                     trace_publish(st, &dg, buf, len, &me);
                     st->stat_records++;
                 } else {
@@ -201,13 +201,13 @@ static bool trace_request(trace_state_t *const st, const uint16_t directive_id, 
     /* Peeked: a sequence is spent only once the frame is real AND the queue owns it. A pack that
        would not fit must leave the counter alone, or the gap reads as a frame that went missing
        rather than one that never existed. */
-    const uint16_t seq = idep_sequence(st->inode);
+    const uint16_t seq = iotdata_node_sequence(st->inode);
     int len;
     if (down) {
-        const iotdata_mesh_nbr_entry_t me = { .cost = 0u, .rssi_dbm = IOTDATA_MESH_DIAG_RSSI_NONE, .station = idep_station(st->inode) };
-        len = iotdata_mesh_pack_diag_trace(frame, (int)sizeof(frame), idep_station(st->inode), seq, IOTDATA_MESH_DIAG_OP_RECORD, directive_id, flags, subject, &me, 1);
+        const iotdata_mesh_nbr_entry_t me = { .cost = 0u, .rssi_dbm = IOTDATA_MESH_DIAG_RSSI_NONE, .station = iotdata_node_station(st->inode) };
+        len = iotdata_mesh_pack_diag_trace(frame, (int)sizeof(frame), iotdata_node_station(st->inode), seq, IOTDATA_MESH_DIAG_OP_RECORD, directive_id, flags, subject, &me, 1);
     } else
-        len = iotdata_mesh_pack_diag_trace_request(frame, (int)sizeof(frame), idep_station(st->inode), seq, directive_id, flags, subject);
+        len = iotdata_mesh_pack_diag_trace_request(frame, (int)sizeof(frame), iotdata_node_station(st->inode), seq, directive_id, flags, subject);
     if (len <= 0) {
         *why = "the frame would not build";
         return false;
@@ -216,7 +216,7 @@ static bool trace_request(trace_state_t *const st, const uint16_t directive_id, 
         *why = "busy: nothing staged";
         return false;
     }
-    idep_sequence_used(st->inode);
+    iotdata_node_sequence_used(st->inode);
     st->stat_issued++;
     return true;
 }
@@ -244,14 +244,14 @@ static void trace_tick(trace_state_t *const st, mesh_state_t *const mesh) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void trace_begin(trace_state_t *const st, const char *const topic_prefix, idep_node_t *const inode, buffer_pool_t *const pool) {
+static void trace_begin(trace_state_t *const st, const char *const topic_prefix, iotdata_node_t *const inode, buffer_pool_t *const pool) {
     assert(st && pool);
     *st = (trace_state_t){ 0 };
     st->inode = inode;
     st->pool = pool;
     buffer_queue_init(&st->queue, st->queue_slot, GW_TRACE_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, trace_tag_name);
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
+    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

@@ -60,7 +60,7 @@ typedef struct {
 } gw_survey_directive_t;
 
 typedef struct survey_state_s {
-    idep_node_t *inode;
+    iotdata_node_t *inode;
     buffer_pool_t *pool;
     char topic_resp[128];
     gw_survey_directive_t d[GW_SURVEY_DIRECTIVES_MAX];
@@ -156,7 +156,7 @@ static void survey_publish_note(survey_state_t *const st, const char *const cmd,
     char idbuf[4 + 1];
     cJSON_AddStringToObject(root, "resp", "survey");
     cJSON_AddStringToObject(root, "cmd", cmd);
-    cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, idep_station(st->inode)));
+    cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, iotdata_node_station(st->inode)));
     cJSON_AddStringToObject(root, "text", text);
     char *const out = cJSON_PrintUnformatted(root);
     if (out != NULL) {
@@ -210,8 +210,8 @@ static bool survey_request(survey_state_t *const st, const uint16_t directive_id
     /* Peeked. A sequence is spent only once the frame is real AND the staging queue has taken
        ownership of it -- a pack that would not fit, or a queue with no room, must leave the counter
        alone, or the gap reads as a frame that went missing rather than one that never existed. */
-    const uint16_t seq = idep_sequence(st->inode);
-    const int len = iotdata_mesh_pack_diag_survey_request(frame, (int)sizeof(frame), idep_station(st->inode), seq, directive_id, duration_m, batch_s, stations, count);
+    const uint16_t seq = iotdata_node_sequence(st->inode);
+    const int len = iotdata_mesh_pack_diag_survey_request(frame, (int)sizeof(frame), iotdata_node_station(st->inode), seq, directive_id, duration_m, batch_s, stations, count);
     if (len <= 0) {
         *why = "the request would not fit a frame";
         return false;
@@ -220,7 +220,7 @@ static bool survey_request(survey_state_t *const st, const uint16_t directive_id
         *why = "busy: nothing staged";
         return false;
     }
-    idep_sequence_used(st->inode);
+    iotdata_node_sequence_used(st->inode);
     if (spare >= 0) {
         gw_survey_directive_t *const d = &st->d[spare];
         *d = (gw_survey_directive_t){ 0 };
@@ -250,14 +250,14 @@ static uint16_t survey_next_id(survey_state_t *const st) {
 
 static bool survey_cancel(survey_state_t *const st, const uint16_t directive_id, const bool all, const char **const why) {
     uint8_t frame[IOTDATA_MESH_DIAG_CANCEL_SIZE];
-    const uint16_t seq = idep_sequence(st->inode); /* peeked, spent below only if it is staged */
-    const int len = all ? iotdata_mesh_pack_diag_cancel_all(frame, (int)sizeof(frame), idep_station(st->inode), seq, IOTDATA_MESH_DIAG_SURVEY)
-                        : iotdata_mesh_pack_diag_cancel(frame, (int)sizeof(frame), idep_station(st->inode), seq, IOTDATA_MESH_DIAG_SURVEY, directive_id);
+    const uint16_t seq = iotdata_node_sequence(st->inode); /* peeked, spent below only if it is staged */
+    const int len = all ? iotdata_mesh_pack_diag_cancel_all(frame, (int)sizeof(frame), iotdata_node_station(st->inode), seq, IOTDATA_MESH_DIAG_SURVEY)
+                        : iotdata_mesh_pack_diag_cancel(frame, (int)sizeof(frame), iotdata_node_station(st->inode), seq, IOTDATA_MESH_DIAG_SURVEY, directive_id);
     if (len <= 0 || !survey_stage(st, frame, len)) {
         *why = "busy: nothing staged";
         return false;
     }
-    idep_sequence_used(st->inode);
+    iotdata_node_sequence_used(st->inode);
     for (int i = 0; i < (int)(sizeof(st->d) / sizeof(st->d[0])); i++) {
         gw_survey_directive_t *const d = &st->d[i];
         if (d->used && (all || d->directive_id == directive_id))
@@ -277,7 +277,7 @@ static int survey_on_direct(survey_state_t *const st, const uint16_t station, co
         if (d->used) {
             for (int j = 0; j < d->station_count; j++)
                 if (d->station[j] == station) {
-                    survey_publish(st, d->directive_id, idep_station(st->inode), station, sequence, rssi_dbm, IOTDATA_MESH_DIAG_SNR_NONE, NULL);
+                    survey_publish(st, d->directive_id, iotdata_node_station(st->inode), station, sequence, rssi_dbm, IOTDATA_MESH_DIAG_SNR_NONE, NULL);
                     d->observed++;
                     st->stat_observed++;
                     n++;
@@ -361,14 +361,14 @@ static void survey_tick(survey_state_t *const st, mesh_state_t *const mesh) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void survey_begin(survey_state_t *const st, const char *const topic_prefix, idep_node_t *const inode, buffer_pool_t *const pool) {
+static void survey_begin(survey_state_t *const st, const char *const topic_prefix, iotdata_node_t *const inode, buffer_pool_t *const pool) {
     assert(st && pool);
     *st = (survey_state_t){ 0 };
     st->inode = inode;
     st->pool = pool;
     buffer_queue_init(&st->queue, st->queue_slot, GW_SURVEY_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, survey_tag_name);
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
+    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
 }
 
 static void survey_end(survey_state_t *const st) {

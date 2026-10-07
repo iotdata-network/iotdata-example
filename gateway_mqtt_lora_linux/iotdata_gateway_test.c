@@ -50,12 +50,12 @@ static void test_e22_printf_stub(const char *format, ...) {
 #define BUFFER_LOCK_RELEASE(l) pthread_mutex_unlock(l)
 #include "d_module_buffers.h"
 
-#define TEST_FRAME_MAX     240
+#define TEST_FRAME_MAX          240
 /* Set here, before the pool is declared, exactly as the app sets it before including the store:
    the down table's size is what the pool has to carry on top of the traffic. Kept small for the
    harness -- the gateway itself dimensions for a whole network. */
-#define IOTDATA_DOWN_SLOTS 8
-#define TEST_POOL_COUNT    (IOTDATA_DOWN_SLOTS + 8)
+#define IOTDATA_NODE_DOWN_SLOTS 8
+#define TEST_POOL_COUNT         (IOTDATA_NODE_DOWN_SLOTS + 8)
 BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #define PIN_DEVICE_UART_TX  GPIO_NUM_NC
 #define PIN_DEVICE_UART_RX  GPIO_NUM_NC
@@ -87,7 +87,7 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #include "iotdata_node_control.h"
 
 #define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
-#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#define IOTDATA_NODE_BLACKBOX_IMPLEMENTATION
 #include "iotdata_node_diagnostics.h"
 #include "iotdata_node_partial.h"
 #include "iotdata_node_variant.h"
@@ -95,7 +95,7 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 typedef struct {
     blackbox_handle_t handle;
     blackbox_config_t config;
-    char pool[IOTDATA_BLACKBOX_POOL_SZ];
+    char pool[IOTDATA_NODE_BLACKBOX_POOL_SZ];
     char path[512];
 } bbox_state_t;
 
@@ -110,7 +110,7 @@ typedef struct {
 #define STATE_NODE_TAG 0xB1E28004UL
 /* The station's identity, shared by the mesh exactly as iotdata_gateway.c shares it. No datastore
    behind it: an unpersisted node still counts, it just starts from 0 after a restart. */
-static idep_node_t t_inode;
+static iotdata_node_t t_inode;
 /* The cross-gateway cases stand up several simulated gateways, but ddup identifies them by a plain
    gateway id rather than by a node -- it copies the id at begin(), because the election compares it
    on the receive thread. So there is no array of nodes here any more. */
@@ -120,9 +120,9 @@ static idep_node_t t_inode;
 /* THE CONFIG TABLE FIRST, exactly as iotdata_gateway.c orders it -- and the order is load-bearing,
    not cosmetic. The module headers below read settings through the typed accessors, and those do
    not exist until the table has been expanded: a header included before this point sees
-   iotdata_config_u16() as an implicit declaration and the row names as undeclared identifiers.
+   iotdata_node_config_u16() as an implicit declaration and the row names as undeclared identifiers.
    This block used to sit after them and only compiled while nothing above reached for a row. */
-#define IOTDATA_CONSOLE_IMPLEMENTATION
+#define IOTDATA_NODE_CONSOLE_IMPLEMENTATION
 #include "iotdata_node_console.h" /* before the table: its `conf` command compiles only if this is in */
 #include "iotdata_gateway_conf.h"
 #include "iotdata_node_config.h"
@@ -245,7 +245,7 @@ static bool test_mesh_begin_enabled(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    idep_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
+    iotdata_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.beacon_interval_s = 60;
     ASSERT(mesh_begin(&ms, &t_inode, &t_pool, test_packet_handler, test_dedup_handler, NULL));
@@ -268,8 +268,8 @@ static bool test_mesh_transmit_beacon_ok(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    ms.beacon_interval_s = 90;                  /* a root HAS a cadence, and states it -- see I.1 */
-    idep_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
+    ms.beacon_interval_s = 90;                     /* a root HAS a cadence, and states it -- see I.1 */
+    iotdata_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
@@ -283,7 +283,7 @@ static bool test_mesh_transmit_beacon_ok(void) {
         ASSERT_EQ_INT(sent.interval_s, 90);
     }
     ASSERT_EQ_INT(ms.stat_beacons_tx, 1u);
-    ASSERT_EQ_INT(idep_sequence(&t_inode), 1u);
+    ASSERT_EQ_INT(iotdata_node_sequence(&t_inode), 1u);
 
     iotdata_mesh_beacon_t b;
     ASSERT(iotdata_mesh_unpack_beacon(captured_packets[0], captured_lengths[0], &b));
@@ -300,7 +300,7 @@ static bool test_mesh_transmit_beacon_fail(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    idep_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
+    iotdata_node_init(&t_inode, 0x0042, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler_fail;
 
@@ -316,7 +316,7 @@ static bool test_mesh_beacon_generation_wraps(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
     ms.beacon_generation = (uint16_t)(IOTDATA_MESH_GENERATION_MOD - 1);
@@ -337,7 +337,7 @@ static bool test_mesh_transmit_ack_ok(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
@@ -368,7 +368,7 @@ static bool test_mesh_receive_forward_new(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
@@ -394,7 +394,7 @@ static bool test_mesh_receive_forward_too_short(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
@@ -433,14 +433,14 @@ static void fwd_test_state(process_state_t *ps, mesh_state_t *ms, stat_state_t *
     fwd_test_node.stat = ss;
     fwd_test_node.pool = &t_pool;
     fwd_test_node.tx = test_packet_handler;
-    iotdata_down_init(&fwd_test_node.down, &t_pool);
+    iotdata_node_down_init(&fwd_test_node.down, &t_pool);
     ps->state_node = &fwd_test_node;
     ps->pool = &t_pool;
     memset(ms, 0, sizeof(*ms));
     memset(ss, 0, sizeof(*ss));
     ms->pool = &t_pool;
     ms->enabled = enabled;
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ms->inode = &t_inode;
     ms->packet_handler = test_packet_handler;
     ms->dedup_handler = test_dedup_handler;
@@ -600,18 +600,18 @@ static bool test_mesh_seq_increments(void) {
     memset(&ms, 0, sizeof(ms));
     ms.pool = &t_pool;
     ms.enabled = true;
-    idep_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u); /* fresh station + sequence for this case */
     ms.inode = &t_inode;
     ms.packet_handler = test_packet_handler;
 
     mesh_transmit_beacon(&ms);
-    ASSERT_EQ_INT(idep_sequence(&t_inode), 1u);
+    ASSERT_EQ_INT(iotdata_node_sequence(&t_inode), 1u);
 
     mesh_transmit_ack(&ms, 0x0002, 1);
-    ASSERT_EQ_INT(idep_sequence(&t_inode), 2u);
+    ASSERT_EQ_INT(iotdata_node_sequence(&t_inode), 2u);
 
     mesh_transmit_beacon(&ms);
-    ASSERT_EQ_INT(idep_sequence(&t_inode), 3u);
+    ASSERT_EQ_INT(iotdata_node_sequence(&t_inode), 3u);
     return true;
 }
 
@@ -1721,7 +1721,7 @@ static bool test_stat_mesh_peer_remove_compacts(void) {
 
 static void ctrl_test_state(ctrl_state_t *const st) {
     memset(st, 0, sizeof(*st));
-    idep_node_init(&t_inode, CTRL_TEST_STATION, NULL, 0u);
+    iotdata_node_init(&t_inode, CTRL_TEST_STATION, NULL, 0u);
     st->inode = &t_inode;
     st->pool = &t_pool;
     buffer_queue_init(&st->queue, st->queue_slot, CTRL_QUEUE_MAX, &t_pool);
@@ -1879,10 +1879,10 @@ static bool test_ctrl_table_matches_key_widths(void) {
     /* walked through the framework's own accessor, so a command an application plugs in is
        covered by this too rather than only the built-ins */
     for (uint8_t i = 0;; i++) {
-        const iotdata_control_command_t *const c = iotdata_control_at(i);
+        const iotdata_node_control_command_t *const c = iotdata_node_control_at(i);
         if (c == NULL)
             break;
-        if (c->arg == IOTDATA_CONTROL_ARG_REPORTS)
+        if (c->arg == IOTDATA_NODE_CONTROL_ARG_REPORTS)
             continue; /* not one key */
         ctrl_test_state(&st);
         char json[128];
@@ -1990,12 +1990,12 @@ static bool test_table_report_json(void) {
     static node_state_t ns;
     static stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
-    iotdata_down_init(&ns.down, &t_pool);
+    iotdata_node_down_init(&ns.down, &t_pool);
 
     uint8_t kv[64];
     iotdata_kvr_t b;
@@ -2052,7 +2052,7 @@ static bool test_text_values_still_render_as_strings(void) {
     static node_state_t ns;
     static stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
@@ -2082,21 +2082,21 @@ static bool test_version_report_as_the_monitor_sees_it(void) {
     node_state_t ns;
     stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
 
-    iotdata_version_caps_t caps;
+    iotdata_node_version_caps_t caps;
     memset(&caps, 0, sizeof(caps));
-    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAPS_RADIO, IOTDATA_VERSION_RADIO_E22_USB);
-    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAPS_FEATURES, IOTDATA_VERSION_FEATURE_MESH | IOTDATA_VERSION_FEATURE_BLACKBOX);
-    (void)iotdata_version_caps_add(&caps, IOTDATA_VERSION_CAPS_PROPRIETARY, 0x008); /* a bit with no name */
+    (void)iotdata_node_version_caps_add(&caps, IOTDATA_NODE_VERSION_CAPS_RADIO, IOTDATA_NODE_VERSION_RADIO_E22_USB);
+    (void)iotdata_node_version_caps_add(&caps, IOTDATA_NODE_VERSION_CAPS_FEATURES, IOTDATA_NODE_VERSION_FEATURE_MESH | IOTDATA_NODE_VERSION_FEATURE_BLACKBOX);
+    (void)iotdata_node_version_caps_add(&caps, IOTDATA_NODE_VERSION_CAPS_PROPRIETARY, 0x008); /* a bit with no name */
 
     uint8_t kv[200];
     iotdata_kvr_t b;
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    ASSERT(iotdata_version_pack(&b, &caps) > 0);
+    ASSERT(iotdata_node_version_pack(&b, &caps) > 0);
 
     cJSON *const root = cJSON_CreateObject();
     node_json_kvr(&ns, root, IOTDATA_NODE_TLV_VERSION, kv, b.len);
@@ -2108,7 +2108,7 @@ static bool test_version_report_as_the_monitor_sees_it(void) {
     ASSERT(strstr(out, "\"firmware\":\"") != NULL);
     ASSERT(strstr(out, "\"serial\":\"") != NULL);
     /* software carries the grammar a reader parses: app/semver/stamp */
-    ASSERT(strstr(out, "\"software\":\"" IOTDATA_VERSION_APP "/" IOTDATA_VERSION_SEMVER "/") != NULL);
+    ASSERT(strstr(out, "\"software\":\"" IOTDATA_NODE_VERSION_APP "/" IOTDATA_NODE_VERSION_SEMVER "/") != NULL);
 
     /* capabilities decoded, not hex */
     ASSERT(strstr(out, "\"capabilities\"") != NULL);
@@ -2197,7 +2197,7 @@ static bool test_trace_request_shapes_each_leg(void) {
     iotdata_mesh_nbr_entry_t hop;
     const char *why = "";
 
-    idep_node_init(&t_inode, 0x001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x001, NULL, 0u);
     trace_begin(&tv, "pre", &t_inode, &t_pool);
 
     /* UP asks the subject to record: a REQUEST, carrying no hops of its own. */
@@ -2245,20 +2245,20 @@ static bool test_trace_request_shapes_each_leg(void) {
 static bool test_ctrl_response_topic_is_shared(void) {
     node_state_t ns;
     memset(&ns, 0, sizeof(ns));
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ns.inode = &t_inode;
     stat_state_t ss;
     memset(&ss, 0, sizeof(ss));
     bbox_state_t bb;
     memset(&bb, 0, sizeof(bb));
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ASSERT(node_begin(&ns, &t_inode, NULL, &ss, &bb, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
 
     ctrl_state_t st;
     ctrl_test_state(&st);
     /* ctrl_begin sets the topics before it subscribes, so the (expected) subscribe failure with no
        broker does not stop us checking them */
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     survey_state_t sv;
     trace_state_t tv;
     survey_begin(&sv, "pre", &t_inode, &t_pool);
@@ -2353,7 +2353,7 @@ static bool test_ctrl_multiple_targets(void) {
     ctrl_test_drop(&st);
     /* more targets than one request may name: refused, never truncated to what happens to fit */
     char many[256] = "{\"cmd\":\"mesh-peers-dump\",\"target\":[";
-    for (int i = 0; i < IOTDATA_CONTROL_TARGETS_MAX + 1; i++)
+    for (int i = 0; i < IOTDATA_NODE_CONTROL_TARGETS_MAX + 1; i++)
         (void)snprintf(many + strlen(many), sizeof(many) - strlen(many), "%s\"0x%03X\"", i ? "," : "", 0x100 + i);
     (void)snprintf(many + strlen(many), sizeof(many) - strlen(many), "]}");
     ctrl_test_feed(&st, many);
@@ -2363,7 +2363,7 @@ static bool test_ctrl_multiple_targets(void) {
     ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x001\"}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 1u);
     char full[256] = "{\"cmd\":\"mesh-peers-dump\",\"target\":[";
-    for (int i = 0; i < IOTDATA_CONTROL_TARGETS_MAX; i++)
+    for (int i = 0; i < IOTDATA_NODE_CONTROL_TARGETS_MAX; i++)
         (void)snprintf(full + strlen(full), sizeof(full) - strlen(full), "%s\"0x%03X\"", i ? "," : "", 0x200 + i);
     (void)snprintf(full + strlen(full), sizeof(full) - strlen(full), "]}");
     ctrl_test_feed(&st, full);
@@ -2524,7 +2524,7 @@ static bool test_mesh_node_filter_update_takes_a_list(void) {
    is typing. It did not: stdin was left blocking and the first poll sat in read() forever, which
    stopped the gateway dead after one pass. This is the test that would have said so. */
 static int g_console_hits = 0;
-static void test_console_cmd(const iotdata_console_emit_fn emit, int argc, char **argv) {
+static void test_console_cmd(const iotdata_node_console_emit_fn emit, int argc, char **argv) {
     (void)argc;
     (void)argv;
     g_console_hits++;
@@ -2532,36 +2532,36 @@ static void test_console_cmd(const iotdata_console_emit_fn emit, int argc, char 
 }
 
 static bool test_console_poll_never_blocks(void) {
-    static const iotdata_console_t cons[] = { { "hit", test_console_cmd, "count a dispatch" } };
+    static const iotdata_node_console_t cons[] = { { "hit", test_console_cmd, "count a dispatch" } };
     int fds[2];
     ASSERT(pipe(fds) == 0);
     const int saved = dup(STDIN_FILENO);
     ASSERT(saved >= 0);
     ASSERT(dup2(fds[0], STDIN_FILENO) >= 0);
-    iotdata_console_init(cons, 1);
+    iotdata_node_console_init(cons, 1);
 
     /* nothing written yet: this must RETURN, and would hang the suite if it did not */
     g_console_hits = 0;
-    iotdata_console_poll();
+    iotdata_node_console_poll();
     ASSERT_EQ_INT(g_console_hits, 0);
 
     /* a line arrives and is dispatched, without waiting for a second one */
     ASSERT(write(fds[1], "hit\n", 4) == 4);
-    iotdata_console_poll();
+    iotdata_node_console_poll();
     ASSERT_EQ_INT(g_console_hits, 1);
 
     /* a partial line waits, and does not block while it does */
     ASSERT(write(fds[1], "hi", 2) == 2);
-    iotdata_console_poll();
+    iotdata_node_console_poll();
     ASSERT_EQ_INT(g_console_hits, 1);
     ASSERT(write(fds[1], "t\n", 2) == 2);
-    iotdata_console_poll();
+    iotdata_node_console_poll();
     ASSERT_EQ_INT(g_console_hits, 2);
 
     /* the writer closes: EOF must stop it asking rather than spin */
     (void)close(fds[1]);
-    iotdata_console_poll();
-    iotdata_console_poll();
+    iotdata_node_console_poll();
+    iotdata_node_console_poll();
     ASSERT_EQ_INT(g_console_hits, 2);
 
     (void)dup2(saved, STDIN_FILENO);
@@ -2587,35 +2587,35 @@ static bool test_gateway_config_load_and_overlay(void) {
     fclose(f);
 
     /* the table is at its defaults until something loads */
-    iotdata_config_defaults();
+    iotdata_node_config_defaults();
     /* against the SHARED block's default, which is where the gateway's now comes from: the local
        MQTT_*_DEFAULT overrides are gone, so this is the one statement of it left to test against */
-    ASSERT(!strcmp(iotdata_config_string(MQTT_SERVER), IOTDATA_CONFIG_MQTT_SERVER));
-    ASSERT_EQ_INT(iotdata_config_u8(LORA_CHANNEL), IOTDATA_CONFIG_LORA_CHANNEL);
+    ASSERT(!strcmp(iotdata_node_config_string(MQTT_SERVER), IOTDATA_NODE_CONFIG_MQTT_SERVER));
+    ASSERT_EQ_INT(iotdata_node_config_u8(LORA_CHANNEL), IOTDATA_NODE_CONFIG_LORA_CHANNEL);
 
     /* the operator's file, then the overlay (absent), then nothing on the command line */
     char *argv[] = { (char *)(uintptr_t)"gw", (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl };
     ASSERT(gateway_config_load(5, argv));
-    ASSERT(!strcmp(iotdata_config_string(MQTT_SERVER), "mqtt://10.0.0.1:1883"));
-    ASSERT_EQ_INT(iotdata_config_u8(LORA_CHANNEL), 42);
-    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 90);
-    ASSERT(!iotdata_config_bool(MESH_ENABLE)); /* untouched: the table's default stands */
+    ASSERT(!strcmp(iotdata_node_config_string(MQTT_SERVER), "mqtt://10.0.0.1:1883"));
+    ASSERT_EQ_INT(iotdata_node_config_u8(LORA_CHANNEL), 42);
+    ASSERT_EQ_INT(iotdata_node_config_u16(MESH_BEACON_INTERVAL_S), 90);
+    ASSERT(!iotdata_node_config_bool(MESH_ENABLE)); /* untouched: the table's default stands */
 
     /* BY NAME, which is the only way the file loader can reach a row: every other read in this
        test is a compile-time id, so without this nothing would notice the day a row's spelling and
        its key stopped agreeing. Dashes for underscores, and case-insensitive, as a file writes it. */
-    ASSERT_EQ_INT(iotdata_config_index_by_name("mesh-beacon-interval-s"), (int)IOTDATA_CFG_IX_MESH_BEACON_INTERVAL_S);
-    ASSERT_EQ_INT(iotdata_config_index_by_name("MESH_BEACON_INTERVAL_S"), (int)IOTDATA_CFG_IX_MESH_BEACON_INTERVAL_S);
-    ASSERT_EQ_INT(iotdata_config_index_by_name("nonesuch"), -1);
+    ASSERT_EQ_INT(iotdata_node_config_index_by_name("mesh-beacon-interval-s"), (int)IOTDATA_NODE_CFG_IX_MESH_BEACON_INTERVAL_S);
+    ASSERT_EQ_INT(iotdata_node_config_index_by_name("MESH_BEACON_INTERVAL_S"), (int)IOTDATA_NODE_CFG_IX_MESH_BEACON_INTERVAL_S);
+    ASSERT_EQ_INT(iotdata_node_config_index_by_name("nonesuch"), -1);
 
     /* THROUGH THE CONSOLE, which is the path an operator actually uses: `conf debug true`. */
     gateway_config_overlay_path = ovl;
-    iotdata_config_saver_attach(gateway_config_save);
-    iotdata_config_console_attach(NULL); /* the overlay IS the store here; there is no datastore */
+    iotdata_node_config_saver_attach(gateway_config_save);
+    iotdata_node_config_console_attach(NULL); /* the overlay IS the store here; there is no datastore */
     {
         char *cargv[3] = { (char *)(uintptr_t)"conf", (char *)(uintptr_t)"debug", (char *)(uintptr_t)"true" };
-        iotdata_config_console(test_quiet_emit, 3, cargv);
-        ASSERT(iotdata_config_bool(DEBUG));
+        iotdata_node_config_console(test_quiet_emit, 3, cargv);
+        ASSERT(iotdata_node_config_bool(DEBUG));
         f = fopen(ovl, "r");
         ASSERT(f != NULL);
         bool wrote = false;
@@ -2647,14 +2647,14 @@ static bool test_gateway_config_load_and_overlay(void) {
 
     /* a runtime change -- as the console or a CONTROL write would make it -- and the write-back */
     gateway_config_overlay_path = ovl;
-    iotdata_config_saver_attach(gateway_config_save);
+    iotdata_node_config_saver_attach(gateway_config_save);
     {
-        iotdata_config_update_t u;
-        iotdata_config_update_begin(&u, false);
-        ASSERT(iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
-        ASSERT(iotdata_config_update_commit(&u, NULL, NULL));
+        iotdata_node_config_update_t u;
+        iotdata_node_config_update_begin(&u, false);
+        ASSERT(iotdata_node_config_update_stage(&u, IOTDATA_NODE_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_node_config_value_t){ .u = 120 }));
+        ASSERT(iotdata_node_config_update_commit(&u, NULL, NULL));
     }
-    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 120);
+    ASSERT_EQ_INT(iotdata_node_config_u16(MESH_BEACON_INTERVAL_S), 120);
 
     /* the overlay is TEXT, beside the operator's file, and names the key the way the file does */
     f = fopen(ovl, "r");
@@ -2677,17 +2677,17 @@ static bool test_gateway_config_load_and_overlay(void) {
     ASSERT(original);
 
     /* a restart: defaults, then the file, then the overlay -- the runtime change wins */
-    iotdata_config_saver_attach(NULL);
-    iotdata_config_defaults();
+    iotdata_node_config_saver_attach(NULL);
+    iotdata_node_config_defaults();
     memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
     ASSERT(gateway_config_load(5, argv));
-    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 120); /* the overlay beat the file */
-    ASSERT_EQ_INT(iotdata_config_u8(LORA_CHANNEL), 42);             /* and the file still holds what it holds */
+    ASSERT_EQ_INT(iotdata_node_config_u16(MESH_BEACON_INTERVAL_S), 120); /* the overlay beat the file */
+    ASSERT_EQ_INT(iotdata_node_config_u8(LORA_CHANNEL), 42);             /* and the file still holds what it holds */
 
     (void)remove(cfg);
     (void)remove(ovl);
     (void)rmdir(dir);
-    iotdata_config_defaults();
+    iotdata_node_config_defaults();
     return true;
 }
 
@@ -2710,29 +2710,29 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     fputs("node-station = 7\nnode-interval = 90\nnode-report-status-period = 1800\n", f);
     fclose(f);
 
-    iotdata_config_defaults();
+    iotdata_node_config_defaults();
     memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
     memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
-    _iotdata_settings_pin = 0;
-    _iotdata_settings_pin_report = 0;
+    _iotdata_node_settings_pin = 0;
+    _iotdata_node_settings_pin_report = 0;
 
     char *argv[] = { (char *)(uintptr_t)"gw", (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl };
     ASSERT(gateway_config_load(5, argv));
 
     /* the station is a SETTING and nothing else: no config row seeds it any more, so a file that
        says nothing leaves this node answering as whatever its hardware derived */
-    ASSERT_EQ_INT(iotdata_settings_station(&gateway_settings), 7);
-    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 60000u, 90); /* the interval is MINUTES */
-    ASSERT_EQ_INT(iotdata_settings_period_s(&gateway_settings, IOTDATA_NODE_TLV_STATUS), 1800);
+    ASSERT_EQ_INT(iotdata_node_settings_station(&gateway_settings), 7);
+    ASSERT_EQ_INT(iotdata_node_settings_interval_ms(&gateway_settings) / 60000u, 90); /* the interval is MINUTES */
+    ASSERT_EQ_INT(iotdata_node_settings_period_s(&gateway_settings, IOTDATA_NODE_TLV_STATUS), 1800);
     /* and one nobody mentioned is at the seeded default, not at zero */
-    ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), IOTDATA_SETTINGS_DEFAULT_WINDOW_MS);
+    ASSERT_EQ_INT(iotdata_node_settings_window_ms(&gateway_settings), IOTDATA_NODE_SETTINGS_DEFAULT_WINDOW_MS);
 
     /* A RUNTIME CHANGE goes back to the same file -- and only what moved. */
     gateway_config_overlay_path = ovl;
-    iotdata_settings_saver_attach(gateway_settings_save);
-    iotdata_config_saver_attach(gateway_config_save);
+    iotdata_node_settings_saver_attach(gateway_settings_save);
+    iotdata_node_config_saver_attach(gateway_config_save);
     gateway_settings.window_ms = 2500;
-    ASSERT(iotdata_settings_commit(&gateway_settings, NULL));
+    ASSERT(iotdata_node_settings_commit(&gateway_settings, NULL));
     {
         f = fopen(ovl, "r");
         ASSERT(f != NULL);
@@ -2750,14 +2750,14 @@ static bool test_gateway_settings_fused_and_pinned(void) {
 
     /* A RESTART: the file, then the overlay. The runtime change survives and the file still holds
        what the operator wrote. */
-    iotdata_settings_saver_attach(NULL);
-    iotdata_config_saver_attach(NULL);
-    iotdata_config_defaults();
+    iotdata_node_settings_saver_attach(NULL);
+    iotdata_node_config_saver_attach(NULL);
+    iotdata_node_config_defaults();
     memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
     memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
     ASSERT(gateway_config_load(5, argv));
-    ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 2500);
-    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 60000u, 90);
+    ASSERT_EQ_INT(iotdata_node_settings_window_ms(&gateway_settings), 2500);
+    ASSERT_EQ_INT(iotdata_node_settings_interval_ms(&gateway_settings) / 60000u, 90);
 
     /* AND WITH NO LINE AT ALL it derives, rather than falling back to some number a config row
        used to hold: the station is the hardware's answer until somebody states otherwise. */
@@ -2770,49 +2770,49 @@ static bool test_gateway_settings_fused_and_pinned(void) {
         fclose(b);
         char barov[256];
         snprintf(barov, sizeof(barov), "%s/bare.runtime.cfg", dir);
-        iotdata_config_defaults();
+        iotdata_node_config_defaults();
         memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
         memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
         char *bargv[] = { (char *)(uintptr_t)"gw", (char *)(uintptr_t)"--config", bare, (char *)(uintptr_t)"--overlay", barov };
         ASSERT(gateway_config_load(5, bargv));
-        ASSERT_EQ_INT(iotdata_settings_station(&gateway_settings), iotdata_node_station_from_mac("test"));
-        ASSERT(iotdata_station_is_assignable(iotdata_settings_station(&gateway_settings)));
+        ASSERT_EQ_INT(iotdata_node_settings_station(&gateway_settings), iotdata_node_station_from_mac("test"));
+        ASSERT(iotdata_station_is_assignable(iotdata_node_settings_station(&gateway_settings)));
         (void)remove(bare);
         (void)remove(barov);
     }
 
     /* PINNING. Restart again, this time stating two values on the command line: one config row and
        one setting. Both take, and then neither can be moved. */
-    iotdata_config_defaults();
+    iotdata_node_config_defaults();
     memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
     memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
-    _iotdata_settings_pin = 0;
-    _iotdata_settings_pin_report = 0;
+    _iotdata_node_settings_pin = 0;
+    _iotdata_node_settings_pin_report = 0;
     {
         char *pargv[] = { (char *)(uintptr_t)"gw",  (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl, (char *)(uintptr_t)"--mesh-beacon-interval-s", (char *)(uintptr_t)"45", (char *)(uintptr_t)"--node-window",
                           (char *)(uintptr_t)"7000" };
         ASSERT(gateway_config_load(9, pargv));
     }
-    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 45);
-    ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 7000); /* the argument beat the overlay */
-    ASSERT(iotdata_config_is_pinned(IOTDATA_CFG_MESH_BEACON_INTERVAL_S));
-    ASSERT(iotdata_settings_is_pinned(IOTDATA_SETTINGS_PIN_WINDOW));
-    ASSERT(!iotdata_settings_is_pinned(IOTDATA_SETTINGS_PIN_INTERVAL)); /* that one came from the file */
+    ASSERT_EQ_INT(iotdata_node_config_u16(MESH_BEACON_INTERVAL_S), 45);
+    ASSERT_EQ_INT(iotdata_node_settings_window_ms(&gateway_settings), 7000); /* the argument beat the overlay */
+    ASSERT(iotdata_node_config_is_pinned(IOTDATA_NODE_CFG_MESH_BEACON_INTERVAL_S));
+    ASSERT(iotdata_node_settings_is_pinned(IOTDATA_NODE_SETTINGS_PIN_WINDOW));
+    ASSERT(!iotdata_node_settings_is_pinned(IOTDATA_NODE_SETTINGS_PIN_INTERVAL)); /* that one came from the file */
 
     /* refused over the air */
     {
-        iotdata_config_update_t u;
-        iotdata_config_update_begin(&u, true);
-        ASSERT(!iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
+        iotdata_node_config_update_t u;
+        iotdata_node_config_update_begin(&u, true);
+        ASSERT(!iotdata_node_config_update_stage(&u, IOTDATA_NODE_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_node_config_value_t){ .u = 120 }));
     }
     /* and refused from the console, which is the part that is a decision rather than a mechanism */
     {
-        iotdata_config_update_t u;
-        iotdata_config_update_begin(&u, false);
-        ASSERT(!iotdata_config_update_stage(&u, IOTDATA_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_config_value_t){ .u = 120 }));
+        iotdata_node_config_update_t u;
+        iotdata_node_config_update_begin(&u, false);
+        ASSERT(!iotdata_node_config_update_stage(&u, IOTDATA_NODE_CFG_MESH_BEACON_INTERVAL_S, &(iotdata_node_config_value_t){ .u = 120 }));
     }
-    ASSERT_EQ_INT(iotdata_config_u16(MESH_BEACON_INTERVAL_S), 45);
-    ASSERT(iotdata_config_refusal(IOTDATA_CFG_MESH_BEACON_INTERVAL_S, false) != NULL);
+    ASSERT_EQ_INT(iotdata_node_config_u16(MESH_BEACON_INTERVAL_S), 45);
+    ASSERT(iotdata_node_config_refusal(IOTDATA_NODE_CFG_MESH_BEACON_INTERVAL_S, false) != NULL);
 
     /* a pinned SETTING likewise, over the air: the RECEIVE triple arrives whole and the pinned
        field alone stays put, which is why it is pinned per field rather than per key */
@@ -2825,18 +2825,18 @@ static bool test_gateway_settings_fused_and_pinned(void) {
         iotdata_node_settings_put_u16(r, 2, 30);   /* interval: not */
         iotdata_node_settings_put_u16(r, 4, 0);
         iotdata_kvr_add(&kv, IOTDATA_NODE_SETTINGS_RECEIVE, r, (uint8_t)sizeof(r));
-        ASSERT(iotdata_settings_apply(&gateway_settings, kvbuf, kv.len));
+        ASSERT(iotdata_node_settings_apply(&gateway_settings, kvbuf, kv.len));
     }
-    ASSERT_EQ_INT(iotdata_settings_window_ms(&gateway_settings), 7000);          /* held */
-    ASSERT_EQ_INT(iotdata_settings_interval_ms(&gateway_settings) / 60000u, 30); /* took */
+    ASSERT_EQ_INT(iotdata_node_settings_window_ms(&gateway_settings), 7000);          /* held */
+    ASSERT_EQ_INT(iotdata_node_settings_interval_ms(&gateway_settings) / 60000u, 30); /* took */
 
-    _iotdata_settings_pin = 0;
-    _iotdata_settings_pin_report = 0;
-    memset(_iotdata_config_pinned, 0, sizeof(_iotdata_config_pinned));
+    _iotdata_node_settings_pin = 0;
+    _iotdata_node_settings_pin_report = 0;
+    memset(_iotdata_node_config_pinned, 0, sizeof(_iotdata_node_config_pinned));
     (void)remove(cfg);
     (void)remove(ovl);
     (void)rmdir(dir);
-    iotdata_config_defaults();
+    iotdata_node_config_defaults();
     return true;
 }
 
@@ -2853,7 +2853,7 @@ static bool test_config_set_builds_records(void) {
     ASSERT_EQ_INT(out[2], 20u);
     ASSERT_EQ_INT(((uint16_t)out[3] << 8) | out[4], (uint16_t)((66u << 4) | 5u));
     ASSERT_EQ_INT(((uint32_t)out[5] << 24) | ((uint32_t)out[6] << 16) | ((uint32_t)out[7] << 8) | out[8], 300000u);
-    ASSERT(iotdata_config_rec_id((uint16_t)(((uint16_t)out[3] << 8) | out[4])) == 66u); /* and reads back */
+    ASSERT(iotdata_node_config_rec_id((uint16_t)(((uint16_t)out[3] << 8) | out[4])) == 66u); /* and reads back */
     return true;
 }
 
@@ -3073,12 +3073,12 @@ static bool test_control_report_is_published(void) {
     static node_state_t ns;
     static stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
-    iotdata_down_init(&ns.down, &t_pool);
+    iotdata_node_down_init(&ns.down, &t_pool);
 
     uint8_t frame[TEST_FRAME_MAX];
     const int n = build_report(frame, sizeof(frame), 0x0F1B, 5, IOTDATA_NODE_TLV_CONTROL);
@@ -3092,12 +3092,12 @@ static bool test_down_echo_is_not_published(void) {
     static node_state_t ns;
     static stat_state_t ss;
     memset(&ns, 0, sizeof(ns));
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ns.inode = &t_inode;
     memset(&ss, 0, sizeof(ss));
     ns.stat = &ss;
     ns.tx = test_packet_handler;
-    iotdata_down_init(&ns.down, &t_pool);
+    iotdata_node_down_init(&ns.down, &t_pool);
 
     uint8_t frame[TEST_FRAME_MAX];
     const int n = build_report(frame, sizeof(frame), 0x0F1B, IOTDATA_SEQUENCE_DOWN, IOTDATA_NODE_TLV_CONTROL);
@@ -3155,7 +3155,7 @@ static bool test_control_over_the_air_reaches_the_same_handler(void) {
     static stat_state_t ss;
     mesh_node_test_state(&ps, &ms, &ss);
     node_state_t *const ns = ps.state_node;
-    idep_node_init(&t_inode, 0x0001, NULL, 0u);
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
     ns->inode = &t_inode;
 
     /* another gateway addresses a CONTROL at ours: a DOWN frame whose station field is US */

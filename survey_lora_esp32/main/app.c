@@ -31,8 +31,8 @@
 // EXAMPLE config + hardware
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#ifndef IOTDATA_CONFIG_LORA_ADDRESS
-#define IOTDATA_CONFIG_LORA_ADDRESS LORA_E22_ADDRESS_MONITOR
+#ifndef IOTDATA_NODE_CONFIG_LORA_ADDRESS
+#define IOTDATA_NODE_CONFIG_LORA_ADDRESS LORA_E22_ADDRESS_MONITOR
 #endif
 
 #include "iotdata_config.h"
@@ -43,7 +43,7 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #ifndef SURVEY_AUTO_MS
-#define SURVEY_AUTO_MS ((uint32_t)iotdata_config_u16(SURVEY_AUTO_S) * 1000u)
+#define SURVEY_AUTO_MS ((uint32_t)iotdata_node_config_u16(SURVEY_AUTO_S) * 1000u)
 #endif
 #ifndef CONSOLE_DRAIN_MS
 #define CONSOLE_DRAIN_MS 100 /* let the console flush before deep sleep    */
@@ -157,15 +157,15 @@
 
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
-#define IOTDATA_VERSION_HAS_BLACKBOX
+#define IOTDATA_NODE_VERSION_HAS_BLACKBOX
 #include "iotdata_node_version.h"
 #include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
 #include "iotdata_node_config.h"
 #include "iotdata_node_control.h"
-#define IOTDATA_DIAGNOSTICS       IOTDATA_CONFIG_BLACKBOX
-#define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
-#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#define IOTDATA_NODE_DIAGNOSTICS       IOTDATA_NODE_CONFIG_BLACKBOX
+#define IOTDATA_NODE_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
+#define IOTDATA_NODE_BLACKBOX_IMPLEMENTATION
 static void _node_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
 }
@@ -179,20 +179,20 @@ static void _node_diagnostics_emit(const char *const line) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
+static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
 
-#define IOTDATA_CONFIG_LORA_NOTIFY on_lora_changed
+#define IOTDATA_NODE_CONFIG_LORA_NOTIFY on_lora_changed
 #include "iotdata_node_config_device_e22900t22.h"
 
-#define IOTDATA_CONFIG_ENTRIES(X) \
+#define IOTDATA_NODE_CONFIG_ENTRIES(X) \
     /*NAME  id  TYPE  min  max  default  flags  validate  notify */ \
     X(SURVEY_AUTO_S, 0x001, U16, 5, 3600, 30, 0, NULL, NULL, "seconds between automatic reports, once a long press turns them on") \
-    IOTDATA_CONFIG_ENTRIES_LORA(X)
+    IOTDATA_NODE_CONFIG_ENTRIES_LORA(X)
 
 #include "iotdata_node_config.h"
 #include "iotdata_node_config_device_e22900t22.h"
 
-static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, __attribute__((unused)) const iotdata_config_info_t *info) {
+static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, __attribute__((unused)) const iotdata_node_config_info_t *info) {
     ESP_LOGW("config", "%s changed (was %llu); the radio is configured once, so this needs a restart", row->name, (unsigned long long)was->u);
     return true;
 }
@@ -202,7 +202,7 @@ static bool on_lora_changed(const iotdata_config_row_t *row, const iotdata_confi
 
 static void _app_node_status(const uint16_t station, iotdata_node_status_t *const out);
 static bool _app_node_transmit(const uint8_t *const packet, const size_t len);
-static int _app_config_build(uint8_t *buf, size_t size, iotdata_partial_t *partial);
+static int _app_config_build(uint8_t *buf, size_t size, iotdata_node_partial_t *partial);
 static bool _app_config_apply(const uint8_t *buf, size_t len, bool *reboot_out);
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -221,8 +221,8 @@ static const char *__tag_app = "app";
 
 typedef struct {
     _RTC_DATA_STAMP_ENTRY;
-    iotdata_version_caps_t caps;
-    idep_node_t node;
+    iotdata_node_version_caps_t caps;
+    iotdata_node_t node;
     uint32_t cycles;    /* wake cycles since the last restart              */
     uint32_t tx_count;  /* packets transmitted                             */
     uint32_t tx_errors; /* packets the radio would not take                */
@@ -239,21 +239,21 @@ typedef struct {
 typedef struct {
     datastore_t datastore;
     iotdata_node_state_t node;
-    iotdata_settings_t settings; /* the PROTOCOL's own: station id, reporting, receive */
-    const idep_config_t idep_cfg;
+    iotdata_node_settings_t settings; /* the PROTOCOL's own: station id, reporting, receive */
+    const iotdata_node_params_t iotdata_node_cfg;
 } state_running_t;
 
 static _RTC_DATA_STRUCT state_operating_t _state_operating;
-static state_running_t _state_running = { .idep_cfg = {
+static state_running_t _state_running = { .iotdata_node_cfg = {
                                               .caps = &_state_operating.caps,
                                               .status = _app_node_status,
                                               .tx = _app_node_transmit,
-                                              .control = IOTDATA_DIAGNOSTICS_CONTROL,
-                                              .control_actions = iotdata_diagnostics_control_actions,
-                                              .control_actions_count = IOTDATA_DIAGNOSTICS_CONTROL_ACTIONS_COUNT,
-                                              .diag = IOTDATA_DIAGNOSTICS_PULL,
-                                              .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
-                                              .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
+                                              .control = IOTDATA_NODE_DIAGNOSTICS_CONTROL,
+                                              .control_actions = iotdata_node_diagnostics_control_actions,
+                                              .control_actions_count = IOTDATA_NODE_DIAGNOSTICS_CONTROL_ACTIONS_COUNT,
+                                              .diag = IOTDATA_NODE_DIAGNOSTICS_PULL,
+                                              .receive_every_ms = IOTDATA_NODE_RECEIVE_EVERY_MS,
+                                              .receive_window_ms = IOTDATA_NODE_RECEIVE_WINDOW_MS,
                                               .settings = &_state_running.settings,
                                               .state = &_state_running.node,
                                               .config_build = _app_config_build,
@@ -268,12 +268,12 @@ static const struct {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static int _app_config_build(uint8_t *const buf, const size_t size, iotdata_partial_t *const partial) {
-    return iotdata_config_pack(buf, size, partial);
+static int _app_config_build(uint8_t *const buf, const size_t size, iotdata_node_partial_t *const partial) {
+    return iotdata_node_config_pack(buf, size, partial);
 }
 
 static bool _app_config_apply(const uint8_t *const buf, const size_t len, bool *const reboot_out) {
-    return iotdata_config_apply(buf, len, &app_state.running->datastore, reboot_out);
+    return iotdata_node_config_apply(buf, len, &app_state.running->datastore, reboot_out);
 }
 
 static void _app_node_status(__attribute__((unused)) const uint16_t station, iotdata_node_status_t *const out) {
@@ -317,7 +317,7 @@ static void app_exec_receive(void) {
         uint8_t variant = 0;
         uint16_t station = 0, sequence = 0;
         if (iotdata_mesh_peek_header(buf, len, &variant, &station, &sequence)) {
-            if (station != idep_station(&app_state.operating->node)) {
+            if (station != iotdata_node_station(&app_state.operating->node)) {
                 survey_observe(&app_state.operating->survey, station, sequence, rssi_dbm);
                 app_state.operating->rx_count++;
             }
@@ -375,8 +375,8 @@ static void app_exec_status(void) {
         ESP_LOGI(__tag_app, "alive: rx=%" PRIu32 " heard=%" PRIu32 " (dropped %" PRIu32 ") tx=%" PRIu32 " errors=%" PRIu32 " | survey=%s auto=%s fix=%s", app_state.operating->rx_count, app_state.operating->survey.obs_total,
                  app_state.operating->survey.obs_dropped, app_state.operating->tx_count, app_state.operating->tx_errors, app_state.operating->survey.active ? "on" : "off", app_state.operating->survey.auto_report ? "on" : "off",
                  app_state.operating->fix_valid ? "yes" : "no");
-        iotdata_diagnostics_flush();
-        iotdata_state_flush(&app_state.running->node);
+        iotdata_node_diagnostics_flush();
+        iotdata_node_state_flush(&app_state.running->node);
     }
 }
 
@@ -389,7 +389,7 @@ bool app_exec(void) {
         app_exec_refresh_gnss();
         survey_poll(&app_state.operating->survey);
         app_exec_status();
-        (void)iotdata_diagnostics_pump();
+        (void)iotdata_node_diagnostics_pump();
         app_state.operating->cycles++;
     }
 }
@@ -404,41 +404,41 @@ bool app_init(void) {
     ESP_LOGI(__tag_app, "iotdata lora survey instrument: listens continuously, reports on demand");
     ESP_LOGI(__tag_app, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
 
-    iotdata_diagnostics_emit_set(_node_diagnostics_emit);
-    if (!iotdata_diagnostics_begin((uint8_t)reset_reason, restarted))
+    iotdata_node_diagnostics_emit_set(_node_diagnostics_emit);
+    if (!iotdata_node_diagnostics_begin((uint8_t)reset_reason, restarted))
         ESP_LOGW(__tag_app, "diag: the recorder did not start");
-    iotdata_diagnostics_flush();
+    iotdata_node_diagnostics_flush();
 
     if (reset_reason == ESP_RST_BROWNOUT && _RTC_DATA_VALID(app_state.operating, STATE_MAGIC) && app_state.operating->battery_mv > 0)
         ESP_LOGE(__tag_app, "boot: BROWNOUT -- the last reading before it was %dmV", (int)app_state.operating->battery_mv);
 
     if (!_RTC_DATA_VALID(app_state.operating, STATE_MAGIC)) {
         _RTC_DATA_INIT(app_state.operating, STATE_MAGIC);
-        idep_node_init(&app_state.operating->node, iotdata_node_station_from_mac(__tag_app), NULL, 0u);
-        iotdata_version_caps_init(&app_state.operating->caps);
+        iotdata_node_init(&app_state.operating->node, iotdata_node_station_from_mac(__tag_app), NULL, 0u);
+        iotdata_node_version_caps_init(&app_state.operating->caps);
         if ((app_state.operating->gnss_present = (gnss_setup(&gnss_config_default) == ESP_OK)))
-            iotdata_version_caps_add(&app_state.operating->caps, IOTDATA_VERSION_CAPS_SENSOR, IOTDATA_VERSION_SENSOR_GNSS);
+            iotdata_node_version_caps_add(&app_state.operating->caps, IOTDATA_NODE_VERSION_CAPS_SENSOR, IOTDATA_NODE_VERSION_SENSOR_GNSS);
         else
             ESP_LOGW(__tag_app, "gnss: no module answered on tx=GPIO%d rx=GPIO%d", (int)PIN_GNSS_UART_TX, (int)PIN_GNSS_UART_RX);
     }
 
-    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
-    ESP_LOGI(__tag_app, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &app_state.operating->caps));
-    if (!iotdata_version_stamp_is_real())
+    char vbuf[IOTDATA_NODE_VERSION_STR_MAX + 1];
+    ESP_LOGI(__tag_app, "version: %s", iotdata_node_version_str(vbuf, sizeof(vbuf), &app_state.operating->caps));
+    if (!iotdata_node_version_stamp_is_real())
         ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
 
     if (datastore_open(&app_state.running->datastore, "iotdata")) {
-        iotdata_state_init(&app_state.running->node, &app_state.running->datastore, "state");
-        iotdata_settings_defaults(&app_state.running->settings, idep_station(&app_state.operating->node));
-        if (!iotdata_settings_attach(&app_state.running->settings, &app_state.running->node))
+        iotdata_node_state_init(&app_state.running->node, &app_state.running->datastore, "state");
+        iotdata_node_settings_defaults(&app_state.running->settings, iotdata_node_station(&app_state.operating->node));
+        if (!iotdata_node_settings_attach(&app_state.running->settings, &app_state.running->node))
             ESP_LOGW(__tag_app, "state: settings block not registered -- protocol settings will not persist");
-        if (!idep_node_bind(&app_state.operating->node, &app_state.running->node, STATE_TAG))
+        if (!iotdata_node_bind(&app_state.operating->node, &app_state.running->node, STATE_TAG))
             ESP_LOGW(__tag_app, "state: persistence failed (bind STATE_TAG)");
-        const bool restored = iotdata_state_load(&app_state.running->node);
+        const bool restored = iotdata_node_state_load(&app_state.running->node);
         ESP_LOGI(__tag_app, "state: %u block(s), %s", (unsigned)app_state.running->node.count, restored ? "restored" : "defaulted");
-        if (idep_node_restore_station(&app_state.operating->node, &app_state.running->settings))
-            ESP_LOGI(__tag_app, "node: station=%" PRIu16 " restored from settings", idep_station(&app_state.operating->node));
-        if (!iotdata_config_load(&app_state.running->datastore))
+        if (iotdata_node_restore_station(&app_state.operating->node, &app_state.running->settings))
+            ESP_LOGI(__tag_app, "node: station=%" PRIu16 " restored from settings", iotdata_node_station(&app_state.operating->node));
+        if (!iotdata_node_config_load(&app_state.running->datastore))
             ESP_LOGI(__tag_app, "config: nothing stored yet -- every row at its default");
     } else
         ESP_LOGW(__tag_app, "state: persistence disabled (no datastore)");
@@ -455,7 +455,7 @@ bool app_init(void) {
     (void)survey_init(&app_state.operating->survey, &survey_config);
 
     lora_config_t cfg;
-    iotdata_config_lora_apply(&cfg);
+    iotdata_node_config_lora_apply(&cfg);
     esp_log_level_set(__tag_device_e22900t22, cfg.debug ? ESP_LOG_DEBUG : ESP_LOG_INFO);
     if ((app_state.operating->lora_present = (lora_setup(&cfg) == ESP_OK)) && lora_start() == ESP_OK)
         ESP_LOGI(__tag_app, "lora: listening continuously on uart%d", (int)E22_UART_PORT);
@@ -480,7 +480,7 @@ bool app_init(void) {
 
 void app_fail(void) {
     ESP_LOGE(__tag_app, "failed");
-    iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
+    iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_STOP, 0);
     hw_delay_ms_yieldable(RESTART_MS);
     esp_restart();
 }

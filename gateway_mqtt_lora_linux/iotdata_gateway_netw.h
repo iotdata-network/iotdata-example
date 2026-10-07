@@ -452,10 +452,10 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
     char stale[32];
     PRINTF_INFO("netw: gw=%03" PRIX16 " | %d relay(s), %d sensor(s)%s%s | end-to-end loss=%" PRIu32 " seq (%.1f%%):\n", gateway_id, n_relay, n_sensor, n_gw ? " (+peer gw)" : "",
                 n_stale > 0 ? snprintf_inline(stale, sizeof(stale), ", %d stale hidden", n_stale) : "", loss, netw_loss_pct(loss, rx_total));
-    iotdata_order_t ord[sizeof(n->s) / sizeof(n->s[0])];
+    iotdata_node_order_t ord[sizeof(n->s) / sizeof(n->s[0])];
     int ordered = 0;
     for (int i = 0; i < n->count; i++)
-        ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), n->s[i].station, (uint16_t)i);
+        ordered = iotdata_node_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), n->s[i].station, (uint16_t)i);
     for (int k = 0; k < ordered; k++) {
         const netw_station_t *e = &n->s[ord[k].slot];
         if (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) {

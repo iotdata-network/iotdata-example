@@ -323,7 +323,7 @@ static bool exec_node_table_row(const uint8_t entry, const uint8_t index, uint8_
             return false;
         const stat_peer_t *const e = &st->state_stat->peers[slot];
         iotdata_node_entry_put_u16(row, 0, e->station_id);
-        iotdata_node_entry_put_u16(row, 2, idep_station(st->state_mesh->inode)); /* we ARE the gateway */
+        iotdata_node_entry_put_u16(row, 2, iotdata_node_station(st->state_mesh->inode)); /* we ARE the gateway */
         row[4] = e->cost;
         iotdata_node_entry_put_u16(row, 5, e->generation);
         row[7] = 0; /* this peer table is built from beacons, which carry no RSSI of their own */
@@ -378,7 +378,7 @@ void process_packet(process_state_t *st) {
                     PRINTF_INFO("exec: FILTERED from=%03" PRIX16 " var=%" PRIu8 " len=%d (blocked)\n", station_id, variant_id, packet_length);
             } else if (variant_id == IOTDATA_MESH_VARIANT) {
                 if (st->state_mesh->enabled)
-                    process_mesh_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), packet_rssi_dbm);
+                    process_mesh_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), packet_rssi_dbm);
                 else {
                     stat_on_link_rx_mesh_unexpected(st->state_stat, station_id);
                     PRINTF_INFO("exec: mesh packet unexpected from station=%03" PRIX16 " while not enabled\n", station_id);
@@ -403,9 +403,9 @@ void process_packet(process_state_t *st) {
                     const bool is_new = (verdict != DDUP_REJECT);
                     netw_note_receive(&st->network, station_id, variant_id, sequence, NETW_PATH_DIRECT, is_new, (packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0, 0, time(NULL));
                     if (verdict == DDUP_PUBLISH)
-                        process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm);
-                    else if (verdict == DDUP_HOLD && !ddup_hold_add(st->state_ddup, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm))
-                        process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm); /* queue full -> publish un-held */
+                        process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm);
+                    else if (verdict == DDUP_HOLD && !ddup_hold_add(st->state_ddup, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm))
+                        process_sensor_packet(st, rxbuf, packet_length, variant_id, station_id, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm); /* queue full -> publish un-held */
                 } else {
                     stat_on_link_rx_drop(st->state_stat);
                     PRINTF_ERROR("exec: undecodable frame from station=%03" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station_id, sequence, packet_length,
@@ -441,15 +441,15 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
     st->rx_held = BUFFER_NONE;
 
     char buf[16];
-    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu16 "s, stats-publish=%" PRIu16 "s, topic-prefix=%s) :: mesh=%c%s\n", iotdata_config_u16(STAT_DISPLAY_INTERVAL_S), iotdata_config_u16(STAT_PUBLISH_INTERVAL_S),
-                iotdata_config_string(MQTT_TOPIC_PREFIX), st->state_mesh->enabled ? 'y' : 'n', st->state_mesh->enabled ? snprintf_inline(buf, sizeof(buf), ", beacon=%" PRIu16 "s", st->state_mesh->beacon_interval_s) : "");
+    PRINTF_INFO("exec: iotdata gateway (stats-display=%" PRIu16 "s, stats-publish=%" PRIu16 "s, topic-prefix=%s) :: mesh=%c%s\n", iotdata_node_config_u16(STAT_DISPLAY_INTERVAL_S), iotdata_node_config_u16(STAT_PUBLISH_INTERVAL_S),
+                iotdata_node_config_string(MQTT_TOPIC_PREFIX), st->state_mesh->enabled ? 'y' : 'n', st->state_mesh->enabled ? snprintf_inline(buf, sizeof(buf), ", beacon=%" PRIu16 "s", st->state_mesh->beacon_interval_s) : "");
 
     for (int i = 0; i < IOTDATA_VARIANT_MAPS_COUNT; i++) {
         const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)i);
-        PRINTF_INFO("exec: variant[%d] = \"%s\" (pres_bytes=%" PRIu8 ") -> %s/%s/<station>\n", i, vdef->name, vdef->num_pres_bytes, iotdata_config_string(MQTT_TOPIC_PREFIX), vdef->name);
+        PRINTF_INFO("exec: variant[%d] = \"%s\" (pres_bytes=%" PRIu8 ") -> %s/%s/<station>\n", i, vdef->name, vdef->num_pres_bytes, iotdata_node_config_string(MQTT_TOPIC_PREFIX), vdef->name);
     }
     if (st->state_mesh->enabled)
-        PRINTF_INFO("exec: variant[15] = mesh control (gateway station=%03" PRIX16 ")\n", idep_station(st->state_mesh->inode));
+        PRINTF_INFO("exec: variant[15] = mesh control (gateway station=%03" PRIX16 ")\n", iotdata_node_station(st->state_mesh->inode));
 
     while (*running) {
 
@@ -469,27 +469,27 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
         if (*running)
             node_tick(state_node);
         if (*running)
-            iotdata_console_poll();
+            iotdata_node_console_poll();
         if (*running && st->state_peer != NULL)
             peer_presence_tick(st->state_peer, time(NULL)); // ddup
         if (*running)
             ddup_hold_release(st->state_ddup, process_release_cb, st);
 
         // stats publish/display
-        if (*running && iotdata_config_u16(STAT_PUBLISH_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_INTERVAL_S), &st->stat_publish_interval_last) > 0)
+        if (*running && iotdata_node_config_u16(STAT_PUBLISH_INTERVAL_S) > 0 && intervalable(iotdata_node_config_u16(STAT_PUBLISH_INTERVAL_S), &st->stat_publish_interval_last) > 0)
             stat_publish(st->state_stat, st->state_mesh, st->state_ddup);
-        if (*running && iotdata_config_u16(STAT_DISPLAY_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_INTERVAL_S), &st->stat_display_interval_last) > 0)
+        if (*running && iotdata_node_config_u16(STAT_DISPLAY_INTERVAL_S) > 0 && intervalable(iotdata_node_config_u16(STAT_DISPLAY_INTERVAL_S), &st->stat_display_interval_last) > 0)
             stat_display(st->state_stat, st->state_mesh, st->state_ddup);
 
         // network publish/display
-        if (*running && iotdata_config_u16(STAT_DISPLAY_NETW_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_DISPLAY_NETW_INTERVAL_S), &st->stat_netw_interval_last) > 0)
-            netw_report(&st->network, idep_station(st->state_mesh->inode));
-        if (*running && iotdata_config_u16(STAT_PUBLISH_NETW_INTERVAL_S) > 0 && intervalable(iotdata_config_u16(STAT_PUBLISH_NETW_INTERVAL_S), &st->stat_netw_publish_last) > 0)
-            netw_publish(&st->network, idep_station(st->state_mesh->inode), iotdata_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX), st->_buffer_netw_topic, sizeof(st->_buffer_netw_topic));
+        if (*running && iotdata_node_config_u16(STAT_DISPLAY_NETW_INTERVAL_S) > 0 && intervalable(iotdata_node_config_u16(STAT_DISPLAY_NETW_INTERVAL_S), &st->stat_netw_interval_last) > 0)
+            netw_report(&st->network, iotdata_node_station(st->state_mesh->inode));
+        if (*running && iotdata_node_config_u16(STAT_PUBLISH_NETW_INTERVAL_S) > 0 && intervalable(iotdata_node_config_u16(STAT_PUBLISH_NETW_INTERVAL_S), &st->stat_netw_publish_last) > 0)
+            netw_publish(&st->network, iotdata_node_station(st->state_mesh->inode), iotdata_node_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX), st->_buffer_netw_topic, sizeof(st->_buffer_netw_topic));
 
         // state
         if (*running)
-            iotdata_state_tick(state_store, hw_time_ms());
+            iotdata_node_state_tick(state_store, hw_time_ms());
     }
 
     if (st->rx_held != BUFFER_NONE) {

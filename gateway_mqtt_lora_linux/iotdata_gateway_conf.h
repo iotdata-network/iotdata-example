@@ -24,13 +24,13 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define IOTDATA_CONFIG_LORA_MODULE LORA_MODULE_USB
+#define IOTDATA_NODE_CONFIG_LORA_MODULE LORA_MODULE_USB
 #include "iotdata_node_config_device_e22900t22.h"
-#define IOTDATA_CONFIG_MESH_ENABLE 0
+#define IOTDATA_NODE_CONFIG_MESH_ENABLE 0
 #include "iotdata_node_mesh_tuning.h"
 #include "iotdata_node_config_mesh.h"
 #include "iotdata_node_config_ddup.h"
-#define IOTDATA_CONFIG_MQTT_CLIENT MQTT_CLIENT_DEFAULT
+#define IOTDATA_NODE_CONFIG_MQTT_CLIENT MQTT_CLIENT_DEFAULT
 #include "iotdata_node_config_mqtt.h"
 #include "iotdata_node_config_bbox.h"
 #include "iotdata_node_config_stat.h"
@@ -42,28 +42,28 @@
 #define IOTDATA_GATEWAY_NOTIFY NULL
 #endif
 
-#define IOTDATA_CONFIG_ENTRIES(X) \
+#define IOTDATA_NODE_CONFIG_ENTRIES(X) \
     /*  NAME                           id     TYPE    min max                   default                            flags                      validate notify */ \
-    X(CONFIG, 0x001, STRING, 1, 127, CONFIG_FILE_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL | IOTDATA_CONFIG_FLAG_STARTUP, NULL, NULL, "the settings file to read") \
-    X(OVERLAY, 0x002, STRING, 1, 127, CONFIG_OVERLAY_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL | IOTDATA_CONFIG_FLAG_STARTUP, NULL, NULL, "where a setting changed at runtime is written, beside that file") \
-    X(STATE, 0x003, STRING, 1, 127, STATE_PATH_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the directory this gateway keeps its state in") \
-    X(DEBUG, 0x004, BOOL, 0, 1, false, IOTDATA_CONFIG_FLAG_LOCAL, NULL, IOTDATA_GATEWAY_NOTIFY, "Debug output (true/false)") \
+    X(CONFIG, 0x001, STRING, 1, 127, CONFIG_FILE_DEFAULT, IOTDATA_NODE_CONFIG_FLAG_LOCAL | IOTDATA_NODE_CONFIG_FLAG_STARTUP, NULL, NULL, "the settings file to read") \
+    X(OVERLAY, 0x002, STRING, 1, 127, CONFIG_OVERLAY_DEFAULT, IOTDATA_NODE_CONFIG_FLAG_LOCAL | IOTDATA_NODE_CONFIG_FLAG_STARTUP, NULL, NULL, "where a setting changed at runtime is written, beside that file") \
+    X(STATE, 0x003, STRING, 1, 127, STATE_PATH_DEFAULT, IOTDATA_NODE_CONFIG_FLAG_LOCAL, NULL, NULL, "the directory this gateway keeps its state in") \
+    X(DEBUG, 0x004, BOOL, 0, 1, false, IOTDATA_NODE_CONFIG_FLAG_LOCAL, NULL, IOTDATA_GATEWAY_NOTIFY, "Debug output (true/false)") \
 \
-    X(LORA_PORT, 0x101, STRING, 1, 127, LORA_PORT_DEFAULT, IOTDATA_CONFIG_FLAG_LOCAL, NULL, NULL, "the serial device the E22 radio is on") \
-    IOTDATA_CONFIG_ENTRIES_LORA(X) \
-    IOTDATA_CONFIG_ENTRIES_MESH(X) \
-    IOTDATA_CONFIG_ENTRIES_MESH_GATEWAY(X) \
-    IOTDATA_CONFIG_ENTRIES_DDUP(X) \
-    IOTDATA_CONFIG_ENTRIES_MQTT(X) \
+    X(LORA_PORT, 0x101, STRING, 1, 127, LORA_PORT_DEFAULT, IOTDATA_NODE_CONFIG_FLAG_LOCAL, NULL, NULL, "the serial device the E22 radio is on") \
+    IOTDATA_NODE_CONFIG_ENTRIES_LORA(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_MESH(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_MESH_GATEWAY(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_DDUP(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_MQTT(X) \
 \
-    IOTDATA_CONFIG_ENTRIES_STAT_DISPLAY(X) \
-    IOTDATA_CONFIG_ENTRIES_STAT_DISPLAY_NETW(X) \
-    IOTDATA_CONFIG_ENTRIES_STAT_PUBLISH_NETW(X) \
-    IOTDATA_CONFIG_ENTRIES_STAT_PUBLISH(X) \
-    IOTDATA_CONFIG_ENTRIES_STAT_PUBLISH_MQTT(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_STAT_DISPLAY(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_STAT_DISPLAY_NETW(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_STAT_PUBLISH_NETW(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_STAT_PUBLISH(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_STAT_PUBLISH_MQTT(X) \
 \
-    IOTDATA_CONFIG_ENTRIES_BBOX(X) \
-    IOTDATA_CONFIG_ENTRIES_BBOX_FILE(X)
+    IOTDATA_NODE_CONFIG_ENTRIES_BBOX(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_BBOX_FILE(X)
 
 #endif /* IOTDATA_GATEWAY_CONF_H */
 
@@ -83,7 +83,7 @@
 /* Which rows a later write must persist: the ones changed at RUNTIME, and the ones a previous run
    already put in the overlay. Not the ones that came out of the operator's file -- those are theirs
    and stay theirs -- and not the command line, which is for this run. */
-static bool gateway_config_owned[IOTDATA_CFG_COUNT];
+static bool gateway_config_owned[IOTDATA_NODE_CFG_COUNT];
 static const char *gateway_config_overlay_path = NULL;
 
 /*
@@ -97,13 +97,13 @@ static const char *gateway_config_overlay_path = NULL;
  * "differs from the default" would sweep up every value the operator put in their own file and then
  * shadow the file they were editing.
  */
-static iotdata_settings_t gateway_settings;
-static bool gateway_settings_owned[IOTDATA_SETTINGS_KEY_COUNT];
+static iotdata_node_settings_t gateway_settings;
+static bool gateway_settings_owned[IOTDATA_NODE_SETTINGS_KEY_COUNT];
 /* AS LOADED, which is what "ours" is measured against. Not the build's default: every value the
    operator put in their own file differs from that too, so measuring there would copy their file
    into the overlay and then -- the overlay being read second -- shadow the file they were editing.
    That is the exact mistake the config side already made once. */
-static iotdata_settings_t gateway_settings_loaded;
+static iotdata_node_settings_t gateway_settings_loaded;
 
 /* ONE PASS, since STATION_ID went away.
  *
@@ -132,13 +132,13 @@ static bool gateway_config_set(const char *const key, const char *const text, co
     /* ROUTED BY NAME, and settings first because their prefix is the narrower claim. A "node-" key
        this build does not have is an error here rather than a config lookup that would fail with a
        misleading message about config. */
-    if (iotdata_settings_key_is_ours(key)) {
-        const int k = iotdata_settings_key_index(key);
+    if (iotdata_node_settings_key_is_ours(key)) {
+        const int k = iotdata_node_settings_key_index(key);
         if (k < 0) {
             PRINTF_ERROR("config: '%s' is not a protocol setting this build has\n", key);
             return false;
         }
-        if (!iotdata_settings_key_write(&gateway_settings, k, text)) {
+        if (!iotdata_node_settings_key_write(&gateway_settings, k, text)) {
             PRINTF_ERROR("config: '%s' is not a value for '%s'\n", text, key);
             return false;
         }
@@ -146,20 +146,20 @@ static bool gateway_config_set(const char *const key, const char *const text, co
             gateway_settings_owned[k] = true;
         return true;
     }
-    const int i = iotdata_config_index_by_name(key);
+    const int i = iotdata_node_config_index_by_name(key);
     if (i < 0) {
         PRINTF_ERROR("config: '%s' is not a setting this build has\n", key);
         return false;
     }
-    const iotdata_config_row_t *const row = &iotdata_config_table[i];
-    iotdata_config_value_t v;
-    if (!_iotdata_config_parse(row, text, &v)) {
-        PRINTF_ERROR("config: '%s' is not a %s, for '%s'\n", text, _iotdata_config_type_name(row->type), key);
+    const iotdata_node_config_row_t *const row = &iotdata_node_config_table[i];
+    iotdata_node_config_value_t v;
+    if (!_iotdata_node_config_parse(row, text, &v)) {
+        PRINTF_ERROR("config: '%s' is not a %s, for '%s'\n", text, _iotdata_node_config_type_name(row->type), key);
         return false;
     }
-    iotdata_config_update_t u;
-    iotdata_config_update_begin(&u, false);
-    if (!iotdata_config_update_stage(&u, row->id, &v) || !iotdata_config_update_commit(&u, NULL, NULL)) {
+    iotdata_node_config_update_t u;
+    iotdata_node_config_update_begin(&u, false);
+    if (!iotdata_node_config_update_stage(&u, row->id, &v) || !iotdata_node_config_update_commit(&u, NULL, NULL)) {
         PRINTF_ERROR("config: '%s' refused for '%s' -- out of range, or read-only\n", text, key);
         return false;
     }
@@ -194,8 +194,8 @@ static bool gateway_config_read(const char *const path, const bool required, con
             for (char *e = val + strlen(val); e > val && isspace((unsigned char)e[-1]);)
                 *--e = '\0';
             if (*key != '\0') {
-                const int row = iotdata_config_index_by_name(key);
-                if (row >= 0 && (iotdata_config_table[row].flags & IOTDATA_CONFIG_FLAG_STARTUP) != 0u) {
+                const int row = iotdata_node_config_index_by_name(key);
+                if (row >= 0 && (iotdata_node_config_table[row].flags & IOTDATA_NODE_CONFIG_FLAG_STARTUP) != 0u) {
                     /* By the time this line is read, the file it is trying to choose is already open. */
                     PRINTF_WARN("config: '%s' has no effect from inside a settings file -- it is a command-line option\n", key);
                 } else
@@ -242,12 +242,12 @@ static bool gateway_config_argv(const int argc, char **const argv) {
             /* PINNED, and pinned AFTER it was applied -- pinning first would make the command line
             refuse its own argument. From here the value is immutable for this run: the console and
             a manager on the radio are both told no, and the way out is to restart without it. */
-            if (iotdata_settings_key_is_ours(name))
-                iotdata_settings_key_pin(iotdata_settings_key_index(name));
+            if (iotdata_node_settings_key_is_ours(name))
+                iotdata_node_settings_key_pin(iotdata_node_settings_key_index(name));
             else {
-                const int row = iotdata_config_index_by_name(name);
+                const int row = iotdata_node_config_index_by_name(name);
                 if (row >= 0)
-                    (void)iotdata_config_pin(iotdata_config_table[row].id);
+                    (void)iotdata_node_config_pin(iotdata_node_config_table[row].id);
             }
         }
     }
@@ -293,9 +293,9 @@ static bool gateway_config_load(const int argc, char **const argv) {
     /* THE ROUTING RULE HAS TO STAY UNAMBIGUOUS. A config row named "node-something" would be read
        as a setting and never reach its own table, so the build says so instead of the box behaving
        strangely in the field. */
-    for (int i = 0; i < (int)IOTDATA_CFG_COUNT; i++)
-        if (iotdata_settings_key_is_ours(iotdata_config_table[i].name)) {
-            PRINTF_ERROR("config: row '%s' collides with the '%s' settings prefix -- rename it\n", iotdata_config_table[i].name, IOTDATA_SETTINGS_KEY_PREFIX);
+    for (int i = 0; i < (int)IOTDATA_NODE_CFG_COUNT; i++)
+        if (iotdata_node_settings_key_is_ours(iotdata_node_config_table[i].name)) {
+            PRINTF_ERROR("config: row '%s' collides with the '%s' settings prefix -- rename it\n", iotdata_node_config_table[i].name, IOTDATA_NODE_SETTINGS_KEY_PREFIX);
             return false;
         }
 
@@ -306,8 +306,8 @@ static bool gateway_config_load(const int argc, char **const argv) {
        this, and a `--node-station` argument overrides and pins it.
        Frozen straight after, because the console's "(default N)" has to come from somewhere and on
        a host there is no state block doing it. */
-    iotdata_settings_defaults(&gateway_settings, iotdata_node_station_from_mac("gateway"));
-    iotdata_settings_freeze(&gateway_settings);
+    iotdata_node_settings_defaults(&gateway_settings, iotdata_node_station_from_mac("gateway"));
+    iotdata_node_settings_freeze(&gateway_settings);
 
     if (!gateway_config_read(file, named != NULL, false) && named != NULL)
         return false;
@@ -316,7 +316,7 @@ static bool gateway_config_load(const int argc, char **const argv) {
         return false;
     gateway_settings_loaded = gateway_settings; /* the baseline a later write is a change FROM */
 
-    PRINTF_INFO("config: %d settings + %d node value(s) from '%s' (+ overlay '%s')\n", (int)IOTDATA_CFG_COUNT, (int)IOTDATA_SETTINGS_KEY_COUNT, file, gateway_config_overlay_path);
+    PRINTF_INFO("config: %d settings + %d node value(s) from '%s' (+ overlay '%s')\n", (int)IOTDATA_NODE_CFG_COUNT, (int)IOTDATA_NODE_SETTINGS_KEY_COUNT, file, gateway_config_overlay_path);
     return true;
 }
 
@@ -344,30 +344,30 @@ static bool gateway_overlay_write(void) {
     fprintf(f, "# iotdata gateway -- values changed at runtime.\n");
     fprintf(f, "# Written by the gateway; edit '%s' instead, this file is overwritten.\n\n", CONFIG_FILE_DEFAULT);
     int written = 0;
-    for (int i = 0; i < (int)IOTDATA_CFG_COUNT; i++)
-        if (gateway_config_owned[i] && (iotdata_config_table[i].flags & IOTDATA_CONFIG_FLAG_STARTUP) == 0u) {
-            iotdata_config_value_t v;
-            if (iotdata_config_get(iotdata_config_table[i].id, &v)) {
+    for (int i = 0; i < (int)IOTDATA_NODE_CFG_COUNT; i++)
+        if (gateway_config_owned[i] && (iotdata_node_config_table[i].flags & IOTDATA_NODE_CONFIG_FLAG_STARTUP) == 0u) {
+            iotdata_node_config_value_t v;
+            if (iotdata_node_config_get(iotdata_node_config_table[i].id, &v)) {
                 char buf[64];
-                const iotdata_config_row_t *const row = &iotdata_config_table[i];
+                const iotdata_node_config_row_t *const row = &iotdata_node_config_table[i];
                 /* the key as the file and the command line spell it: lower case, dashes */
                 for (const char *p = row->name; *p != '\0'; p++)
                     fputc((*p == '_') ? '-' : (*p | 0x20), f);
-                if (row->type == IOTDATA_CONFIG_TYPE_STRING)
+                if (row->type == IOTDATA_NODE_CONFIG_TYPE_STRING)
                     fprintf(f, " = %s\n", (v.s.p != NULL) ? v.s.p : "");
-                else if (row->type == IOTDATA_CONFIG_TYPE_BOOL)
+                else if (row->type == IOTDATA_NODE_CONFIG_TYPE_BOOL)
                     fprintf(f, " = %s\n", v.b ? "true" : "false");
                 else
-                    fprintf(f, " = %s\n", _iotdata_config_fmt(row, &v, buf, sizeof(buf)));
+                    fprintf(f, " = %s\n", _iotdata_node_config_fmt(row, &v, buf, sizeof(buf)));
                 written++;
             }
         }
     /* the settings, in the same file and by the same rule: what we own, and nothing the operator
        stated and never changed */
     int node_written = 0;
-    for (int k = 0; k < IOTDATA_SETTINGS_KEY_COUNT; k++) {
-        char key[IOTDATA_SETTINGS_KEY_MAX], val[32];
-        if (gateway_settings_owned[k] && iotdata_settings_key_name(k, key, sizeof(key)) && iotdata_settings_key_read(&gateway_settings, k, val, sizeof(val))) {
+    for (int k = 0; k < IOTDATA_NODE_SETTINGS_KEY_COUNT; k++) {
+        char key[IOTDATA_NODE_SETTINGS_KEY_MAX], val[32];
+        if (gateway_settings_owned[k] && iotdata_node_settings_key_name(k, key, sizeof(key)) && iotdata_node_settings_key_read(&gateway_settings, k, val, sizeof(val))) {
             if (node_written == 0)
                 fprintf(f, "\n");
             fprintf(f, "%s = %s\n", key, val);
@@ -399,14 +399,14 @@ static bool gateway_overlay_write(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 /* THE CONFIG SINK. Records what the update moved, then writes the whole file. */
-static bool gateway_config_save(const struct iotdata_config_update *const u) {
+static bool gateway_config_save(const struct iotdata_node_config_update *const u) {
     /* WHAT JUST MOVED is ours to keep, and nothing else. This used to ask "does it differ from the
        default", which is a different question with the same answer most of the time and a ruinous
        one the rest: every value an operator had put in their OWN file differs from the default too,
        so the overlay filled up with their settings and then, being read after the file, overrode
        the file they were editing. */
-    for (int i = 0; i < IOTDATA_CFG_COUNT; i++)
-        if (u != NULL && u->touched[i] && (iotdata_config_table[i].flags & IOTDATA_CONFIG_FLAG_STARTUP) == 0u)
+    for (int i = 0; i < IOTDATA_NODE_CFG_COUNT; i++)
+        if (u != NULL && u->touched[i] && (iotdata_node_config_table[i].flags & IOTDATA_NODE_CONFIG_FLAG_STARTUP) == 0u)
             gateway_config_owned[i] = true;
     return gateway_overlay_write();
 }
@@ -420,12 +420,12 @@ static bool gateway_config_save(const struct iotdata_config_update *const u) {
  * Deliberately not against the build's default: that is the same question with the same answer most
  * of the time and a ruinous one the rest, because a value the operator wrote in their own file
  * differs from the default too, and copying it here would shadow the file they were editing. */
-static bool gateway_settings_save(const iotdata_settings_t *const s) {
+static bool gateway_settings_save(const iotdata_node_settings_t *const s) {
     if (s == NULL)
         return false;
-    for (int k = 0; k < IOTDATA_SETTINGS_KEY_COUNT; k++) {
+    for (int k = 0; k < IOTDATA_NODE_SETTINGS_KEY_COUNT; k++) {
         char now[32], was[32];
-        if (iotdata_settings_key_read(s, k, now, sizeof(now)) && iotdata_settings_key_read(&gateway_settings_loaded, k, was, sizeof(was))) {
+        if (iotdata_node_settings_key_read(s, k, now, sizeof(now)) && iotdata_node_settings_key_read(&gateway_settings_loaded, k, was, sizeof(was))) {
             if (strcmp(now, was) != 0)
                 gateway_settings_owned[k] = true;
         }

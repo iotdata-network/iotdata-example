@@ -101,7 +101,7 @@ static const char *__tag_survey = "survey";
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
-    idep_node_t *node; /* our station, and the sequence a frame is spent from */
+    iotdata_node_t *node; /* our station, and the sequence a frame is spent from */
     gpio_num_t button_gpio;
     gpio_num_t led_gpio;
     bool (*send)(const uint8_t *buf, size_t len);      /* the radio is already up; put these bytes out */
@@ -206,8 +206,8 @@ static void survey_observe(survey_t *const s, const uint16_t station, const uint
 
 static void survey_report(survey_t *const s, const char *const why) {
     const survey_config_t *const c = _survey_cfg;
-    const uint16_t station = idep_station(c->node);
-    const uint16_t seq = idep_sequence(c->node); /* peeked: spent only if it goes */
+    const uint16_t station = iotdata_node_station(c->node);
+    const uint16_t seq = iotdata_node_sequence(c->node); /* peeked: spent only if it goes */
 
     iotdata_mesh_diag_position_t posn;
     const bool have_posn = (c->position != NULL) && c->position(&posn);
@@ -218,7 +218,7 @@ static void survey_report(survey_t *const s, const char *const why) {
     const int flen = (ilen > 0) ? iotdata_mesh_pack_forward(frame, (int)sizeof(frame), station, seq, IOTDATA_MESH_TTL_DEFAULT, inner, ilen) : 0;
     if (flen > 0) {
         if (c->send(frame, (size_t)flen)) {
-            idep_sequence_used(c->node);
+            iotdata_node_sequence_used(c->node);
             (*c->tx_count)++;
             ESP_LOGI(__tag_survey, "report: %s -- %d heard, %s (%d bytes)", why, s->obs_count, have_posn ? "positioned" : "no fix", flen);
             s->obs_count = 0;
@@ -235,13 +235,13 @@ static void survey_report(survey_t *const s, const char *const why) {
 
 static bool survey_directive_send(survey_t *const s, const bool begin) {
     const survey_config_t *const c = _survey_cfg;
-    const uint16_t station = idep_station(c->node);
-    const uint16_t seq = idep_sequence(c->node);
+    const uint16_t station = iotdata_node_station(c->node);
+    const uint16_t seq = iotdata_node_sequence(c->node);
     uint8_t frame[IOTDATA_MAX_PACKET_SIZE];
     const int len = begin ? iotdata_mesh_pack_diag_survey_request(frame, (int)sizeof(frame), station, seq, s->directive_id, SURVEY_DURATION_M, SURVEY_BATCH_S, &station, 1)
                           : iotdata_mesh_pack_diag_cancel(frame, (int)sizeof(frame), station, seq, IOTDATA_MESH_DIAG_SURVEY, s->directive_id);
     if (len > 0 && c->send(frame, (size_t)len)) {
-        idep_sequence_used(c->node);
+        iotdata_node_sequence_used(c->node);
         s->issued_ms = hw_time_ms();
         return true;
     }
@@ -256,7 +256,7 @@ static void survey_begin(survey_t *const s) {
     s->directive_id = (id == 0u) ? 1u : id;
     if (survey_directive_send(s, true)) {
         s->active = true;
-        ESP_LOGI(__tag_survey, "STARTED directive=%03" PRIX16 " watching station=%03" PRIX16 " (%um lifetime, %us batches)", s->directive_id, idep_station(_survey_cfg->node), (unsigned)SURVEY_DURATION_M, (unsigned)SURVEY_BATCH_S);
+        ESP_LOGI(__tag_survey, "STARTED directive=%03" PRIX16 " watching station=%03" PRIX16 " (%um lifetime, %us batches)", s->directive_id, iotdata_node_station(_survey_cfg->node), (unsigned)SURVEY_DURATION_M, (unsigned)SURVEY_BATCH_S);
     } else
         ESP_LOGW(__tag_survey, "could not air the directive -- not started");
 }
@@ -274,7 +274,7 @@ static void survey_trace(survey_t *const s, const char *const why) {
     const survey_config_t *const c = _survey_cfg;
     if (c == NULL || c->send == NULL)
         return;
-    const uint16_t station = idep_station(c->node), seq = idep_sequence(c->node); /* peeked: spent only if it goes */
+    const uint16_t station = iotdata_node_station(c->node), seq = iotdata_node_sequence(c->node); /* peeked: spent only if it goes */
     const iotdata_mesh_nbr_entry_t me = { .cost = IOTDATA_MESH_NBR_COST_SENSOR, .rssi_dbm = IOTDATA_MESH_DIAG_RSSI_NONE, .station = station };
     uint8_t inner[IOTDATA_MESH_DIAG_TRACE_HDR_SIZE + IOTDATA_MESH_DIAG_TRACE_HOP];
     const int ilen = iotdata_mesh_pack_diag_trace(inner, (int)sizeof(inner), station, seq, IOTDATA_MESH_DIAG_OP_RECORD, SURVEY_DIRECTIVE_NONE, 0u, station, &me, 1);
@@ -282,7 +282,7 @@ static void survey_trace(survey_t *const s, const char *const why) {
     const int flen = (ilen > 0) ? iotdata_mesh_pack_forward(frame, (int)sizeof(frame), station, seq, IOTDATA_MESH_TTL_DEFAULT, inner, ilen) : 0;
     if (flen > 0) {
         if (c->send(frame, (size_t)flen)) {
-            idep_sequence_used(c->node);
+            iotdata_node_sequence_used(c->node);
             (*c->tx_count)++;
             s->trace_count++;
             ESP_LOGI(__tag_survey, "trace: %s -- asking the mesh to record its own path home (%d bytes)", why, flen);
@@ -319,8 +319,8 @@ static void survey_poll(survey_t *const s) {
             s->auto_report = false;
             if (s->active)
                 survey_end(s);
-            iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
-            iotdata_diagnostics_flush();
+            iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_STOP, 0);
+            iotdata_node_diagnostics_flush();
             hw_delay_ms_yieldable(CONSOLE_DRAIN_MS);
             esp_restart();
         } else if (ev.type == BUTTON_EVENT_STUCK)

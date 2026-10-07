@@ -29,7 +29,7 @@ typedef struct {
 typedef struct {
 } app_running_t;
 
-#define APP_CONFIG_ENTRIES(X) X(TRANSMIT_PERIOD_S, 0x001, U16, 10, 3600, (IOTDATA_CONFIG_SENSOR_TRANSMIT_PERIOD_MS / 1000), 0, NULL, NULL, "how often a reading goes out")
+#define APP_CONFIG_ENTRIES(X) X(TRANSMIT_PERIOD_S, 0x001, U16, 10, 3600, (IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MS / 1000), 0, NULL, NULL, "how often a reading goes out")
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -110,15 +110,15 @@ typedef struct {
 
 #include "iotdata_node_utils.h"
 #include "iotdata_node_partial.h"
-#define IOTDATA_VERSION_HAS_BLACKBOX
+#define IOTDATA_NODE_VERSION_HAS_BLACKBOX
 #include "iotdata_node_version.h"
 #include "iotdata_node_variant.h"
 #include "iotdata_node_status.h"
 #include "iotdata_node_config.h"
 #include "iotdata_node_control.h"
-#define IOTDATA_DIAGNOSTICS       IOTDATA_CONFIG_BLACKBOX
-#define IOTDATA_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
-#define IOTDATA_BLACKBOX_IMPLEMENTATION
+#define IOTDATA_NODE_DIAGNOSTICS       IOTDATA_NODE_CONFIG_BLACKBOX
+#define IOTDATA_NODE_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
+#define IOTDATA_NODE_BLACKBOX_IMPLEMENTATION
 static void _iotd_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
 }
@@ -132,33 +132,33 @@ static void _iotd_diagnostics_emit(const char *const line) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool _iotd_on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
-#define IOTDATA_CONFIG_LORA_NOTIFY _iotd_on_lora_changed
+static bool _iotd_on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
+#define IOTDATA_NODE_CONFIG_LORA_NOTIFY _iotd_on_lora_changed
 #include "iotdata_node_config_device_e22900t22.h"
 
-static bool _iotd_on_batt_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, const iotdata_config_info_t *info);
-#define IOTDATA_CONFIG_BATT_NOTIFY _iotd_on_batt_changed
+static bool _iotd_on_batt_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
+#define IOTDATA_NODE_CONFIG_BATT_NOTIFY _iotd_on_batt_changed
 #include "iotdata_node_config_device_batt.h"
 
-#define IOTDATA_CONFIG_ENTRIES(X) \
+#define IOTDATA_NODE_CONFIG_ENTRIES(X) \
     /*NAME  id  TYPE  min  max  default  flags  validate  notify */ \
     APP_CONFIG_ENTRIES(X) \
-    IOTDATA_CONFIG_ENTRIES_LORA(X) \
-    IOTDATA_CONFIG_ENTRIES_BATT(X)
+    IOTDATA_NODE_CONFIG_ENTRIES_LORA(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_BATT(X)
 
 #include "iotdata_node_config.h"
 
 #include "iotdata_node_config_device_e22900t22.h"
 
-static bool _iotd_on_lora_changed(const iotdata_config_row_t *row, const iotdata_config_value_t *was, __attribute__((unused)) const iotdata_config_info_t *info) {
+static bool _iotd_on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, __attribute__((unused)) const iotdata_node_config_info_t *info) {
     ESP_LOGW("config", "lora %s changed (was %llu), restart required", row->name, (unsigned long long)was->u);
     return true;
 }
 
 #include "iotdata_node_config_device_batt.h"
 
-static bool _iotd_on_batt_changed(const iotdata_config_row_t *row, __attribute__((unused)) const iotdata_config_value_t *was, __attribute__((unused)) const iotdata_config_info_t *info) {
-    if (!iotdata_config_batt_apply())
+static bool _iotd_on_batt_changed(const iotdata_node_config_row_t *row, __attribute__((unused)) const iotdata_node_config_value_t *was, __attribute__((unused)) const iotdata_node_config_info_t *info) {
+    if (!iotdata_node_config_batt_apply())
         ESP_LOGW("config", "batt %s changed, but values not accepted", row->name);
     return false;
 }
@@ -175,7 +175,7 @@ static bool _iotd_on_batt_changed(const iotdata_config_row_t *row, __attribute__
 
 static void _iotd_node_status(const uint16_t station, iotdata_node_status_t *const out);
 static bool _iotd_node_transmit(const uint8_t *const packet, const size_t len);
-static int _iotd_node_config_build(uint8_t *buf, size_t size, iotdata_partial_t *partial);
+static int _iotd_node_config_build(uint8_t *buf, size_t size, iotdata_node_partial_t *partial);
 static bool _iotd_node_config_apply(const uint8_t *buf, size_t len, bool *reboot_out);
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -187,8 +187,8 @@ static bool _iotd_node_config_apply(const uint8_t *buf, size_t len, bool *reboot
 
 typedef struct {
     _RTC_DATA_STAMP_ENTRY;
-    iotdata_version_caps_t caps;
-    idep_node_t node;
+    iotdata_node_version_caps_t caps;
+    iotdata_node_t node;
     uint32_t restarts;
     uint32_t tx_cycles;   /* wake cycles since the last restart              */
     uint32_t tx_count;    /* packets transmitted                             */
@@ -202,8 +202,8 @@ typedef struct {
 typedef struct {
     datastore_t datastore;
     iotdata_node_state_t node;
-    iotdata_settings_t node_settings; /* the PROTOCOL's own: station id, reporting, receive */
-    const idep_config_t node_config;
+    iotdata_node_settings_t node_settings; /* the PROTOCOL's own: station id, reporting, receive */
+    const iotdata_node_params_t node_config;
     uint8_t packet_buffer[IOTDATA_MAX_PACKET_SIZE];
     app_running_t app;
 } iotd_running_t;
@@ -213,12 +213,12 @@ static iotd_running_t _iotd_running = { .node_config = {
                                             .caps = &_iotd_operating.caps,
                                             .status = _iotd_node_status,
                                             .tx = _iotd_node_transmit,
-                                            .control = IOTDATA_DIAGNOSTICS_CONTROL,
-                                            .control_actions = iotdata_diagnostics_control_actions,
-                                            .control_actions_count = IOTDATA_DIAGNOSTICS_CONTROL_ACTIONS_COUNT,
-                                            .diag = IOTDATA_DIAGNOSTICS_PULL,
-                                            .receive_every_ms = IDEP_RECEIVE_EVERY_MS,
-                                            .receive_window_ms = IDEP_RECEIVE_WINDOW_MS,
+                                            .control = IOTDATA_NODE_DIAGNOSTICS_CONTROL,
+                                            .control_actions = iotdata_node_diagnostics_control_actions,
+                                            .control_actions_count = IOTDATA_NODE_DIAGNOSTICS_CONTROL_ACTIONS_COUNT,
+                                            .diag = IOTDATA_NODE_DIAGNOSTICS_PULL,
+                                            .receive_every_ms = IOTDATA_NODE_RECEIVE_EVERY_MS,
+                                            .receive_window_ms = IOTDATA_NODE_RECEIVE_WINDOW_MS,
                                             .settings = &_iotd_running.node_settings,
                                             .state = &_iotd_running.node,
                                             .config_build = _iotd_node_config_build,
@@ -248,16 +248,16 @@ typedef enum {
     IOTD_EV_FAIL
 } iotd_event_t;
 
-typedef void (*app_func_init_log_t)(app_state_t *const as, idep_node_t *const node, char *const buf, const size_t len);
-typedef iotd_event_t (*app_func_init_entry_t)(app_state_t *const as, idep_node_t *const node, const esp_reset_reason_t reset_reason);
-typedef iotd_event_t (*app_func_init_rtc_t)(app_state_t *const as, idep_node_t *const node, iotdata_version_caps_t *const caps);
-typedef iotd_event_t (*app_func_init_datastore_t)(app_state_t *const as, idep_node_t *const node, datastore_t *const ds);
-typedef iotd_event_t (*app_func_init_final_t)(app_state_t *const as, idep_node_t *const node, const esp_reset_reason_t reset_reason);
-typedef iotd_event_t (*app_func_sleep_t)(app_state_t *const as, idep_node_t *const node, uint32_t *const sleep_ms, const uint32_t start_ms, const uint32_t awake_ms, bool deepsleep);
-typedef iotd_event_t (*app_func_exec_packet_t)(app_state_t *const as, idep_node_t *const node, const uint32_t cycle, const bool battery_present, const battery_reading_t *const battery, const int16_t battery_mv_was, uint8_t *const buf,
+typedef void (*app_func_init_log_t)(app_state_t *const as, iotdata_node_t *const node, char *const buf, const size_t len);
+typedef iotd_event_t (*app_func_init_entry_t)(app_state_t *const as, iotdata_node_t *const node, const esp_reset_reason_t reset_reason);
+typedef iotd_event_t (*app_func_init_rtc_t)(app_state_t *const as, iotdata_node_t *const node, iotdata_node_version_caps_t *const caps);
+typedef iotd_event_t (*app_func_init_datastore_t)(app_state_t *const as, iotdata_node_t *const node, datastore_t *const ds);
+typedef iotd_event_t (*app_func_init_final_t)(app_state_t *const as, iotdata_node_t *const node, const esp_reset_reason_t reset_reason);
+typedef iotd_event_t (*app_func_sleep_t)(app_state_t *const as, iotdata_node_t *const node, uint32_t *const sleep_ms, const uint32_t start_ms, const uint32_t awake_ms, bool deepsleep);
+typedef iotd_event_t (*app_func_exec_packet_t)(app_state_t *const as, iotdata_node_t *const node, const uint32_t cycle, const bool battery_present, const battery_reading_t *const battery, const int16_t battery_mv_was, uint8_t *const buf,
                                                const size_t len, const bool advertise, size_t *const transmit);
-typedef iotd_event_t (*app_func_exec_final_t)(app_state_t *const as, idep_node_t *const node, const uint32_t start_ms);
-typedef void (*app_func_fail_t)(app_state_t *const as, idep_node_t *const node);
+typedef iotd_event_t (*app_func_exec_final_t)(app_state_t *const as, iotdata_node_t *const node, const uint32_t start_ms);
+typedef void (*app_func_fail_t)(app_state_t *const as, iotdata_node_t *const node);
 
 typedef struct {
     const char *name;
@@ -317,46 +317,46 @@ static bool _iotd_node_transmit(const uint8_t *const packet, const size_t len) {
     return lora_write_complete(packet, len, /*wait_complete=*/true) == ESP_OK;
 }
 
-static int _iotd_node_config_build(uint8_t *const buf, const size_t size, iotdata_partial_t *const partial) {
-    return iotdata_config_pack(buf, size, partial);
+static int _iotd_node_config_build(uint8_t *const buf, const size_t size, iotdata_node_partial_t *const partial) {
+    return iotdata_node_config_pack(buf, size, partial);
 }
 static bool _iotd_node_config_apply(const uint8_t *const buf, const size_t len, bool *const reboot_out) {
-    return iotdata_config_apply(buf, len, &iotd_state.running->datastore, reboot_out);
+    return iotdata_node_config_apply(buf, len, &iotd_state.running->datastore, reboot_out);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void iotd_cycle_elapsed(iotd_state_t *const as, const uint32_t cycle_ms) {
-    (void)idep_window_advance(&as->operating->node, cycle_ms);
+    (void)iotdata_node_window_advance(&as->operating->node, cycle_ms);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void iotd_node_receive(iotd_state_t *const as) {
-    idep_node_t *const n = &as->operating->node;
+    iotdata_node_t *const n = &as->operating->node;
 
-    ESP_LOGI(__tag_iotd, "receive: window opened for %us (station=%03" PRIX16 ")", (unsigned)(IDEP_RECEIVE_WINDOW_MS / 1000), idep_station(n));
-    idep_window_begin(n, (uint32_t)hw_time_ms());
-    iotdata_diagnostics_event(IOTDATA_BB_LC_WAKE, 0);
+    ESP_LOGI(__tag_iotd, "receive: window opened for %us (station=%03" PRIX16 ")", (unsigned)(IOTDATA_NODE_RECEIVE_WINDOW_MS / 1000), iotdata_node_station(n));
+    iotdata_node_window_begin(n, (uint32_t)hw_time_ms());
+    iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_WAKE, 0);
     bool reboot = false;
     unsigned frames = 0, acted = 0;
-    while (idep_window_active(n, (uint32_t)hw_time_ms())) {
+    while (iotdata_node_window_active(n, (uint32_t)hw_time_ms())) {
         int len = 0, rssi_dbm = 0;
         if (lora_read(as->running->packet_buffer, sizeof(as->running->packet_buffer), &len, &rssi_dbm, 0) == ESP_OK && len > 0) {
             frames++;
-            acted += idep_on_frame(n, as->running->packet_buffer, (size_t)len, &reboot) ? 1 : 0;
+            acted += iotdata_node_on_frame(n, as->running->packet_buffer, (size_t)len, &reboot) ? 1 : 0;
         }
-        iotdata_diagnostics_pump();             /* a DUMP that arrived in this window drains inside it */
+        iotdata_node_diagnostics_pump();        /* a DUMP that arrived in this window drains inside it */
         hw_delay_ms_yieldable(RECEIVE_POLL_MS); /* yield and pat the watchdog: the window is long by MCU standards */
     }
-    idep_window_end(n);
+    iotdata_node_window_end(n);
     ESP_LOGI(__tag_iotd, "receive: window closed (%u frame(s) heard, %u for us)", frames, acted);
 
     if (reboot) {
         ESP_LOGW(__tag_iotd, "node: REBOOT commanded -- restarting");
-        iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
-        iotdata_diagnostics_flush();
+        iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_STOP, 0);
+        iotdata_node_diagnostics_flush();
         hw_delay_ms_yieldable(CONSOLE_DRAIN_MS);
         esp_restart();
     }
@@ -374,7 +374,7 @@ static void iotd_fail(iotd_state_t *const as) {
 
     // don't close the datastore or do anything: we don't know what kind of bad situation the app is in
     ESP_LOGE(__tag_iotd, "failure, restarting in %ds", RESTART_MS);
-    iotdata_diagnostics_event(IOTDATA_BB_LC_STOP, 0);
+    iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_STOP, 0);
     hw_delay_ms_yieldable(RESTART_MS);
     esp_restart();
 }
@@ -384,7 +384,7 @@ static void iotd_fail(iotd_state_t *const as) {
 static bool iotd_init(iotd_state_t *const as) {
 
     const app_descr_t *const ad = app_spec;
-    idep_node_t *const node = &as->operating->node;
+    iotdata_node_t *const node = &as->operating->node;
 
     // capture reset reason
     const esp_reset_reason_t reset_reason = esp_reset_reason();
@@ -396,9 +396,9 @@ static bool iotd_init(iotd_state_t *const as) {
     const int16_t brownout_mv = cold_boot ? 0 : as->operating->battery_mv;
     if (cold_boot) {
         _RTC_DATA_INIT(as->operating, IOTD_STATE_MAGIC);
-        idep_node_init(node, iotdata_node_station_from_mac(__tag_iotd), NULL, 0u); // station_id may be changed in persistence load
+        iotdata_node_init(node, iotdata_node_station_from_mac(__tag_iotd), NULL, 0u); // station_id may be changed in persistence load
     }
-    idep_node_attach(node, &as->running->node_config);
+    iotdata_node_attach(node, &as->running->node_config);
 
     // initial banner, before anything else
     char buffer[80] = { 0 };
@@ -408,10 +408,10 @@ static bool iotd_init(iotd_state_t *const as) {
     ESP_LOGI(__tag_iotd, "boot: reset_reason=%d %s", (int)reset_reason, reset_reason_str(reset_reason));
 
     // bring up diagnostics and flush any pending records if in RTC
-    iotdata_diagnostics_emit_set(_iotd_diagnostics_emit);
-    if (!iotdata_diagnostics_begin((uint8_t)reset_reason, restarted))
+    iotdata_node_diagnostics_emit_set(_iotd_diagnostics_emit);
+    if (!iotdata_node_diagnostics_begin((uint8_t)reset_reason, restarted))
         ESP_LOGW(__tag_iotd, "diag: the recorder did not start");
-    iotdata_diagnostics_flush();
+    iotdata_node_diagnostics_flush();
 
     // deal with power reset issues
     if (reset_reason == ESP_RST_BROWNOUT && brownout_mv > 0) {
@@ -429,33 +429,33 @@ static bool iotd_init(iotd_state_t *const as) {
 
     // capabilities and the fitted-hardware probe, cold boot only
     if (cold_boot) {
-        iotdata_version_caps_init(&as->operating->caps);
+        iotdata_node_version_caps_init(&as->operating->caps);
         as->operating->battery_present = battery_probe();
         if (ad->func_init_rtc)
             ad->func_init_rtc(&app_state, node, &as->operating->caps);
     }
 
     // dump out version information
-    char vbuf[IOTDATA_VERSION_STR_MAX + 1];
-    ESP_LOGI(__tag_iotd, "version: %s", iotdata_version_str(vbuf, sizeof(vbuf), &as->operating->caps));
-    if (!iotdata_version_stamp_is_real())
+    char vbuf[IOTDATA_NODE_VERSION_STR_MAX + 1];
+    ESP_LOGI(__tag_iotd, "version: %s", iotdata_node_version_str(vbuf, sizeof(vbuf), &as->operating->caps));
+    if (!iotdata_node_version_stamp_is_real())
         ESP_LOGW(__tag_iotd, "version: build stamp is unset -- this binary cannot say when it was built");
 
     // open the datastore and hydrate all forms of persistent storage
     if (datastore_open(&as->running->datastore, "iotdata")) {
-        iotdata_state_init(&as->running->node, &as->running->datastore, "state");
-        iotdata_settings_defaults(&as->running->node_settings, idep_station(&as->operating->node));
-        if (!iotdata_settings_attach(&as->running->node_settings, &as->running->node))
+        iotdata_node_state_init(&as->running->node, &as->running->datastore, "state");
+        iotdata_node_settings_defaults(&as->running->node_settings, iotdata_node_station(&as->operating->node));
+        if (!iotdata_node_settings_attach(&as->running->node_settings, &as->running->node))
             ESP_LOGW(__tag_iotd, "state: persistence not available, protocol settings will not persist");
-        if (!idep_node_bind(&as->operating->node, &as->running->node, IOTD_STATE_TAG))
+        if (!iotdata_node_bind(&as->operating->node, &as->running->node, IOTD_STATE_TAG))
             ESP_LOGW(__tag_iotd, "state: persistence binding failed");
-        const bool restored = iotdata_state_load(&as->running->node);
+        const bool restored = iotdata_node_state_load(&as->running->node);
         ESP_LOGI(__tag_iotd, "state: persistence %s %u block(s)", restored ? "restored" : "defaulted", (unsigned)as->running->node.count);
-        if (idep_node_restore_station(&as->operating->node, &as->running->node_settings))
-            ESP_LOGI(__tag_iotd, "node: station=%" PRIu16 " restored from persisted settings", idep_station(&as->operating->node));
-        if (!iotdata_config_load(&as->running->datastore))
+        if (iotdata_node_restore_station(&as->operating->node, &as->running->node_settings))
+            ESP_LOGI(__tag_iotd, "node: station=%" PRIu16 " restored from persisted settings", iotdata_node_station(&as->operating->node));
+        if (!iotdata_node_config_load(&as->running->datastore))
             ESP_LOGI(__tag_iotd, "config: persistence empty, using defaults");
-        if (!iotdata_config_batt_apply())
+        if (!iotdata_node_config_batt_apply())
             ESP_LOGW(__tag_iotd, "battery: persisted profile refused, using the built-in one");
         if (ad->func_init_datastore && ad->func_init_datastore(&app_state, node, &as->running->datastore) != IOTD_EV_OK) {
             datastore_close(&as->running->datastore);
@@ -480,7 +480,7 @@ static bool iotd_init(iotd_state_t *const as) {
 static bool iotd_sleep(iotd_state_t *const as, const uint32_t start_ms, bool deep) {
 
     const app_descr_t *const ad = app_spec;
-    idep_node_t *const node = &as->operating->node;
+    iotdata_node_t *const node = &as->operating->node;
 
     const uint32_t awake_ms = hw_time_ms() - start_ms;
     uint32_t sleep_ms = 0;
@@ -488,8 +488,8 @@ static bool iotd_sleep(iotd_state_t *const as, const uint32_t start_ms, bool dee
         if (ad->func_sleep && ad->func_sleep(&app_state, node, &sleep_ms, start_ms, awake_ms, false) != IOTD_EV_OK)
             return false;
         iotd_cycle_elapsed(as, awake_ms + sleep_ms);
-        iotdata_diagnostics_event(IOTDATA_BB_LC_SLEEP, iotdata_diagnostics_reason(sleep_ms / 1000));
-        iotdata_diagnostics_flush();
+        iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_SLEEP, iotdata_node_diagnostics_reason(sleep_ms / 1000));
+        iotdata_node_diagnostics_flush();
         ESP_LOGI(__tag_iotd, "sleep light %" PRIu32 "ms (awake %" PRIu32 "ms) -- cycle %" PRIu32 ", tx=%" PRIu32 " errors=%" PRIu32, sleep_ms, awake_ms, as->operating->tx_cycles, as->operating->tx_count, as->operating->tx_errors);
         hw_delay_ms_yieldable(CONSOLE_DRAIN_MS);
         hw_delay_ms_yieldable(sleep_ms);
@@ -497,8 +497,8 @@ static bool iotd_sleep(iotd_state_t *const as, const uint32_t start_ms, bool dee
         if (ad->func_sleep && ad->func_sleep(&app_state, node, &sleep_ms, start_ms, awake_ms, true) != IOTD_EV_OK)
             return false;
         iotd_cycle_elapsed(as, awake_ms + sleep_ms);
-        iotdata_diagnostics_event(IOTDATA_BB_LC_SLEEP, iotdata_diagnostics_reason(sleep_ms / 1000));
-        iotdata_diagnostics_flush();
+        iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_SLEEP, iotdata_node_diagnostics_reason(sleep_ms / 1000));
+        iotdata_node_diagnostics_flush();
         lora_hold();
         datastore_close(&as->running->datastore);
         ESP_LOGI(__tag_iotd, "sleep deep %" PRIu32 "ms (awake %" PRIu32 "ms) -- cycle %" PRIu32 ", tx=%" PRIu32 " errors=%" PRIu32, sleep_ms, awake_ms, as->operating->tx_cycles, as->operating->tx_count, as->operating->tx_errors);
@@ -513,12 +513,12 @@ static bool iotd_sleep(iotd_state_t *const as, const uint32_t start_ms, bool dee
 static bool iotd_exec(iotd_state_t *const as) {
 
     const app_descr_t *const ad = app_spec;
-    idep_node_t *const node = &as->operating->node;
+    iotdata_node_t *const node = &as->operating->node;
 
     do {
         const uint32_t start_ms = hw_time_ms();
 
-        const bool receive = idep_window_pending(&as->operating->node);
+        const bool receive = iotdata_node_window_pending(&as->operating->node);
 
         const int16_t battery_mv_was = as->operating->battery_mv;
         battery_reading_t battery_reading = { 0 };
@@ -542,7 +542,7 @@ static bool iotd_exec(iotd_state_t *const as) {
         if (transmit || receive) {
             if (!as->operating->lora_present) {
                 lora_config_t lora_cfg;
-                iotdata_config_lora_apply(&lora_cfg);
+                iotdata_node_config_lora_apply(&lora_cfg);
                 esp_log_level_set(__tag_device_e22900t22, lora_cfg.debug ? ESP_LOG_DEBUG : ESP_LOG_INFO);
                 as->operating->lora_present = lora_setup(&lora_cfg) == ESP_OK;
             }
@@ -552,12 +552,12 @@ static bool iotd_exec(iotd_state_t *const as) {
             if (transmit) {
                 if (lora_started && lora_write_complete(as->running->packet_buffer, transmit, /*wait_complete=*/true) == ESP_OK) {
                     ESP_LOGI(__tag_iotd, "packet: transmit success (%zu bytes)", transmit);
-                    idep_sequence_used(&as->operating->node);
+                    iotdata_node_sequence_used(&as->operating->node);
                     as->operating->tx_count++;
                 } else {
                     ESP_LOGE(__tag_iotd, "packet: transmit failed (%zu bytes)", transmit);
                     as->operating->tx_errors++;
-                    iotdata_diagnostics_event(IOTDATA_BB_LC_ERROR, iotdata_diagnostics_reason(as->operating->tx_errors));
+                    iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_ERROR, iotdata_node_diagnostics_reason(as->operating->tx_errors));
                 }
             }
             if (lora_started && receive)
@@ -569,7 +569,7 @@ static bool iotd_exec(iotd_state_t *const as) {
         ev = ad->func_exec_final != NULL ? ad->func_exec_final(&app_state, node, start_ms) : IOTD_EV_OK;
         if (ev == IOTD_EV_FAIL)
             return false;
-        iotdata_state_flush(&as->running->node);
+        iotdata_node_state_flush(&as->running->node);
         if (ev == IOTD_EV_SLEEP_LIGHT || ev == IOTD_EV_SLEEP_DEEP) {
             if (!iotd_sleep(as, start_ms, ev == IOTD_EV_SLEEP_DEEP))
                 return false;
@@ -609,7 +609,7 @@ void app_main(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #ifndef TRANSMIT_PERIOD_MS
-#define TRANSMIT_PERIOD_MS ((uint32_t)iotdata_config_u16(TRANSMIT_PERIOD_S) * 1000u)
+#define TRANSMIT_PERIOD_MS ((uint32_t)iotdata_node_config_u16(TRANSMIT_PERIOD_S) * 1000u)
 #endif
 
 #ifndef TRANSMIT_PERIOD_MIN_MS
@@ -646,7 +646,7 @@ static inline uint8_t ltr390_uvi_8bit(const float uvi) {
     return (uint8_t)lroundf(uvi < 0.0f ? 0.0f : (uvi > SOLAR_UV_INDEX_MAX ? SOLAR_UV_INDEX_MAX : uvi));
 }
 
-static bool packet_build(app_state_t *const as, const idep_node_t *const node, uint8_t *const buf, size_t len, size_t *out, const uint16_t station, const uint16_t sequence, const bme280_reading_t *const reading_environment,
+static bool packet_build(app_state_t *const as, const iotdata_node_t *const node, uint8_t *const buf, size_t len, size_t *out, const uint16_t station, const uint16_t sequence, const bme280_reading_t *const reading_environment,
                          const ltr390_reading_t *const reading_ltr390, const battery_reading_t *const battery, uint8_t flags, const bool advertise_receive) {
 
     static iotdata_encoder_t enc;
@@ -674,7 +674,7 @@ static bool packet_build(app_state_t *const as, const idep_node_t *const node, u
     if (flags != 0 && (rc = iotdata_encode_flags(&enc, flags)) != IOTDATA_OK)
         ESP_LOGW(__tag_iapp, "encode_flags: %s", iotdata_strerror(rc));
 
-    if (advertise_receive && !idep_receive_append(node, &enc))
+    if (advertise_receive && !iotdata_node_receive_append(node, &enc))
         ESP_LOGW(__tag_iapp, "encode_receive: no room");
 
     if ((rc = iotdata_encode_end(&enc, out)) != IOTDATA_OK) {
@@ -706,8 +706,8 @@ static const bme280_config_t *app_bme280_config(void) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-iotd_event_t app_exec__build_sensor_packet(app_state_t *const as, idep_node_t *const node, const uint32_t cycle, const bool battery_present, const battery_reading_t *const battery_reading, const int16_t battery_mv_was, uint8_t *const buf,
-                                           const size_t len, const bool receive, size_t *const transmit) {
+iotd_event_t app_exec__build_sensor_packet(app_state_t *const as, iotdata_node_t *const node, const uint32_t cycle, const bool battery_present, const battery_reading_t *const battery_reading, const int16_t battery_mv_was,
+                                           uint8_t *const buf, const size_t len, const bool receive, size_t *const transmit) {
 
     uint8_t flags = 0;
     if (cycle == 0)
@@ -764,8 +764,9 @@ iotd_event_t app_exec__build_sensor_packet(app_state_t *const as, idep_node_t *c
             flags |= (uint8_t)(1U << VSUITE_FLAG_BATTERY_DRAINING);
     }
 
-    if (packet_build(as, node, buf, len, transmit, idep_station(node), idep_sequence(node), reading_bme280, reading_ltr390, battery_reading, flags, receive))
-        ESP_LOGI(__tag_iapp, "packet: variant=%s station=%03" PRIX16 " sequence=%" PRIu16 " flags=0x%02" PRIX8 "%s", iotdata_vsuite_name(PACKET_VARIANT), idep_station(node), idep_sequence(node), flags, receive ? " +receive" : "");
+    if (packet_build(as, node, buf, len, transmit, iotdata_node_station(node), iotdata_node_sequence(node), reading_bme280, reading_ltr390, battery_reading, flags, receive))
+        ESP_LOGI(__tag_iapp, "packet: variant=%s station=%03" PRIX16 " sequence=%" PRIu16 " flags=0x%02" PRIX8 "%s", iotdata_vsuite_name(PACKET_VARIANT), iotdata_node_station(node), iotdata_node_sequence(node), flags,
+                 receive ? " +receive" : "");
     else
         *transmit = 0;
 
@@ -775,7 +776,7 @@ iotd_event_t app_exec__build_sensor_packet(app_state_t *const as, idep_node_t *c
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void app_init_log__timing_and_build_info(__attribute__((unused)) app_state_t *const as, __attribute__((unused)) idep_node_t *const node, char *const buf, const size_t len) {
+void app_init_log__timing_and_build_info(__attribute__((unused)) app_state_t *const as, __attribute__((unused)) iotdata_node_t *const node, char *const buf, const size_t len) {
     snprintf(buf, len,
              "transmit every %us"
 #if defined(BENCH_BUSY_SLEEP)
@@ -785,21 +786,21 @@ void app_init_log__timing_and_build_info(__attribute__((unused)) app_state_t *co
              (unsigned)(TRANSMIT_PERIOD_MS / 1000));
 }
 
-iotd_event_t app_init_rtc__add_sensors_to_caps(app_state_t *const as, idep_node_t *const node, iotdata_version_caps_t *const caps) {
+iotd_event_t app_init_rtc__add_sensors_to_caps(app_state_t *const as, iotdata_node_t *const node, iotdata_node_version_caps_t *const caps) {
     if ((as->operating->bme280_present = (bme280_setup(app_bme280_config()) == ESP_OK)))
-        iotdata_version_caps_add(caps, IOTDATA_VERSION_CAPS_SENSOR, IOTDATA_VERSION_SENSOR_BME280);
+        iotdata_node_version_caps_add(caps, IOTDATA_NODE_VERSION_CAPS_SENSOR, IOTDATA_NODE_VERSION_SENSOR_BME280);
     if ((as->operating->ltr390_present = (ltr390_setup(&ltr390_config_default) == ESP_OK)))
-        iotdata_version_caps_add(caps, IOTDATA_VERSION_CAPS_SENSOR, IOTDATA_VERSION_SENSOR_LTR390);
+        iotdata_node_version_caps_add(caps, IOTDATA_NODE_VERSION_CAPS_SENSOR, IOTDATA_NODE_VERSION_SENSOR_LTR390);
     return IOTD_EV_OK;
 }
 
-iotd_event_t app_sleep__delay(__attribute__((unused)) app_state_t *const as, __attribute__((unused)) idep_node_t *const node, uint32_t *const sleep_ms, __attribute__((unused)) const uint32_t start_ms, const uint32_t awake_ms,
+iotd_event_t app_sleep__delay(__attribute__((unused)) app_state_t *const as, __attribute__((unused)) iotdata_node_t *const node, uint32_t *const sleep_ms, __attribute__((unused)) const uint32_t start_ms, const uint32_t awake_ms,
                               __attribute__((unused)) const bool deep) {
     *sleep_ms = MAX_INT(TRANSMIT_PERIOD_MS - awake_ms, TRANSMIT_PERIOD_MIN_MS);
     return IOTD_EV_OK;
 }
 
-iotd_event_t app_exec__sleep_style(__attribute__((unused)) app_state_t *const as, __attribute__((unused)) idep_node_t *const node, __attribute__((unused)) const uint32_t start_ms) {
+iotd_event_t app_exec__sleep_style(__attribute__((unused)) app_state_t *const as, __attribute__((unused)) iotdata_node_t *const node, __attribute__((unused)) const uint32_t start_ms) {
 #ifdef BENCH_BUSY_SLEEP
     return IOTD_EV_SLEEP_LIGHT;
 #else

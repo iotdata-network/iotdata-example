@@ -10,9 +10,9 @@
 /* Staged commands waiting for the main loop. Bounded on purpose: they come out of the same pool
    the receive path draws from, so an operator hammering the request topic must not be able to
    starve it. A full queue is an answer ("busy"), not a silent overwrite. */
-/* At least IOTDATA_CONTROL_TARGETS_MAX: one request may name several stations and each becomes its
+/* At least IOTDATA_NODE_CONTROL_TARGETS_MAX: one request may name several stations and each becomes its
    own DOWN frame, so a queue shorter than the target limit could never stage a full request. */
-#define CTRL_QUEUE_MAX          IOTDATA_CONTROL_TARGETS_MAX
+#define CTRL_QUEUE_MAX          IOTDATA_NODE_CONTROL_TARGETS_MAX
 /* The largest CONTROL payload one command builds: `reports` is the widest, a flag per report type. */
 #define CTRL_PAYLOAD_MAX        32
 /* A config write is bigger: several [id|type][value] records, bounded by what one frame can carry. */
@@ -50,7 +50,7 @@ static uint8_t ctrl_tag_tlv(const uint8_t tag) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef struct {
-    idep_node_t *inode;
+    iotdata_node_t *inode;
     char topic_req[128];
     buffer_pool_t *pool;
     /* Staging queue: produced by the mqtt-thread callback, drained by the main loop. Everything
@@ -86,7 +86,7 @@ static ctrl_state_t *g_ctrl = NULL;
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* Management responses are JSON on the one response topic (IOTDATA_MQTT_MANAGE_TOPIC_RESP), sharing it
+/* Management responses are JSON on the one response topic (IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP), sharing it
    with the node reports. Text that used to be published bare -- a blackbox status line, a record,
    an error -- is now a field, so a client parses one shape instead of sniffing at payloads.
  *
@@ -105,7 +105,7 @@ static ctrl_state_t *g_ctrl = NULL;
 static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
     if (root != NULL) {
         char idbuf[4 + 1];
-        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, idep_station(st->inode)));
+        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, iotdata_node_station(st->inode)));
         char *const out = cJSON_PrintUnformatted(root);
         if (out != NULL) {
             (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
@@ -220,8 +220,8 @@ static size_t ctrl_config_build(const cJSON *const root, uint8_t *const out, con
         }
         const uint16_t id = (uint16_t)jid->valuedouble;
         const uint8_t type = (uint8_t)jty->valuedouble;
-        const uint8_t w = iotdata_config_type_size(type);
-        if (id > IOTDATA_CONFIG_ID_MAX || w == 0) {
+        const uint8_t w = iotdata_node_config_type_size(type);
+        if (id > IOTDATA_NODE_CONFIG_ID_MAX || w == 0) {
             *why = "id out of range, or a type that has no fixed width";
             return 0;
         }
@@ -229,19 +229,19 @@ static size_t ctrl_config_build(const cJSON *const root, uint8_t *const out, con
             *why = "the write would not fit one frame";
             return 0;
         }
-        const uint16_t rec = (uint16_t)iotdata_config_rec(id, type);
+        const uint16_t rec = (uint16_t)iotdata_node_config_rec(id, type);
         out[at++] = (uint8_t)(rec >> 8);
         out[at++] = (uint8_t)rec;
         /* Signed and float go in by their own bit pattern; everything else is the integer. The node
            re-reads it through its own table, so a value that disagrees with the row is refused
            THERE -- which is the only place that knows the bounds. */
         uint64_t raw;
-        if (type == IOTDATA_CONFIG_TYPE_FLOAT) {
+        if (type == IOTDATA_NODE_CONFIG_TYPE_FLOAT) {
             const float f = (float)jvl->valuedouble;
             uint32_t bits;
             memcpy(&bits, &f, sizeof(bits));
             raw = bits;
-        } else if (iotdata_config_type_is_signed(type))
+        } else if (iotdata_node_config_type_is_signed(type))
             raw = (uint64_t)(int64_t)jvl->valuedouble;
         else
             raw = (uint64_t)jvl->valuedouble;
@@ -258,11 +258,11 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
     st->stat_req_rx++;
     cJSON *const root = cJSON_ParseWithLength((const char *)payload, (size_t)len);
     if (root != NULL) {
-        iotdata_control_args_t args;
-        const iotdata_control_command_t *const c = iotdata_control_from_json(root, &args);
+        iotdata_node_control_args_t args;
+        const iotdata_node_control_command_t *const c = iotdata_node_control_from_json(root, &args);
         const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
         const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
-        /* A config write is not a command, so it does not come through iotdata_control_from_json --
+        /* A config write is not a command, so it does not come through iotdata_node_control_from_json --
            it is a CONFIG TLV, and it only borrows this path's targeting and staging. */
         /* A survey is a MESH directive, not a node command: it is not addressed to a station and
            it does not travel as a DOWN frame, so it does not belong on the control path above. It
@@ -387,13 +387,13 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
             uint8_t built[CTRL_PAYLOAD_MAX];
             iotdata_kvr_t kv;
             iotdata_kvr_init(&kv, built, sizeof(built));
-            (void)iotdata_control_build(&kv, c, &args);
+            (void)iotdata_node_control_build(&kv, c, &args);
             const size_t n = kv.overflow ? 0u : kv.len;
             if (n > 0) {
                 /* Room for ALL of them, checked before any are staged: half a fan-out is worse
                    than none, because nothing downstream can say which stations got it. */
                 if (args.targets_overflow) {
-                    ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "too many targets (at most %u)", (unsigned)IOTDATA_CONTROL_TARGETS_MAX));
+                    ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "too many targets (at most %u)", (unsigned)IOTDATA_NODE_CONTROL_TARGETS_MAX));
                     st->stat_req_bad++;
                 } else if (buffer_queue_count(&st->queue) + args.targets_count > CTRL_QUEUE_MAX) {
                     ctrl_respond_error(st, cmd, snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "busy: %u staged, no room for %u more", (unsigned)buffer_queue_count(&st->queue), (unsigned)args.targets_count));
@@ -438,10 +438,10 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
 
 static void ctrl_report_peers(const stat_state_t *const s) {
     PRINTF_INFO("exec: peers - %d\n", s->peers_count);
-    iotdata_order_t ord[sizeof(s->peers) / sizeof(s->peers[0])];
+    iotdata_node_order_t ord[sizeof(s->peers) / sizeof(s->peers[0])];
     int ordered = 0;
     for (int i = 0; i < s->peers_count; i++)
-        ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->peers[i].station_id, (uint16_t)i);
+        ordered = iotdata_node_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->peers[i].station_id, (uint16_t)i);
     for (int k = 0; k < ordered; k++) {
         const stat_peer_t *const e = &s->peers[ord[k].slot];
         PRINTF_INFO("exec:   %03" PRIX16 " cost=%" PRIu8 " gen=%" PRIu8 " flags=0x%02" PRIX8 " age=%lds\n", e->station_id, e->cost, e->generation, e->flags, (long)(time(NULL) - e->last_seen));
@@ -452,10 +452,10 @@ static void ctrl_report_peers(const stat_state_t *const s) {
 
 static void ctrl_report_filter(const filter_t *const f) {
     PRINTF_INFO("exec: filters - %d\n", filter_count(f));
-    iotdata_order_t ord[sizeof(f->e) / sizeof(f->e[0])];
+    iotdata_node_order_t ord[sizeof(f->e) / sizeof(f->e[0])];
     int ordered = 0;
     for (int i = 0; i < f->count; i++)
-        ordered = iotdata_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), f->e[i].station, (uint16_t)i);
+        ordered = iotdata_node_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), f->e[i].station, (uint16_t)i);
     for (int k = 0; k < ordered; k++) {
         const filter_entry_t *const e = &f->e[ord[k].slot];
         PRINTF_INFO("exec:   %03" PRIX16 " %s (%s)\n", e->station, e->action == FILTER_ALLOW ? "allow" : "block", e->source == FILTER_AUTO ? "auto" : "manual");
@@ -475,7 +475,7 @@ static bool ctrl_action_status(process_state_t *const st, const uint8_t action, 
     switch (action) {
     case IOTDATA_NODE_ACTION_STATUS_STATIONS_DUMP:
         PRINTF_INFO("exec: CONTROL - MESH_STATIONS_DUMP\n");
-        netw_report(&st->network, idep_station(st->state_mesh->inode));
+        netw_report(&st->network, iotdata_node_station(st->state_mesh->inode));
         return true;
     case IOTDATA_NODE_ACTION_STATUS_FILTERS_DUMP:
         PRINTF_INFO("exec: CONTROL - MESH_FILTERS_DUMP\n");
@@ -619,7 +619,7 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, bbox_state_t *bbox, survey_state_t *survey, trace_state_t *trace, buffer_pool_t *pool) {
+bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, iotdata_node_t *inode, bbox_state_t *bbox, survey_state_t *survey, trace_state_t *trace, buffer_pool_t *pool) {
     assert(st && bbox && survey && trace && pool);
     *st = (ctrl_state_t){ 0 };
     st->inode = inode;
@@ -629,14 +629,14 @@ bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, idep_node_t *inode, 
     st->pool = pool;
     buffer_queue_init(&st->queue, st->queue_slot, CTRL_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, ctrl_tag_name);
-    snprintf(st->topic_req, sizeof(st->topic_req), "%s" IOTDATA_MQTT_MANAGE_TOPIC_REQ, topic_prefix);
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
+    snprintf(st->topic_req, sizeof(st->topic_req), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_REQ, topic_prefix);
+    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
     g_ctrl = st;
     if (!mqtt_subscribe(st->topic_req, MQTT_PUBLISH_QOS, ctrl_from_message)) {
         PRINTF_ERROR("ctrl: subscribe to '%s' failed\n", st->topic_req);
         return false;
     }
-    PRINTF_INFO("ctrl: station=%03" PRIX16 ", request-topic='%s'\n", idep_station(st->inode), st->topic_req);
+    PRINTF_INFO("ctrl: station=%03" PRIX16 ", request-topic='%s'\n", iotdata_node_station(st->inode), st->topic_req);
     return true;
 }
 
