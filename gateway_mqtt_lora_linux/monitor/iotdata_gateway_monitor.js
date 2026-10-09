@@ -97,6 +97,15 @@ const BIND = cfg['web-bind'] || '0.0.0.0';
 const BROKER = flag('broker') ?? cfg['mqtt-server'] ?? 'localhost';
 const MQTT_PORT = cfg['mqtt-port'] || '1883';
 const TOPIC = flag('topic') ?? cfg['mqtt-topic'] ?? 'iotdata/#';
+// Which kinds of topic under the subscription are taken, by topicKind(). Only station traffic
+// for now: manage/resp replies also carry a station field, and would otherwise surface as a
+// phantom station named after the last topic segment.
+const ACCEPT = new Set(
+    String(cfg['mqtt-accept'] ?? 'station')
+        .split(',')
+        .map((k) => k.trim())
+        .filter(Boolean)
+);
 const KEEP = parseInt(flag('keep') ?? cfg['history-keep'] ?? '500', 10);
 const WINDOW = parseInt(flag('window') ?? cfg['stats-window'] ?? '20', 10);
 
@@ -367,7 +376,7 @@ function observe(rec) {
     }
 }
 
-// Counts are for the whole session; rate and average RSSI are over the last WINDOW packets, so
+// Counts are for the whole session; interval and average RSSI are over the last WINDOW packets, so
 // they track what is happening NOW rather than being dragged back by an hour of earlier data —
 // which is the point when you are walking a station around the site.
 function snapshot() {
@@ -376,7 +385,7 @@ function snapshot() {
         .map((s) => {
             const meta = STATIONS[s.id] || {};
             const n = s.times.length;
-            const mins = n > 1 ? (s.times[n - 1] - s.times[0]) / 60000 : 0;
+            const span = n > 1 ? (s.times[n - 1] - s.times[0]) / 1000 : 0;
             const expected = s.count + s.lost;
             return {
                 id: s.id,
@@ -387,7 +396,8 @@ function snapshot() {
                 count: s.count,
                 lost: s.lost,
                 lossPct: expected > 0 ? (s.lost * 100) / expected : 0,
-                rate: mins > 0 ? (n - 1) / mins : null,
+                // Mean seconds between packets: "one every 2m30s" reads better than "0.4/m".
+                interval: span > 0 ? span / (n - 1) : null,
                 rssiAvg: s.rssis.length ? s.rssis.reduce((a, b) => a + b, 0) / s.rssis.length : null,
                 age: s.last ? Math.round((now - s.last) / 1000) : null,
             };
@@ -471,6 +481,15 @@ function handleTrackerMessage(topic, text) {
     if (pos) recordPosition(pos);
 }
 
+// A topic's kind from its shape: <prefix>/<variant>/<station-hex> is 'station'; anything else
+// is named by its second-to-last segment, so iotdata/manage/resp is 'manage'.
+function topicKind(topic) {
+    const parts = String(topic).split('/');
+    const last = parts[parts.length - 1];
+    if (parts.length >= 2 && /^[0-9A-Fa-f]{1,8}$/.test(last)) return 'station';
+    return parts.length >= 2 ? parts[parts.length - 2] : last;
+}
+
 // A sensor packet is identified by carrying a station id, which is what separates it from the
 // gateway's own stats/status publications on neighbouring topics. Matching on that rather than
 // on a topic pattern means new variants appear here without this script needing to learn them.
@@ -482,6 +501,7 @@ function handleMessage(topic, text) {
         return; // not JSON: the gateway's own status publications, retained junk
     }
     if (!body || typeof body !== 'object' || body.station === undefined) return;
+    if (!ACCEPT.has(topicKind(topic))) return;
 
     // Topic is <prefix>/<variant-name>/<station-hex>; the variant NAME lives only here (the
     // payload carries the numeric id), so it is worth taking rather than maintaining a table.
@@ -692,6 +712,8 @@ function snapshotMake(done) {
         LOG_FILE,
         (rec) => {
             if (!rec || rec.station === undefined) return;
+            // The log may predate the filter, or a narrower mqtt-accept, so it applies here too.
+            if (rec.topic !== undefined && !ACCEPT.has(topicKind(rec.topic))) return;
             // observe() and not record(): the log is the SOURCE here, so appending it back to
             // itself, or pushing to browsers that have not connected yet, would both be wrong.
             observe(rec);
@@ -857,15 +879,18 @@ const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>iotdata monitor</title>
 ${FAVICON}
+<script>var q=new URLSearchParams(location.search),d=document.documentElement.dataset,t=q.get('theme'),k=q.get('kiosk');if(t)d.theme=t;if(k!=null&&!/^(off|no|false|0)$/i.test(k))d.kiosk='';</script>
 <style>
   :root {
     --bg:#f6f7f9; --fg:#14171a; --dim:#6b7280; --line:#dfe3e8; --card:#fff;
     --good:#0a7d36; --ok:#a86400; --weak:#c02a2a;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#101215; --fg:#e6e8ea; --dim:#9aa3ad; --line:#262b31; --card:#181b1f;
+    :root:not([data-theme="light"]) { --bg:#101215; --fg:#e6e8ea; --dim:#9aa3ad; --line:#262b31; --card:#181b1f;
             --good:#4ade80; --ok:#fbbf24; --weak:#f87171; }
   }
+  :root[data-theme="dark"] { --bg:#101215; --fg:#e6e8ea; --dim:#9aa3ad; --line:#262b31; --card:#181b1f;
+            --good:#4ade80; --ok:#fbbf24; --weak:#f87171; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
          font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -874,6 +899,7 @@ ${FAVICON}
            border-bottom:1px solid var(--line); }
   .bar { padding:8px 12px; display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; }
   .bar b { font-size:15px; font-weight:600; }
+  :root[data-kiosk] .bar .ref { display:none; }
   .bar .ref { color:var(--dim); font-size:12px; text-decoration:underline;
               text-decoration-thickness:1px; text-underline-offset:2px;
               font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
@@ -944,7 +970,7 @@ ${FAVICON}
   <div class="bar"><b>iotdata gateway</b>${MAP_LINK}<button id="gbtn" class="gbtn" hidden aria-expanded="false"></button><span id="stat"><span id="dot"></span><span id="msg">connecting</span></span></div>
   <div id="gnss" hidden><div class="lbl" id="glbl">tracker</div><table><tbody></tbody></table></div>
   <table id="sum"><tbody></tbody></table>
-  <div class="note">counts are cumulative; rate and avg rssi over the last ${WINDOW} packets</div>
+  <div class="note">counts are cumulative; interval and avg rssi over the last ${WINDOW} packets</div>
 </header>
 <div id="list"><div class="empty">waiting for packets\u2026</div></div>
 <script>
@@ -1000,6 +1026,12 @@ function chipsFor(obj, into) {
 // less margin than a strong one. Thresholds spread the range actually seen at this site so the
 // colour changes as you move, which is the point during a walk test.
 function rssiClass(r) { return r >= -95 ? 'good' : r >= -105 ? 'ok' : 'weak'; }
+function every(t) {
+  t = Math.round(t);
+  if (t < 60) return t + 's';
+  if (t < 3600) return Math.floor(t / 60) + 'm' + (t % 60 ? String(t % 60).padStart(2, '0') + 's' : '');
+  return Math.floor(t / 3600) + 'h' + String(Math.floor((t % 3600) / 60)).padStart(2, '0') + 'm';
+}
 function metres(m) { return m == null ? '' : (m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(2) + ' km'); }
 function two(n) { return (n < 10 ? '0' : '') + n; }
 
@@ -1054,7 +1086,7 @@ function row(r) {
   return e;
 }
 
-var HEAD = ['station', 'pkts', 'rate', 'lost', 'avg rssi', 'last'];
+var HEAD = ['station', 'pkts', 'every', 'lost', 'avg rssi', 'last'];
 function renderStats(rows) {
   var tb = document.querySelector('#sum tbody');
   tb.innerHTML = '';
@@ -1088,7 +1120,7 @@ function renderStats(rows) {
     }
     tr.appendChild(who);
     tr.appendChild(el('td', null, String(s.count)));
-    tr.appendChild(el('td', null, s.rate == null ? '\\u2013' : s.rate.toFixed(1) + '/m'));
+    tr.appendChild(el('td', null, s.interval == null ? '\\u2013' : every(s.interval)));
     tr.appendChild(el('td', null, s.lost + (s.lost ? ' (' + s.lossPct.toFixed(1) + '%)' : '')));
     tr.appendChild(el('td', null, s.rssiAvg == null ? '\\u2013' : Math.round(s.rssiAvg) + ' dBm'));
     // Age is the honest answer to "is it still there" — a gap only shows when a LATER packet
@@ -1247,6 +1279,12 @@ var data = { stats: [], gnss: { n: 0, rows: [] } };
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+function every(t) {
+  t = Math.round(t);
+  if (t < 60) return t + 's';
+  if (t < 3600) return Math.floor(t / 60) + 'm' + (t % 60 ? String(t % 60).padStart(2, '0') + 's' : '');
+  return Math.floor(t / 3600) + 'h' + String(Math.floor((t % 3600) / 60)).padStart(2, '0') + 'm';
+}
 function metres(m) {
   return m == null ? '-' : m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(2) + ' km';
 }
@@ -1299,7 +1337,7 @@ function stationInfo(s) {
   var h = '<div class="iw"><b>' + esc(s.id) + '</b>';
   if (s.name) h += ' &middot; ' + esc(s.name);
   h += '<br>' + s.count + ' pkts';
-  if (s.rate != null) h += ' &middot; ' + s.rate.toFixed(1) + '/m';
+  if (s.interval != null) h += ' &middot; every ' + every(s.interval);
   if (s.rssiAvg != null) h += '<br>' + Math.round(s.rssiAvg) + ' dBm avg';
   if (s.lost) h += '<br>' + s.lost + ' lost (' + s.lossPct.toFixed(1) + '%)';
   if (s.distance != null) h += '<br>' + metres(s.distance) + ' from gateway';
