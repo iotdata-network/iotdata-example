@@ -74,9 +74,9 @@ typedef struct {
 
 typedef struct {
     iotsim_sensor_t sensors[IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX]; /* dimensioned for the MAX; only the live count is used */
-    uint32_t rng_state;                                            /* xorshift32 state */
-    uint32_t time_base;                                            /* sim start time for diurnal */
-    int poll_next;                                                 /* round-robin start index for iotsim_poll */
+    uint32_t rng_state;                                                 /* xorshift32 state */
+    uint32_t time_base;                                                 /* sim start time for diurnal */
+    int poll_next;                                                      /* round-robin start index for iotsim_poll */
 } iotsim_t;
 
 /* ---------------------------------------------------------------------------

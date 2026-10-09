@@ -31,7 +31,7 @@
 // Channel is the one hard fleet-wide match (freq); network/address do NOT gate RX in E22 transparent mode.
 
 #ifndef IOTDATA_NODE_CONFIG_LORA_CHANNEL
-#define IOTDATA_NODE_CONFIG_LORA_CHANNEL 0x0A
+#define IOTDATA_NODE_CONFIG_LORA_CHANNEL 0x0F
 #endif
 #ifndef IOTDATA_NODE_CONFIG_LORA_NETWORK
 #define IOTDATA_NODE_CONFIG_LORA_NETWORK 0x00
@@ -85,13 +85,13 @@
 #define IOTDATA_NODE_CONFIG_SIMULATOR_EXTRA_FIELDS 10 /* add extra fields every ~Nth tx */
 #endif
 
-// --- bme280 sensor (sensor_lora_esp32) -------------------------------------------------------------------------------------
+// --- bme280/ltr390 sensor (sensor_lora_esp32) ------------------------------------------------------------------------------
 
 #ifndef IOTDATA_NODE_CONFIG_SENSOR_ENABLED
 #define IOTDATA_NODE_CONFIG_SENSOR_ENABLED true
 #endif
 #ifndef IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MS
-#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MS (60 * 1000) /* one measure+transmit cycle per minute */
+#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MS (5 * 60 * 1000) /* one measure+transmit cycle per 5 minutes */
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------------------

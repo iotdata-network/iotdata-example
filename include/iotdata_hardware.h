@@ -13,8 +13,18 @@
 #define PIN_E22_GND                      /* E22 pin (7) */
 #define PIN_I2C_SDA          GPIO_NUM_5  /* I2C header pin (3) */
 #define PIN_I2C_SCL          GPIO_NUM_6  /* I2C header pin (4) */
-#define PIN_BATTERY_ADC      GPIO_NUM_0  /* patch header — divider midpoint (ADC1_CH0) */
-#define PIN_BATTERY_EN       GPIO_NUM_1  /* patch header — divider enable, high = on    */
+
+#define PIN_DEVICE_UART_TX   PIN_E22_RXD
+#define PIN_DEVICE_UART_RX   PIN_E22_TXD
+#define PIN_DEVICE_LORA_AUX  PIN_E22_AUX
+#define PIN_DEVICE_LORA_M0   PIN_E22_M0
+#define PIN_DEVICE_LORA_M1   PIN_E22_M1
+
+#define PIN_DEVICE_I2C_SDA   PIN_I2C_SDA
+#define PIN_DEVICE_I2C_SCL   PIN_I2C_SCL
+
+#define PIN_BATTERY_ADC      GPIO_NUM_0 /* patch header — divider midpoint (ADC1_CH0) */
+#define PIN_BATTERY_EN       GPIO_NUM_1 /* patch header — divider enable, high = on    */
 
 #define BATTERY_OFFSET_MV    155  /* this board's V_CE(sat) + divider tolerance */
 #define BATTERY_LIION_MV_MAX 4170 /* what your charger leaves the M35A resting at */
