@@ -338,8 +338,8 @@ static bool exec_node_table_row(const uint8_t entry, const uint8_t index, uint8_
             return false;
         const filter_entry_t *const e = &st->filter.e[slot];
         iotdata_node_entry_put_u16(row, 0, e->station);
-        row[2] = (e->action == FILTER_ALLOW) ? IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW : IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK;
-        row[3] = (e->source == FILTER_AUTO) ? IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_AUTO : IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_MANUAL;
+        row[2] = (e->action == FILTER_ALLOW) ? IOTDATA_NODE_CONTROL_NODE_FILTERS_ALLOW : IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK;
+        row[3] = (e->source == FILTER_AUTO) ? IOTDATA_NODE_CONTROL_NODE_FILTERS_SCOPE_AUTO : IOTDATA_NODE_CONTROL_NODE_FILTERS_SCOPE_MANUAL;
         return true;
     }
     default:

@@ -113,8 +113,11 @@ function parseStation(s) {
 }
 
 // ------------------------------------------------------------------------------------------------------------------------
-// Command registry — extend here (mirror each with a CONTROL key in iotdata_node.h and a line in
-// the gateway's ctrl_on_message).
+// Command registry — extend here, AND in iotdata_node_control.h, which is the vocabulary that
+// actually resolves a name: the gateway looks every `cmd` up there and answers "unknown command"
+// for anything it does not hold. This table carries only what C has no room for -- the help text
+// and what each command consumes -- so a name present here and absent there is a dead command, and
+// `make check` fails on exactly that (see the control Makefile).
 // build(args) returns the JSON request body; `target` is attached by buildRequest unless the command sets it.
 // ------------------------------------------------------------------------------------------------------------------------
 
@@ -125,10 +128,9 @@ function parseStation(s) {
  * there), and verbs are full words. So `diag enable` is the same words over MQTT as over serial,
  * and an operator driving a node both ways learns one set.
  *
- * The mesh subjects keep a `mesh` prefix because it names a real group in the key space (0x40
- * upward, as against `type << 3` for a TLV subject). There is deliberately NO `node` prefix: since
- * mesh management became node CONTROL, such a prefix would be on every command and would therefore
- * distinguish nothing.
+ * A `mesh` or `node` prefix names WHOSE table is meant, and both are needed because both exist:
+ * a node has its own stations and filters, and the mesh has its peers. `diag` prefixes the same
+ * way, since the recorder and the cart are two unrelated things that both hang off DIAGNOSTICS.
  *
  * Subjects may be typed space-separated as on the serial CLI, or hyphenated -- `mesh peers clear`
  * and `mesh-peers-clear` are the same command. The wire always carries the hyphenated token.
@@ -139,10 +141,11 @@ function parseStation(s) {
  */
 const COMMANDS = {
     // --- the system TLVs: one request each --------------------------------------------------
+    'recv': { summary: 'request RECEIVE — when the node is next reachable' },
     'vers': { summary: 'request VERSION — device firmware, platform, build, serial' },
     'vari': { summary: 'request VARIANT — iotdata variant suite produced' },
     'ctrl': { summary: 'request CONTROL — supported control operations' },
-    'stat': { summary: 'request STATUS — operating status (system, network)', takes: 'scope', scopes: 'node | mesh | node,mesh   (default: every group)' },
+    'stat': { summary: 'request STATUS — operating status, and the tables', takes: 'scope', scopes: 'node | mesh | stations | filters | peers | content | all, comma-separated   (default: node,mesh)' },
     'conf': { summary: 'request CONFIG — the device\'s own settable values' },
     'conf-set': { summary: 'write one or more config values', takes: 'config', config: '<id>:<type>=<value> ...   e.g. 0x051:u8=20 0x042:u32=300000' },
     'diag': { summary: 'request DIAGNOSTICS — diagnostic operations and recordings' },
@@ -152,30 +155,36 @@ const COMMANDS = {
     // --- generic system control ---------------------------------------------------------------
     'boot': { summary: 'restart the node' },
 
-    // --- the recorder -------------------------------------------------------------------------
-    'diag-enable': { summary: 'enable recording' },
-    'diag-disable': { summary: 'disable recording' },
-    'diag-clear': { summary: 'clear recordings' },
-    'diag-dump': { summary: 'dump recordings (to console)' },
+    // --- diag: the recorder -------------------------------------------------------------------
+    'diag-bbox-enable': { summary: 'enable recording' },
+    'diag-bbox-disable': { summary: 'disable recording' },
+    'diag-bbox-clear': { summary: 'clear recordings' },
+    'diag-bbox-dump': { summary: 'dump recordings (to console)' },
+
+    // --- diag: the cart -----------------------------------------------------------------------
+    // The other half of CART_INTERVAL_MIN=0: with no periodic window, this is the ONLY way the
+    // rail comes up, so it is the one command on this list a remote site depends on. Disable is
+    // the way back from a window that will not close, short of the node's own two-hour backstop.
+    'diag-cart-enable': { summary: 'open the cart window now (power the side unit)' },
+    'diag-cart-disable': { summary: 'close the cart window now (cut the side unit)' },
+
+    // --- node management ----------------------------------------------------------------------
+    // The tables have no read command of their own: each is `stat` with that table's scope word,
+    // since a table IS a STATUS scope. Only what a scope cannot say -- print it on your own
+    // console, change it -- is a command.
+    'node-stations-dump': { summary: 'print the stations table on the node\'s console' },
+    'node-filters-update': { summary: 'update one filter in the table', takes: 'station+action', actions: 'block | allow | none' },
+    'node-filters-clear': { summary: 'remove all filters', takes: 'scope', scopes: 'all | manual | auto   (default: all)' },
+    'node-filters-dump': { summary: 'print the filters table on the node\'s console' },
 
     // --- mesh management ----------------------------------------------------------------------
-    'mesh-stations': { summary: 'request the stations table' },
-    'mesh-stations-dump': { summary: 'print the table on the node\'s console' },
-    'mesh-peers': { summary: 'request the peers table' },
     'mesh-peers-update': { summary: 'update one peer in the table', takes: 'station+action', actions: 'remove | none' },
     'mesh-peers-clear': { summary: 'remove all peers (forcing re-discovery)' },
-    'mesh-peers-dump': { summary: 'print the table on the node\'s console' },
-    'mesh-filters': { summary: 'request the filters tabl' },
-    'mesh-filters-update': { summary: 'update one filter in the table', takes: 'station+action', actions: 'block | allow | none' },
-    'mesh-filters-clear': { summary: 'remove all filters', takes: 'scope', scopes: 'all | manual | auto   (default: all)' },
-    'mesh-filters-dump': { summary: 'print the table on the node\'s console' },
+    'mesh-peers-dump': { summary: 'print the peers table on the node\'s console' },
 
     // --- mesh diagnostics: a DIRECTIVE, not a node command --------------------------------------
     'survey': { summary: 'ask the mesh who hears a station, and how well', takes: 'stations', stations: '<station> [<station> ...] or a comma-separated list, with --duration/--batch/--id' },
     'survey-cancel': { summary: 'retire a survey directive (or every one)', takes: 'id', ids: '<id in hex> | all   (default: all)' },
-
-    // --- compatibility ------------------------------------------------------------------------
-    'status': { summary: 'the MESH group of STATUS' },
 
     // --- power user ---------------------------------------------------------------------------
     'raw': { summary: 'send a raw JSON request, e.g. raw \'{"cmd":"stat"}\'' },
@@ -259,9 +268,10 @@ function buildRequest(name, args) {
         if (req.target === undefined) req.target = opts.target;
         return req;
     }
-    /* An alias is sent as typed: the gateway knows both vocabularies, so there is one place that
-       maps a name to a CONTROL key rather than two that must agree. The alias table here is for
-       help and validation. */
+    /* The name is sent as typed: the gateway resolves it against iotdata_node_control.h, so one
+       place maps a name to a CONTROL key rather than two that must agree. This table is for help
+       and local validation only -- which is why a name it holds and the C table does not fails
+       here, locally, instead of travelling and coming back "unknown command". */
     const spec = COMMANDS[name];
     if (!spec) throw new Error(`unknown command '${name}' (try --help)`);
     const req = { cmd: name, target: opts.target };
@@ -308,15 +318,19 @@ function usage() {
     display.log('  --dry-run | -n   print the request that would be sent, do not connect');
     display.log('  --verbose | --debug | --help\n');
     display.log('Commands  (spaced or hyphenated: `mesh peers clear`):');
+    /* Measured, not a constant: the names grew prefixes (node-, mesh-, diag-bbox-, diag-cart-)
+       and a hardcoded column silently stopped aligning when they did. */
+    const w = Math.max(...Object.keys(COMMANDS).map((n) => n.length));
+    const pad = ''.padEnd(w);
     for (const [name, c] of Object.entries(COMMANDS)) {
-        display.log(`  ${name.padEnd(18)} ${c.summary}`);
-        if (c.takes === 'station') display.log(`  ${''.padEnd(18)}   takes <station>`);
-        if (c.takes === 'station+action') display.log(`  ${''.padEnd(18)}   takes <station> <action>`);
-        if (c.takes === 'config') display.log(`  ${''.padEnd(18)}   takes ${c.config}`);
-        if (c.takes === 'stations') display.log(`  ${''.padEnd(18)}   takes ${c.stations}`);
-        if (c.takes === 'id') display.log(`  ${''.padEnd(18)}   takes ${c.ids}`);
-        if (c.actions) display.log(`  ${''.padEnd(18)}   action: ${c.actions}`);
-        if (c.scopes) display.log(`  ${''.padEnd(18)}   scope: ${c.scopes}`);
+        display.log(`  ${name.padEnd(w)} ${c.summary}`);
+        if (c.takes === 'station') display.log(`  ${pad}   takes <station>`);
+        if (c.takes === 'station+action') display.log(`  ${pad}   takes <station> <action>`);
+        if (c.takes === 'config') display.log(`  ${pad}   takes ${c.config}`);
+        if (c.takes === 'stations') display.log(`  ${pad}   takes ${c.stations}`);
+        if (c.takes === 'id') display.log(`  ${pad}   takes ${c.ids}`);
+        if (c.actions) display.log(`  ${pad}   action: ${c.actions}`);
+        if (c.scopes) display.log(`  ${pad}   scope: ${c.scopes}`);
     }
 }
 

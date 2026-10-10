@@ -7,6 +7,6 @@
     "control": "./iotdata_gateway_control.js"
   },
   "dependencies": {
-    "mqtt": "^5.10.0"
+    "mqtt": "^5.16.0"
   }
 }

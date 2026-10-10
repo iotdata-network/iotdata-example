@@ -301,8 +301,8 @@ static void node_json_table_row(cJSON *const arr, const uint8_t entry, const uin
         cJSON_AddNumberToObject(o, "idle", iotdata_node_entry_get_u16(val, 11));
         break;
     case IOTDATA_NODE_STATUS_FILTERS_ENTRY:
-        cJSON_AddStringToObject(o, "action", val[2] == IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW ? "allow" : val[2] == IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK ? "block" : "none");
-        cJSON_AddStringToObject(o, "source", val[3] == IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_AUTO ? "auto" : "manual");
+        cJSON_AddStringToObject(o, "action", val[2] == IOTDATA_NODE_CONTROL_NODE_FILTERS_ALLOW ? "allow" : val[2] == IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK ? "block" : "none");
+        cJSON_AddStringToObject(o, "source", val[3] == IOTDATA_NODE_CONTROL_NODE_FILTERS_SCOPE_AUTO ? "auto" : "manual");
         break;
     default:
         break;

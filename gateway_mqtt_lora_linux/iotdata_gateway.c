@@ -131,6 +131,11 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #define BUFFER_LOCK_RELEASE(l) pthread_mutex_unlock(l)
 #include "d_module_buffers.h"
 
+#undef PIN_DEVICE_UART_TX
+#undef PIN_DEVICE_UART_RX
+#undef PIN_DEVICE_LORA_AUX
+#undef PIN_DEVICE_LORA_M0
+#undef PIN_DEVICE_LORA_M1
 #define PIN_DEVICE_UART_TX  GPIO_NUM_NC
 #define PIN_DEVICE_UART_RX  GPIO_NUM_NC
 #define PIN_DEVICE_LORA_AUX GPIO_NUM_NC

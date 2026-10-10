@@ -90,8 +90,14 @@
 #ifndef IOTDATA_NODE_CONFIG_SENSOR_ENABLED
 #define IOTDATA_NODE_CONFIG_SENSOR_ENABLED true
 #endif
-#ifndef IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MS
-#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MS (5 * 60 * 1000) /* one measure+transmit cycle per 5 minutes */
+#ifndef IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_S
+#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_S     (5 * 60)
+#endif
+#ifndef IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MIN_S
+#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MIN_S (30)
+#endif
+#ifndef IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MAX_S
+#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MAX_S (12*60*60)
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------------------

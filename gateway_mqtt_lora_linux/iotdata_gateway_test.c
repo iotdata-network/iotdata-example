@@ -1835,24 +1835,28 @@ static bool test_ctrl_short_names(void) {
         { "{\"cmd\":\"stat\",\"scope\":\"filters\",\"target\":\"0x123\"}", { 0x00, 0x02, 0x04, 0x08 }, 4 },
         { "{\"cmd\":\"stat\",\"scope\":\"peers\",\"target\":\"0x123\"}", { 0x00, 0x02, 0x04, 0x10 }, 4 },
         /* a dump is a command, because a scope cannot express "print it on your own console" */
-        { "{\"cmd\":\"stations-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x04, 0x00 }, 4 },
-        { "{\"cmd\":\"filters-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x04, 0x01 }, 4 },
+        { "{\"cmd\":\"node-stations-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x04, 0x00 }, 4 },
+        { "{\"cmd\":\"node-filters-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x04, 0x01 }, 4 },
         { "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x41, 0x02 }, 4 },
         { "{\"cmd\":\"mesh-peers-clear\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x41, 0x01 }, 4 },
-        { "{\"cmd\":\"filters-update\",\"station\":\"0x456\",\"action\":\"block\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x01 }, 7 },
-        { "{\"cmd\":\"filters-update\",\"station\":\"0x456\",\"action\":\"allow\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x02 }, 7 },
-        { "{\"cmd\":\"filters-update\",\"station\":\"0x456\",\"action\":\"none\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x00 }, 7 },
+        { "{\"cmd\":\"node-filters-update\",\"station\":\"0x456\",\"action\":\"block\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x01 }, 7 },
+        { "{\"cmd\":\"node-filters-update\",\"station\":\"0x456\",\"action\":\"allow\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x02 }, 7 },
+        { "{\"cmd\":\"node-filters-update\",\"station\":\"0x456\",\"action\":\"none\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x04, 0x02, 0x04, 0x56, 0x00 }, 7 },
         { "{\"cmd\":\"mesh-peers-update\",\"station\":\"0x456\",\"action\":\"remove\",\"target\":\"0x123\"}", { 0x01, 0x05, 0x41, 0x00, 0x04, 0x56, 0x00 }, 7 },
         /* the recorder's actions hang off the DIAGNOSTICS subject, where its reports already are */
-        { "{\"cmd\":\"diag-enable\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x06, 0x00, 0x01 }, 5 },
-        { "{\"cmd\":\"diag-disable\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x06, 0x00, 0x00 }, 5 },
-        { "{\"cmd\":\"diag-clear\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x06, 0x01 }, 4 },
-        { "{\"cmd\":\"diag-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x06, 0x02 }, 4 },
+        { "{\"cmd\":\"diag-bbox-enable\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x06, 0x00, 0x01 }, 5 },
+        { "{\"cmd\":\"diag-bbox-disable\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x06, 0x00, 0x00 }, 5 },
+        { "{\"cmd\":\"diag-bbox-clear\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x06, 0x01 }, 4 },
+        { "{\"cmd\":\"diag-bbox-dump\",\"target\":\"0x123\"}", { 0x01, 0x02, 0x06, 0x02 }, 4 },
+        /* the cart hangs off DIAGNOSTICS too, and carries its open/close as a fixed argument the
+           command name chooses -- the same shape as the recorder's enable/disable above */
+        { "{\"cmd\":\"diag-cart-enable\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x06, 0x03, 0x01 }, 5 },
+        { "{\"cmd\":\"diag-cart-disable\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x06, 0x03, 0x00 }, 5 },
         /* a filter scope is carried even when zero: SCOPE_ALL is a real instruction, where an
            absent STATUS scope already means the default groups */
-        { "{\"cmd\":\"filters-clear\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x00 }, 5 },
-        { "{\"cmd\":\"filters-clear\",\"scope\":\"manual\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x01 }, 5 },
-        { "{\"cmd\":\"filters-clear\",\"scope\":\"auto\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x02 }, 5 },
+        { "{\"cmd\":\"node-filters-clear\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x00 }, 5 },
+        { "{\"cmd\":\"node-filters-clear\",\"scope\":\"manual\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x01 }, 5 },
+        { "{\"cmd\":\"node-filters-clear\",\"scope\":\"auto\",\"target\":\"0x123\"}", { 0x01, 0x03, 0x04, 0x03, 0x02 }, 5 },
     };
     ctrl_state_t st;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1927,7 +1931,7 @@ static bool test_mesh_node_table_report(void) {
     netw_note_receive(&ps.network, 0x0537, 4, 1, NETW_PATH_DIRECT, true, -48, 0, time(NULL));
     netw_note_receive(&ps.network, 0x06ED, 0, 1, NETW_PATH_DIRECT, true, -55, 0, time(NULL));
     stat_on_peer(&ss, 0x05BF, 7, 1, IOTDATA_MESH_FLAG_ACCEPTING);
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, (const uint8_t[]){ 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK }, IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, (const uint8_t[]){ 0x0A, 0xF9, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK }, IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE));
 
     ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_STATUS_STATIONS_ENTRY), 2);
     ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY), 1);
@@ -1947,8 +1951,8 @@ static bool test_mesh_node_table_report(void) {
     memset(row, 0, sizeof(row));
     ASSERT(exec_node_table_row(IOTDATA_NODE_STATUS_FILTERS_ENTRY, 0, row));
     ASSERT_EQ_INT(iotdata_node_entry_get_u16(row, 0), 0x0AF9);
-    ASSERT_EQ_INT(row[2], IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK);
-    ASSERT_EQ_INT(row[3], IOTDATA_NODE_CONTROL_MESH_FILTERS_SCOPE_MANUAL);
+    ASSERT_EQ_INT(row[2], IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK);
+    ASSERT_EQ_INT(row[3], IOTDATA_NODE_CONTROL_NODE_FILTERS_SCOPE_MANUAL);
 
     /* an index past the end is refused rather than returning a stale row */
     ASSERT(!exec_node_table_row(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY, 5, row));
@@ -2161,15 +2165,15 @@ static bool test_ctrl_status_scope_differs_from_node_status(void) {
 static bool test_ctrl_mesh_update_entry_shape(void) {
     ctrl_state_t st;
     ctrl_test_state(&st);
-    ctrl_test_feed(&st, "{\"cmd\":\"filters-update\",\"station\":\"0xABC\",\"action\":\"block\",\"target\":\"0x123\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"node-filters-update\",\"station\":\"0xABC\",\"action\":\"block\",\"target\":\"0x123\"}");
     ASSERT(ctrl_staged(&st));
-    ASSERT_EQ_INT(ctrl_staged_len(&st), 2 + 2 + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
+    ASSERT_EQ_INT(ctrl_staged_len(&st), 2 + 2 + IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE);
     ASSERT_EQ_INT(ctrl_staged_bytes(&st)[0], IOTDATA_NODE_CONTROL_CONTROL);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 2 + IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[1], 2 + IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE);
     ASSERT_EQ_INT(ctrl_staged_bytes(&st)[2], IOTDATA_NODE_TLV_STATUS);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[3], IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[3], IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE);
     ASSERT_EQ_INT((uint16_t)((ctrl_staged_bytes(&st)[4] << 8) | ctrl_staged_bytes(&st)[5]), 0x0ABC);
-    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[6], IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK);
+    ASSERT_EQ_INT(ctrl_staged_bytes(&st)[6], IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK);
     ctrl_test_drop(&st);
     return true;
 }
@@ -2304,7 +2308,7 @@ static bool test_ctrl_requests_queue_in_order(void) {
     ctrl_state_t st;
     ctrl_test_state(&st);
     ctrl_test_feed(&st, "{\"cmd\":\"mesh-peers-dump\",\"target\":\"0x123\"}");
-    ctrl_test_feed(&st, "{\"cmd\":\"filters-dump\",\"target\":\"0x456\"}");
+    ctrl_test_feed(&st, "{\"cmd\":\"node-filters-dump\",\"target\":\"0x456\"}");
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 2u);
     ASSERT_EQ_INT(buffer_queue_rejected(&st.queue), 0u);
 
@@ -2314,7 +2318,7 @@ static bool test_ctrl_requests_queue_in_order(void) {
     ASSERT_EQ_INT(key, IOTDATA_NODE_ACTION_MESH_PEERS_DUMP);
     ASSERT_EQ_INT(target, 0x123); /* the target travels with each one, not just with the last */
     ASSERT(ctrl_test_take(&st, &key, &target));
-    ASSERT_EQ_INT(key, IOTDATA_NODE_ACTION_STATUS_FILTERS_DUMP /* likewise */);
+    ASSERT_EQ_INT(key, IOTDATA_NODE_ACTION_NODE_FILTERS_DUMP /* likewise */);
     ASSERT_EQ_INT(target, 0x456);
     ASSERT(!ctrl_test_take(&st, NULL, NULL));
     return true;
@@ -2438,15 +2442,15 @@ static bool test_mesh_node_filter_update_blocks_rx(void) {
 
     ASSERT(filter_allows(&ps.filter, 0x0537)); /* nothing filtered yet */
 
-    const uint8_t block[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
+    const uint8_t block[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK };
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
     ASSERT(!filter_allows(&ps.filter, 0x0537)); /* blocked */
     ASSERT(filter_allows(&ps.filter, 0x0538));  /* and only that one */
     ASSERT_EQ_INT(filter_count(&ps.filter), 1);
 
     /* NONE removes it: there is no separate remove command, by design */
-    const uint8_t none[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_NONE };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, none, (uint8_t)sizeof(none)));
+    const uint8_t none[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_NODE_FILTERS_NONE };
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, none, (uint8_t)sizeof(none)));
     ASSERT(filter_allows(&ps.filter, 0x0537));
     ASSERT_EQ_INT(filter_count(&ps.filter), 0);
     g_exec = NULL;
@@ -2461,8 +2465,8 @@ static bool test_mesh_node_block_drops_peer(void) {
     stat_on_peer(&ss, 0x05BF, 1, 1, 0);
     ASSERT_EQ_INT(ss.peers_count, 1);
 
-    const uint8_t block[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
+    const uint8_t block[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK };
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
     ASSERT_EQ_INT(ss.peers_count, 0);
     g_exec = NULL;
     return true;
@@ -2477,7 +2481,7 @@ static bool test_mesh_node_peers_update_and_clear(void) {
     stat_on_peer(&ss, 0x0F1B, 1, 1, 0);
     ASSERT_EQ_INT(ss.peers_count, 2);
 
-    const uint8_t forget[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_PEER_NONE };
+    const uint8_t forget[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_PEER_NONE };
     ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget)));
     ASSERT_EQ_INT(ss.peers_count, 1);
     ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget))); /* again */
@@ -2501,10 +2505,10 @@ static bool test_mesh_node_filter_update_takes_a_list(void) {
     stat_state_t ss;
     mesh_node_test_state(&ps, &ms, &ss);
 
-    const uint8_t three[3 * IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = {
-        0x05, 0x37, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK, 0x05, 0x38, IOTDATA_NODE_CONTROL_MESH_FILTERS_BLOCK, 0x0A, 0xF9, IOTDATA_NODE_CONTROL_MESH_FILTERS_ALLOW,
+    const uint8_t three[3 * IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = {
+        0x05, 0x37, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK, 0x05, 0x38, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK, 0x0A, 0xF9, IOTDATA_NODE_CONTROL_NODE_FILTERS_ALLOW,
     };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_STATUS_FILTERS_UPDATE, three, (uint8_t)sizeof(three)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, three, (uint8_t)sizeof(three)));
     ASSERT_EQ_INT(filter_count(&ps.filter), 3);
     ASSERT(!filter_allows(&ps.filter, 0x0537));
     ASSERT(!filter_allows(&ps.filter, 0x0538));
@@ -2917,7 +2921,7 @@ static bool test_mesh_node_control_keys_are_all_handled(void) {
        sent on a wild goose chase by the node's own inventory */
     for (size_t i = 0; i + 1 < sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0]); i += 2) {
         const uint8_t subject = ctrl_from_iotdata_keys[i], action = ctrl_from_iotdata_keys[i + 1];
-        const uint8_t entry[IOTDATA_NODE_CONTROL_MESH_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, 0x00 };
+        const uint8_t entry[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, 0x00 };
         if (!ctrl_from_iotdata(subject, action, entry, (uint8_t)sizeof(entry))) {
             printf("FAIL (advertised %02X/%02X is not handled)\n", subject, action);
             g_exec = NULL;

@@ -24,6 +24,10 @@
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#ifndef PACKET_VARIANT
+#define PACKET_VARIANT IOTDATA_VSUITE_WEATHER_STATION
+#endif
+
 typedef struct {
     bool bme280_present; /* bme280_setup succeeded this power cycle */
     bool ltr390_present; /* ltr390_setup succeeded this power cycle */
@@ -32,7 +36,8 @@ typedef struct {
 typedef struct {
 } app_running_t;
 
-#define APP_CONFIG_ENTRIES(X) X(TRANSMIT_PERIOD_S, 0x001, U16, 10, 43200, (IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MS / 1000), 0, NULL, NULL, "how often a reading goes out")
+#define APP_CONFIG_ENTRIES(X) \
+    X(TRANSMIT_PERIOD_S, 0x001, U16, IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MIN_S, IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MAX_S, IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_S, 0, NULL, NULL, "how often a reading goes out")
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -42,24 +47,8 @@ typedef struct {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#ifndef TRANSMIT_PERIOD_MS
-#define TRANSMIT_PERIOD_MS ((uint32_t)iotdata_node_config_u16(TRANSMIT_PERIOD_S) * 1000u)
-#endif
-
-#ifndef TRANSMIT_PERIOD_MIN_MS
-#define TRANSMIT_PERIOD_MIN_MS 1000 /* floor, if a cycle overruns the period  */
-#endif
-
-#ifndef PACKET_VARIANT
-#define PACKET_VARIANT IOTDATA_VSUITE_WEATHER_STATION
-#endif
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
 static const char *__tag_app = "app";
 
-// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #if !defined(PIN_DEVICE_I2C_SDA) || !defined(PIN_DEVICE_I2C_SCL)
@@ -120,7 +109,6 @@ static bool packet_build(app_state_t *const as, const iotdata_node_t *const node
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static uint16_t app_board_id(void) {
     static uint16_t cached = 0u;
@@ -130,12 +118,16 @@ static uint16_t app_board_id(void) {
 #define QUIRK_BOARD_BME280_ADDR_77 0x769
 
 static const bme280_config_t *app_bme280_config(void) {
-    static bme280_config_t config;
-    config = bme280_config_default;
+    static bme280_config_t config = bme280_config_default;
     if (app_board_id() == QUIRK_BOARD_BME280_ADDR_77) {
         config.i2c_addr = 0x77;
         ESP_LOGW(__tag_app, "bme280: quirk for board %03X -- i2c address 0x%02X, not 0x%02X", QUIRK_BOARD_BME280_ADDR_77, config.i2c_addr, BME280_I2C_ADDR_DEFAULT);
     }
+    return &config;
+}
+
+static const ltr390_config_t *app_ltr390_config(void) {
+    static ltr390_config_t config = ltr390_config_default;
     return &config;
 }
 
@@ -145,6 +137,7 @@ iapp_event_t app_exec__build_sensor_packet(app_state_t *const as, iotdata_node_t
                                            uint8_t *const buf, const size_t len, const bool receive, size_t *const transmit) {
 
     uint8_t flags = 0;
+
     if (cycle == 0)
         flags |= (uint8_t)(1U << VSUITE_FLAG_RESTART_RECENT);
 
@@ -205,29 +198,34 @@ iapp_event_t app_exec__build_sensor_packet(app_state_t *const as, iotdata_node_t
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
+
+#define TRANSMIT_PERIOD_MIN_S IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MIN_S
+
+#ifndef TRANSMIT_PERIOD_S
+#define TRANSMIT_PERIOD_S iotdata_node_config_u16(TRANSMIT_PERIOD_S)
+#endif
 
 void app_init_log__timing_and_build_info(__attribute__((unused)) app_state_t *const as, __attribute__((unused)) iotdata_node_t *const node, char *const buf, const size_t len) {
     snprintf(buf, len,
              "transmit every %us"
-#if defined(NO_SLEEP_DEEP)
+#ifdef NO_SLEEP_DEEP
              " (NO_SLEEP_DEEP -- DO NOT SHIP)"
 #endif
              ,
-             (unsigned)(TRANSMIT_PERIOD_MS / 1000));
+             (unsigned)TRANSMIT_PERIOD_S);
 }
 
 iapp_event_t app_init_rtc__add_sensors_to_caps(app_state_t *const as, iotdata_node_t *const node, iotdata_node_version_caps_t *const caps) {
     if ((as->operating->bme280_present = (bme280_setup(app_bme280_config()) == ESP_OK)))
         iotdata_node_version_caps_add(caps, IOTDATA_NODE_VERSION_CAPS_SENSOR, IOTDATA_NODE_VERSION_SENSOR_BME280);
-    if ((as->operating->ltr390_present = (ltr390_setup(&ltr390_config_default) == ESP_OK)))
+    if ((as->operating->ltr390_present = (ltr390_setup(app_ltr390_config()) == ESP_OK)))
         iotdata_node_version_caps_add(caps, IOTDATA_NODE_VERSION_CAPS_SENSOR, IOTDATA_NODE_VERSION_SENSOR_LTR390);
     return IAPP_EV_OK;
 }
 
 iapp_event_t app_sleep__delay(__attribute__((unused)) app_state_t *const as, __attribute__((unused)) iotdata_node_t *const node, uint32_t *const sleep_ms, __attribute__((unused)) const uint32_t start_ms, const uint32_t awake_ms,
                               __attribute__((unused)) const bool deep) {
-    *sleep_ms = MAX_INT(TRANSMIT_PERIOD_MS - awake_ms, TRANSMIT_PERIOD_MIN_MS);
+    *sleep_ms = MAX_INT((TRANSMIT_PERIOD_S * 1000) - awake_ms, (TRANSMIT_PERIOD_MIN_S * 1000));
     return IAPP_EV_OK;
 }
 
