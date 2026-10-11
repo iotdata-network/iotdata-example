@@ -147,6 +147,16 @@ static iotdata_node_t t_inode;
 #include "iotdata_gateway_survey.h"
 #include "iotdata_gateway_trace.h"
 #include "iotdata_gateway_state.h"
+/* EXPLICITLY, because no iotdata_node_* header includes another: the main TU gets these from
+   iotdata_node_platform.h, and this suite does not include platform.h, so it names them itself.
+   The LINUX filestore is here for its TYPES only -- iotdata_gateway_content.h is written against
+   the directory backend -- while the store this suite actually runs is the RAM one below. */
+#include "d_module_filestore.h" /* the seam first: iotdata_node_content.h is written against it */
+#include "d_module_filestore_linux.h"
+#include "d_module_otaslot_linux.h"
+#include "iotdata_node_content.h"
+#include "iotdata_node_content_ota.h"
+#include "iotdata_node_content_control.h"
 #include "iotdata_gateway_content.h"
 #include "d_module_filestore_ram.h" /* the suite's content store: RAM, never a directory */
 #include "iotdata_gateway_ctrl.h"
@@ -2561,7 +2571,7 @@ static bool test_mesh_node_filter_update_takes_a_list(void) {
    is typing. It did not: stdin was left blocking and the first poll sat in read() forever, which
    stopped the gateway dead after one pass. This is the test that would have said so. */
 static int g_console_hits = 0;
-static void test_console_cmd(const iotdata_node_console_emit_fn emit, int argc, char **argv) {
+static void test_console_cmd(const iotdata_node_console_emit_fn emit, __attribute__((unused)) const uint32_t now_ms, int argc, char **argv) {
     (void)argc;
     (void)argv;
     g_console_hits++;
@@ -2651,7 +2661,7 @@ static bool test_gateway_config_load_and_overlay(void) {
     iotdata_node_config_console_attach(NULL); /* the overlay IS the store here; there is no datastore */
     {
         char *cargv[3] = { (char *)(uintptr_t)"conf", (char *)(uintptr_t)"debug", (char *)(uintptr_t)"true" };
-        iotdata_node_config_console(test_quiet_emit, 3, cargv);
+        iotdata_node_config_console(test_quiet_emit, 1000u, 3, cargv);
         ASSERT(iotdata_node_config_bool(DEBUG));
         f = fopen(ovl, "r");
         ASSERT(f != NULL);

@@ -55,6 +55,22 @@
 #define RESTART_MS 30000 /* duration of restart on failure */
 #endif
 
+/* The directive is short-lived and RE-ISSUED while the walk continues, rather than issued once for
+   an optimistic duration. Re-issue is idempotent by design -- a relay already holding the id passes
+   it on and carries on unchanged -- and the useful consequence is the one that matters in a field:
+   switch this node off, or walk out of range, and every relay stops surveying by itself within
+   SURVEY_DURATION_M. Nobody has to remember to tell them.
+
+   THE LIFETIME IS DERIVED, not chosen. It only has to outlast a few missed re-issues, and a walk
+   goes to the edge of coverage on purpose -- so the relay most likely to miss one is exactly the
+   relay worth keeping. Three intervals tolerates two consecutive misses. What this number really
+   governs is how long relays keep spending airtime AFTER the walk ends; the cadence that actually
+   costs airtime during it is SURVEY_BATCH_S. */
+#define SURVEY_LOOP_MS        100u
+#define SURVEY_FIX_REFRESH_MS 5000u  /* how often to look for a newer fix */
+#define SURVEY_FIX_STALE_MS   60000u /* after this, report NO position rather than an old one */
+#define SURVEY_LIVENESS_MS    30000u
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // HARDWARE
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -106,34 +122,21 @@
               in sleep, so a wedged app cannot leave it lit.
    GPIO3 is free again, having been the button's temporary home. */
 
-/* The directive is short-lived and RE-ISSUED while the walk continues, rather than issued once for
-   an optimistic duration. Re-issue is idempotent by design -- a relay already holding the id passes
-   it on and carries on unchanged -- and the useful consequence is the one that matters in a field:
-   switch this node off, or walk out of range, and every relay stops surveying by itself within
-   SURVEY_DURATION_M. Nobody has to remember to tell them.
-
-   THE LIFETIME IS DERIVED, not chosen. It only has to outlast a few missed re-issues, and a walk
-   goes to the edge of coverage on purpose -- so the relay most likely to miss one is exactly the
-   relay worth keeping. Three intervals tolerates two consecutive misses. What this number really
-   governs is how long relays keep spending airtime AFTER the walk ends; the cadence that actually
-   costs airtime during it is SURVEY_BATCH_S. */
-#define SURVEY_LOOP_MS        100u
-#define SURVEY_FIX_REFRESH_MS 5000u  /* how often to look for a newer fix */
-#define SURVEY_FIX_STALE_MS   60000u /* after this, report NO position rather than an old one */
-#define SURVEY_LIVENESS_MS    30000u
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 #include "d_platform_esp32.h"
 #include "d_common.h"
 #include "d_format.h"
 #include "d_readings.h"
+#include "d_module_datastore_esp32.h"
+#include "d_module_filestore_esp32.h"
+#include "d_module_otaslot_esp32.h"
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"
 #include "d_interface_e22900t22.h"
 #include "d_interface_at6558.h"
 #include "d_interface_button.h"
 #include "d_interface_led.h"
-#include "d_module_datastore_esp32.h"
-#include "d_module_filestore_esp32.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // IOTDATA PROTOCOL + PLATFORM
@@ -160,7 +163,6 @@
 
 #define IOTDATA_NODE_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
 #include "iotdata_node_platform.h"
-#include "iotdata_node_content_control.h"
 static void _node_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
 }
@@ -181,11 +183,13 @@ static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_
     IOTDATA_NODE_CONFIG_ENTRIES_CONTENT(X)
 
 #include "iotdata_node_config.h"
+
 #include "iotdata_node_config_device_e22900t22.h"
 static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, __attribute__((unused)) const iotdata_node_config_info_t *info) {
     ESP_LOGW("config", "%s changed (was %llu); the radio is configured once, so this needs a restart", row->name, (unsigned long long)was->u);
     return true;
 }
+#include "iotdata_node_config_content.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -208,7 +212,7 @@ static iotdata_node_content_t _state_content;
 
 static void app_content_begin(const uint32_t now_ms) {
     const bool enabled = iotdata_node_config_bool(CONTENT_ENABLED);
-    const iotdata_node_content_backend_t *const be = enabled ? filestore_esp32_mount(&_state_filestore) : NULL;
+    const d_filestore_t *const be = enabled ? filestore_esp32_mount(&_state_filestore) : NULL;
     iotdata_node_content_init(&_state_content, be);
     iotdata_node_content_control_init(&_state_content, NULL); /* no OTA device: not a target yet */
     if (!enabled) {

@@ -71,11 +71,12 @@
 #include "d_platform_esp32.h"
 #include "d_common.h"
 #include "d_format.h"
+#include "d_module_datastore_esp32.h"
+#include "d_module_filestore_esp32.h"
+#include "d_module_otaslot_esp32.h"
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"
 #include "d_interface_e22900t22.h"
-#include "d_module_datastore_esp32.h"
-#include "d_module_filestore_esp32.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // IOTDATA PROTOCOL + PLATFORM
@@ -102,7 +103,6 @@
 #define IOTDATA_NODE_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_BATCH_TIME
 #define IOTDATA_NODE_STATE_BLOCKS_MAX  (2 * IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX + 4) /* two blocks per simulated sensor + boards own */
 #include "iotdata_node_platform.h"
-#include "iotdata_node_content_control.h"
 static void _node_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
 }
@@ -129,6 +129,7 @@ static bool sim_transmit_max_ok(const iotdata_node_config_row_t *row, const iotd
     IOTDATA_NODE_CONFIG_ENTRIES_CONTENT(X)
 
 #include "iotdata_node_config.h"
+
 #include "iotdata_node_config_device_e22900t22.h"
 static bool sim_transmit_min_ok(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *v, const struct iotdata_node_config_update *u) {
     if (v->u < row->min.u || v->u > row->max.u)
@@ -146,6 +147,7 @@ static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_
     ESP_LOGW("config", "%s changed (was %llu); the radio is configured once, so this needs a restart", row->name, (unsigned long long)was->u);
     return true;
 }
+#include "iotdata_node_config_content.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // CONSOLE
@@ -165,7 +167,7 @@ static iotdata_node_content_t s_content;
 
 static void sim_content_begin(const uint32_t now_ms) {
     const bool enabled = iotdata_node_config_bool(CONTENT_ENABLED);
-    const iotdata_node_content_backend_t *const be = enabled ? filestore_esp32_mount(&s_filestore) : NULL;
+    const d_filestore_t *const be = enabled ? filestore_esp32_mount(&s_filestore) : NULL;
     iotdata_node_content_init(&s_content, be);
     iotdata_node_content_control_init(&s_content, NULL); /* no OTA device: this board is not a target */
     if (!enabled) {
@@ -203,11 +205,11 @@ static const uint8_t s_node_control_actions[] = { IOTDATA_NODE_DIAGNOSTICS_CONTR
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define SIM_TRANSMIT_MIN_MS ((uint32_t)iotdata_node_config_u16(TRANSMIT_MIN_S) * 1000u)
-#define SIM_TRANSMIT_MAX_MS ((uint32_t)iotdata_node_config_u16(TRANSMIT_MAX_S) * 1000u)
-#define SIM_SENSORS         ((int)iotdata_node_config_u8(SENSORS))
-#define SIM_VARIANTS        ((int)iotdata_node_config_u8(VARIANTS))
-#define SIM_EXTRA_FIELDS    ((unsigned)iotdata_node_config_u8(EXTRA_FIELDS))
+#define SIM_TRANSMIT_MIN_MS            ((uint32_t)iotdata_node_config_u16(TRANSMIT_MIN_S) * 1000u)
+#define SIM_TRANSMIT_MAX_MS            ((uint32_t)iotdata_node_config_u16(TRANSMIT_MAX_S) * 1000u)
+#define SIM_SENSORS                    ((int)iotdata_node_config_u8(SENSORS))
+#define SIM_VARIANTS                   ((int)iotdata_node_config_u8(VARIANTS))
+#define SIM_EXTRA_FIELDS               ((unsigned)iotdata_node_config_u8(EXTRA_FIELDS))
 #include "iotdata_variant_simulator.h"
 #include "iotdata_variant_simulator.c"
 

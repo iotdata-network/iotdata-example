@@ -1,9 +1,6 @@
 #ifndef IOTDATA_GATEWAY_CONTENT_H
 #define IOTDATA_GATEWAY_CONTENT_H
 
-#include "d_module_filestore_linux.h"
-#include "iotdata_node_content_control.h"
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // THE CONTENT STORE
 //
@@ -26,7 +23,7 @@ static iotdata_node_content_t gateway_content;
 
 static void gateway_content_begin(const uint32_t now_ms) {
     const char *const dir = iotdata_node_config_string(CONTENT_FILE_DIRECTORY);
-    const iotdata_node_content_backend_t *const be = filestore_linux_open(&gateway_filestore, dir, iotdata_node_config_u32(CONTENT_FILE_MAX_BYTES));
+    const d_filestore_t *const be = filestore_linux_open(&gateway_filestore, dir, iotdata_node_config_u32(CONTENT_FILE_MAX_BYTES));
     iotdata_node_content_init(&gateway_content, be);
     /* The adapters are initialised even when the store did not open, so the commands still resolve
        and answer "no store" rather than going unrecognised -- a gateway that stopped admitting a

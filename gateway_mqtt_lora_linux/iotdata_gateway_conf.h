@@ -27,7 +27,6 @@
 #define IOTDATA_NODE_CONFIG_LORA_MODULE LORA_MODULE_USB
 #include "iotdata_node_config_device_e22900t22.h"
 #define IOTDATA_NODE_CONFIG_MESH_ENABLE 0
-#include "iotdata_node_mesh_tuning.h"
 #include "iotdata_node_config_mesh.h"
 #include "iotdata_node_config_ddup.h"
 #define IOTDATA_NODE_CONFIG_MQTT_CLIENT MQTT_CLIENT_DEFAULT

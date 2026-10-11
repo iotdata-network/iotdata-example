@@ -504,6 +504,7 @@ static const uint8_t ctrl_from_iotdata_keys[] = { IOTDATA_NODE_TLV_STATUS,
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool ctrl_action_node(process_state_t *const st, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    int n = 0;
     switch (action) {
     case IOTDATA_NODE_ACTION_NODE_STATIONS_DUMP:
         PRINTF_INFO("exec: CONTROL - STATIONS_DUMP\n");
@@ -513,35 +514,29 @@ static bool ctrl_action_node(process_state_t *const st, const uint8_t action, co
         PRINTF_INFO("exec: CONTROL - FILTERS_DUMP\n");
         ctrl_report_filter(&st->filter);
         return true;
-    case IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE: {
-        int n = 0;
+    case IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE:
         for (int i = 0; i + IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE) {
             const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
-            switch (val[i + 2]) {
-            case IOTDATA_NODE_CONTROL_NODE_FILTERS_NONE:
-                PRINTF_INFO("exec: CONTROL - FILTERS_UPDATE %03" PRIX16 " none -> %s\n", station, filter_remove(&st->filter, station) ? "removed" : "not present");
+            if (val[i + 2] == IOTDATA_NODE_CONTROL_NODE_FILTERS_NONE) {
+                const bool removed = filter_remove(&st->filter, station);
+                PRINTF_INFO("exec: CONTROL - FILTERS_UPDATE %03" PRIX16 " none -> %s\n", station, removed ? "removed" : "not present");
                 n++;
-                break;
-            case IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK:
-            case IOTDATA_NODE_CONTROL_NODE_FILTERS_ALLOW: {
-                /* the wire values are NONE/BLOCK/ALLOW = 0/1/2; the table's are BLOCK/ALLOW = 0/1 */
-                const bool allow = (val[i + 2] == IOTDATA_NODE_CONTROL_NODE_FILTERS_ALLOW);
-                const bool ok = filter_insert(&st->filter, station, allow ? FILTER_ALLOW : FILTER_BLOCK, FILTER_MANUAL);
-                PRINTF_INFO("exec: CONTROL - FILTERS_UPDATE %03" PRIX16 " %s -> %s\n", station, allow ? "allow" : "block", ok ? "ok" : "table full");
-                if (ok && !allow) /* make the block take effect on what we already believe */
+            } else if (val[i + 2] == IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK) {
+                const bool ok = filter_insert(&st->filter, station, FILTER_BLOCK, FILTER_MANUAL);
+                PRINTF_INFO("exec: CONTROL - FILTERS_UPDATE %03" PRIX16 " block -> %s\n", station, ok ? "ok" : "table full");
+                if (ok) /* make the block take effect on what we already believe */
                     (void)stat_mesh_peer_remove(st->state_stat, station);
                 n++;
-                break;
-            }
-            default:
+            } else if (val[i + 2] == IOTDATA_NODE_CONTROL_NODE_FILTERS_ALLOW) {
+                const bool ok = filter_insert(&st->filter, station, FILTER_ALLOW, FILTER_MANUAL);
+                PRINTF_INFO("exec: CONTROL - FILTERS_UPDATE %03" PRIX16 " allow -> %s\n", station, ok ? "ok" : "table full");
+                n++;
+            } else
                 PRINTF_INFO("exec: CONTROL - FILTERS_UPDATE %03" PRIX16 " action=0x%02" PRIX8 " (unknown, ignored)\n", station, val[i + 2]);
-                break;
-            }
         }
         if (n > 0)
             ctrl_report_filter(&st->filter);
         return true;
-    }
     case IOTDATA_NODE_ACTION_NODE_FILTERS_CLEAR: {
         const filter_scope_t scope = (vlen >= 1) ? (filter_scope_t)val[0] : FILTER_SCOPE_ALL;
         PRINTF_INFO("exec: CONTROL - FILTERS_CLEAR scope=%u -> %d cleared\n", (unsigned)scope, filter_clear(&st->filter, scope));
@@ -557,13 +552,13 @@ static bool ctrl_action_node(process_state_t *const st, const uint8_t action, co
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool ctrl_action_mesh(process_state_t *const st, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    int n = 0;
     switch (action) {
     case IOTDATA_NODE_ACTION_MESH_PEERS_DUMP:
         PRINTF_INFO("exec: CONTROL - MESH_PEERS_DUMP\n");
         ctrl_report_peers(st->state_stat);
         return true;
-    case IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE: {
-        int n = 0;
+    case IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE:
         for (int i = 0; i + IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE <= (int)vlen; i += IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE) {
             const uint16_t station = (uint16_t)(((uint16_t)val[i] << 8) | val[i + 1]);
             if (val[i + 2] == IOTDATA_NODE_CONTROL_MESH_PEER_NONE) {
@@ -575,7 +570,6 @@ static bool ctrl_action_mesh(process_state_t *const st, const uint8_t action, co
         if (n > 0)
             ctrl_report_peers(st->state_stat);
         return true;
-    }
     case IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR:
         PRINTF_INFO("exec: CONTROL - MESH_PEERS_CLEAR -> forgetting %d peer(s)\n", st->state_stat->peers_count);
         stat_mesh_peers_clear(st->state_stat);
@@ -590,12 +584,10 @@ static bool ctrl_action_mesh(process_state_t *const st, const uint8_t action, co
 
 static bool ctrl_action_diag(const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
     switch (action) {
-    case IOTDATA_NODE_ACTION_DIAG_BBOX_ENABLE: {
-        const bool on = (vlen >= 1) ? (val[0] != 0u) : true;
-        PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_ENABLE -> %s\n", on ? "true" : "false");
-        ctrl_diag_enable(on);
+    case IOTDATA_NODE_ACTION_DIAG_BBOX_ENABLE:
+        PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_ENABLE -> %s\n", ((vlen >= 1) ? (val[0] != 0u) : true) ? "true" : "false");
+        ctrl_diag_enable(((vlen >= 1) ? (val[0] != 0u) : true));
         return true;
-    }
     case IOTDATA_NODE_ACTION_DIAG_BBOX_CLEAR:
         PRINTF_INFO("exec: CONTROL - DIAGNOSTICS_CLEAR\n");
         ctrl_diag_clear();

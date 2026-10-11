@@ -124,13 +124,14 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #include "d_platform_linux.h"
 #include "d_common.h"
 #include "d_format.h"
-
 #define BUFFER_LOCK_TYPE       pthread_mutex_t
 #define BUFFER_LOCK_INIT(l)    pthread_mutex_init((l), NULL)
 #define BUFFER_LOCK_ACQUIRE(l) pthread_mutex_lock(l)
 #define BUFFER_LOCK_RELEASE(l) pthread_mutex_unlock(l)
 #include "d_module_buffers.h"
-
+#include "d_module_datastore_linux.h"
+#include "d_module_filestore_linux.h"
+#include "d_module_otaslot_linux.h"
 #undef PIN_DEVICE_UART_TX
 #undef PIN_DEVICE_UART_RX
 #undef PIN_DEVICE_LORA_AUX
@@ -166,7 +167,6 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#include "d_module_datastore_linux.h"
 #define IOTDATA_NODE_VERSION_HAS_MESH
 #define IOTDATA_NODE_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
 #include "iotdata_node_platform.h"
@@ -185,7 +185,6 @@ static bool gateway_config_changed(const iotdata_node_config_row_t *row, const i
 #define IOTDATA_NODE_CONFIG_STAT_NOTIFY gateway_config_changed
 #define IOTDATA_GATEWAY_NOTIFY          gateway_config_changed
 #include "iotdata_gateway_conf.h"
-
 #include "iotdata_node_config.h"
 #include "iotdata_gateway_conf.h"
 
