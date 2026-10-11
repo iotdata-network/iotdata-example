@@ -33,6 +33,7 @@
 #define IOTDATA_NODE_CONFIG_MQTT_CLIENT MQTT_CLIENT_DEFAULT
 #include "iotdata_node_config_mqtt.h"
 #include "iotdata_node_config_bbox.h"
+#include "iotdata_node_config_content.h"
 #include "iotdata_node_config_stat.h"
 
 /* The application's live-refresh handler, for rows it CACHES rather than reads each time. The
@@ -63,7 +64,10 @@
     IOTDATA_NODE_CONFIG_ENTRIES_STAT_PUBLISH_MQTT(X) \
 \
     IOTDATA_NODE_CONFIG_ENTRIES_BBOX(X) \
-    IOTDATA_NODE_CONFIG_ENTRIES_BBOX_FILE(X)
+    IOTDATA_NODE_CONFIG_ENTRIES_BBOX_FILE(X) \
+\
+    IOTDATA_NODE_CONFIG_ENTRIES_CONTENT(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_CONTENT_FILE(X)
 
 #endif /* IOTDATA_GATEWAY_CONF_H */
 
@@ -78,6 +82,7 @@
 #include "iotdata_node_config_ddup.h"
 #include "iotdata_node_config_mqtt.h"
 #include "iotdata_node_config_bbox.h"
+#include "iotdata_node_config_content.h"
 #include "iotdata_node_config_stat.h"
 
 /* Which rows a later write must persist: the ones changed at RUNTIME, and the ones a previous run

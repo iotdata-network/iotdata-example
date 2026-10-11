@@ -86,7 +86,11 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #include "iotdata_node_config.h" /* the record helpers ctrl.h uses to build a config write */
 #include "iotdata_node_control.h"
 
-#define BLACKBOX_PERSIST BLACKBOX_PERSIST_NONE
+/* THE RECORDER, IN RAM. The gateway's own is FILE-backed out of its config; a suite must not touch
+   a filesystem, so this one is the RAM ring -- which is what IOTDATA_NODE_DIAGNOSTICS 1 selects,
+   and BLACKBOX_PERSIST says the same thing explicitly rather than by implication. */
+#define IOTDATA_NODE_DIAGNOSTICS 1
+#define BLACKBOX_PERSIST         BLACKBOX_PERSIST_NONE
 #define IOTDATA_NODE_BLACKBOX_IMPLEMENTATION
 #include "iotdata_node_diagnostics.h"
 #include "iotdata_node_partial.h"
@@ -143,6 +147,8 @@ static iotdata_node_t t_inode;
 #include "iotdata_gateway_survey.h"
 #include "iotdata_gateway_trace.h"
 #include "iotdata_gateway_state.h"
+#include "iotdata_gateway_content.h"
+#include "d_module_filestore_ram.h" /* the suite's content store: RAM, never a directory */
 #include "iotdata_gateway_ctrl.h"
 #include "iotdata_gateway_exec.h"
 
@@ -2253,10 +2259,8 @@ static bool test_ctrl_response_topic_is_shared(void) {
     ns.inode = &t_inode;
     stat_state_t ss;
     memset(&ss, 0, sizeof(ss));
-    bbox_state_t bb;
-    memset(&bb, 0, sizeof(bb));
     iotdata_node_init(&t_inode, 0x0001, NULL, 0u);
-    ASSERT(node_begin(&ns, &t_inode, NULL, &ss, &bb, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
+    ASSERT(node_begin(&ns, &t_inode, NULL, &ss, &t_pool, test_packet_handler, NULL, NULL, NULL, NULL, NULL, 0, "pre"));
 
     ctrl_state_t st;
     ctrl_test_state(&st);
@@ -2267,7 +2271,7 @@ static bool test_ctrl_response_topic_is_shared(void) {
     trace_state_t tv;
     survey_begin(&sv, "pre", &t_inode, &t_pool);
     trace_begin(&tv, "pre", &t_inode, &t_pool);
-    (void)ctrl_begin(&st, "pre", &t_inode, &bb, &sv, &tv, &t_pool);
+    (void)ctrl_begin(&st, "pre", &t_inode, &sv, &tv, &t_pool);
 
     ASSERT(strcmp(st.topic_req, "pre/manage/req") == 0);
     ASSERT(strcmp(st.topic_resp, "pre/manage/resp") == 0);
@@ -2387,6 +2391,35 @@ static bool test_ctrl_staged_command_expires(void) {
     ASSERT_EQ_INT(buffer_queue_expire(&st.queue, now_ms + CTRL_QUEUE_TTL_MS + 1000), 1u);
     ASSERT_EQ_INT(buffer_queue_count(&st.queue), 0u);
     ASSERT_EQ_INT(buffer_queue_expired(&st.queue), 1u);
+    return true;
+}
+
+/* THE RECORDER'S CLOCK IS MONOTONIC AND SEEDED, which is the shape of a bug this had: it ticked
+   from time(NULL), so on a box with no RTC the first NTP step fed the whole gap in as a delta --
+   forwards it credits years of uptime and fires a batched flush, backwards it goes negative and an
+   unsigned delta of 4.29 billion does both. The two properties that make that impossible are
+   asserted here: the FIRST tick advances nothing however large now_ms already is, and every tick
+   after it advances by exactly the difference. */
+static bool test_diagnostics_clock_is_monotonic_and_seeded(void) {
+    ASSERT(iotdata_node_diagnostics_begin(0, true));
+    blackbox_handle_t *const h = iotdata_node_diagnostics_handle();
+    ASSERT(h != NULL);
+    blackbox_status_t bs;
+
+    /* a process up for an hour before the recorder starts owes the recorder nothing */
+    iotdata_node_diagnostics_tick(3600000u);
+    ASSERT(blackbox_status(h, &bs));
+    ASSERT_EQ_INT(bs.uptime_ms, 0u);
+
+    iotdata_node_diagnostics_tick(3600000u + 1000u);
+    iotdata_node_diagnostics_tick(3600000u + 1500u);
+    ASSERT(blackbox_status(h, &bs));
+    ASSERT_EQ_INT(bs.uptime_ms, 1500u); /* the elapsed difference, not the clock's value */
+
+    /* and a pass that takes no measurable time is not an error, it is a zero */
+    iotdata_node_diagnostics_tick(3600000u + 1500u);
+    ASSERT(blackbox_status(h, &bs));
+    ASSERT_EQ_INT(bs.uptime_ms, 1500u);
     return true;
 }
 
@@ -2546,26 +2579,26 @@ static bool test_console_poll_never_blocks(void) {
 
     /* nothing written yet: this must RETURN, and would hang the suite if it did not */
     g_console_hits = 0;
-    iotdata_node_console_poll();
+    iotdata_node_console_tick((uint32_t)time(NULL));
     ASSERT_EQ_INT(g_console_hits, 0);
 
     /* a line arrives and is dispatched, without waiting for a second one */
     ASSERT(write(fds[1], "hit\n", 4) == 4);
-    iotdata_node_console_poll();
+    iotdata_node_console_tick((uint32_t)time(NULL));
     ASSERT_EQ_INT(g_console_hits, 1);
 
     /* a partial line waits, and does not block while it does */
     ASSERT(write(fds[1], "hi", 2) == 2);
-    iotdata_node_console_poll();
+    iotdata_node_console_tick((uint32_t)time(NULL));
     ASSERT_EQ_INT(g_console_hits, 1);
     ASSERT(write(fds[1], "t\n", 2) == 2);
-    iotdata_node_console_poll();
+    iotdata_node_console_tick((uint32_t)time(NULL));
     ASSERT_EQ_INT(g_console_hits, 2);
 
     /* the writer closes: EOF must stop it asking rather than spin */
     (void)close(fds[1]);
-    iotdata_node_console_poll();
-    iotdata_node_console_poll();
+    iotdata_node_console_tick((uint32_t)time(NULL));
+    iotdata_node_console_tick((uint32_t)time(NULL));
     ASSERT_EQ_INT(g_console_hits, 2);
 
     (void)dup2(saved, STDIN_FILENO);
@@ -2904,22 +2937,32 @@ static bool test_mesh_node_control_keys_are_all_handled(void) {
        it cannot service, so the test stands up BOTH -- otherwise it walks straight into a null
        g_ctrl and the crash says nothing about whether the key is handled. */
     static ctrl_state_t cs;
-    static bbox_state_t bb;
     memset(&cs, 0, sizeof(cs));
-    memset(&bb, 0, sizeof(bb));
     cs.inode = ms.inode; /* same station: the accessors dereference this, a zeroed state cannot */
-    /* a real recorder, in RAM: blackbox_enable/clear/pull walk the handle, so a zeroed one is a
-       crash rather than a no-op. BLACKBOX_PERSIST_NONE (set at the top of this file) keeps it off
-       any filesystem. */
-    bb.config = (blackbox_config_t){ .pool = bb.pool, .pool_sz = sizeof(bb.pool), .flush = BLACKBOX_FLUSH_WRITE_THROUGH, .enabled = true };
-    ASSERT(blackbox_init(&bb.handle, &bb.config) == 0);
-    cs.bbox = &bb;
+    /* A REAL RECORDER, because enable/clear/pull reach into the store and a recorder that never
+       started is a no-op rather than an answer -- which would let an unhandled DIAG key pass. */
+    ASSERT(iotdata_node_diagnostics_begin(0, true));
+    /* AND A REAL CONTENT STORE, for the same reason and in RAM for the same reason: the gateway's
+       own is a directory out of its config, and a suite must not go near a filesystem. The handler
+       refuses every key when no store is attached, which would make the CONTENT keys below pass
+       while doing nothing. */
+    static filestore_ram_t content_fs;
+    static iotdata_node_content_t content_store;
+    iotdata_node_content_init(&content_store, filestore_ram_init(&content_fs));
+    iotdata_node_content_control_init(&content_store, NULL);
     cs.pool = &t_pool;
     buffer_queue_init(&cs.queue, cs.queue_slot, CTRL_QUEUE_MAX, &t_pool);
     g_ctrl = &cs;
+    /* AND EVERY MODULE'S KEYS ARE IN IT. The list is one spliced `static const` array now, so a
+       count of zero is no longer reachable -- but a module's pairs being left OUT of the splice
+       still is, and the walk below would then pass by walking less. The 7 is this gateway's OWN
+       keys and is deliberately a literal: what a node advertises is protocol, and changing it
+       should mean changing a line that says what it advertises. The module counts stay symbolic,
+       so a key added to the recorder or the store lands here without touching this. */
+    ASSERT_EQ_INT(CTRL_FROM_IOTDATA_KEYS_COUNT, 7u + IOTDATA_NODE_DIAGNOSTICS_CONTROL_ACTIONS_COUNT + IOTDATA_NODE_CONTENT_CONTROL_ACTIONS_COUNT);
     /* the advertised list is (subject, action) pairs: every one must be serviced, or a manager is
        sent on a wild goose chase by the node's own inventory */
-    for (size_t i = 0; i + 1 < sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0]); i += 2) {
+    for (size_t i = 0; i + 1 < sizeof(ctrl_from_iotdata_keys); i += 2) {
         const uint8_t subject = ctrl_from_iotdata_keys[i], action = ctrl_from_iotdata_keys[i + 1];
         const uint8_t entry[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, 0x00 };
         if (!ctrl_from_iotdata(subject, action, entry, (uint8_t)sizeof(entry))) {
@@ -3324,6 +3367,7 @@ int main(void) {
     RUN_TEST(ctrl_queue_full_is_refused);
     RUN_TEST(ctrl_multiple_targets);
     RUN_TEST(ctrl_staged_command_expires);
+    RUN_TEST(diagnostics_clock_is_monotonic_and_seeded);
 
     /* Every frame the suite built came from the pool, so every one must have come back. A leaked
        reference is invisible in a passing test and fatal in a gateway that has been up for days --

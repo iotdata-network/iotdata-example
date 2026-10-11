@@ -146,8 +146,6 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
     return length > 0 && lora_write(packet, (size_t)length) == ESP_OK;
 }
 
-#include "d_module_datastore_linux.h"
-
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -168,6 +166,7 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#include "d_module_datastore_linux.h"
 #define IOTDATA_NODE_VERSION_HAS_MESH
 #define IOTDATA_NODE_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
 #include "iotdata_node_platform.h"
@@ -202,44 +201,28 @@ static const iotdata_node_console_t s_gateway_cons[] = {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-typedef struct {
-    bool enabled;
-    const char *directory;
-    uint32_t max_records, max_seconds, max_bytes;
-    uint8_t generations;
-} bbox_conf_t;
-typedef struct {
-    blackbox_handle_t handle;
-    blackbox_config_t config;
-    char pool[IOTDATA_NODE_BLACKBOX_POOL_SZ];
-    char path[512];
-} bbox_state_t;
-
-static void gateway_blackbox_begin(bbox_state_t *state, const bbox_conf_t *conf) {
-    state->config = (blackbox_config_t){
-        .pool = state->pool,
-        .pool_sz = sizeof(state->pool),
-        .flush = (conf->max_seconds > 0u) ? BLACKBOX_FLUSH_BATCH_TIME : BLACKBOX_FLUSH_WRITE_THROUGH,
-        .flush_ms = conf->max_seconds * 1000u,
-        .max_records = conf->max_records,
-        .max_bytes = conf->max_bytes,
-        .generations = conf->generations,
-        .persist_arg = snprintf_inline(state->path, sizeof(state->path), "%s/iotdata_gateway_blackbox.csv", conf->directory),
-        .enabled = conf->enabled,
-    };
-    if (blackbox_init(&state->handle, &state->config) == 0) {
-        (void)iotdata_node_blackbox_lifecycle(&state->handle, IOTDATA_NODE_BB_LC_START, 0);
-        PRINTF_INFO("blackbox: %s (path=%s, flush=%s)\n", conf->enabled ? "enabled" : "disabled (default)", state->path, (conf->max_seconds > 0) ? "ram-cache/batched" : "write-through");
-    } else
-        PRINTF_ERROR("blackbox: init failed (path=%s)\n", state->path);
+static void gateway_blackbox_begin(void) {
+    char path[256];
+    const uint32_t max_seconds = iotdata_node_config_u32(BLACKBOX_MAX_SECONDS);
+    const bool enabled = iotdata_node_config_bool(BLACKBOX_ENABLED);
+    if (iotdata_node_diagnostics_begin_conf(
+            &(const iotdata_node_diagnostics_conf_t){
+                .enabled = enabled,
+                .persist_arg = snprintf_inline(path, sizeof(path), "%s/iotdata_gateway_blackbox.csv", iotdata_node_config_string(BLACKBOX_FILE_DIRECTORY)),
+                .flush = (max_seconds > 0u) ? BLACKBOX_FLUSH_BATCH_TIME : BLACKBOX_FLUSH_WRITE_THROUGH,
+                .flush_ms = max_seconds * 1000u,
+                .max_records = iotdata_node_config_u32(BLACKBOX_MAX_RECORDS),
+                .max_bytes = iotdata_node_config_u32(BLACKBOX_MAX_BYTES),
+                .generations = iotdata_node_config_u8(BLACKBOX_FILE_GENERATIONS),
+            },
+            IOTDATA_NODE_BB_LC_START, 0))
+        PRINTF_INFO("blackbox: %s (path=%s, flush=%s)\n", enabled ? "enabled" : "disabled (default)", iotdata_node_diagnostics_persist_arg(), (max_seconds > 0) ? "ram-cache/batched" : "write-through");
+    else
+        PRINTF_ERROR("blackbox: init failed (path=%s)\n", path);
 }
 
-static void gateway_blackbox_end(bbox_state_t *state) {
-    if (state->handle.cfg != NULL) {
-        (void)iotdata_node_blackbox_lifecycle(&state->handle, IOTDATA_NODE_BB_LC_STOP, 0);
-        (void)blackbox_flush(&state->handle);
-        blackbox_deinit(&state->handle);
-    }
+static void gateway_blackbox_end(void) {
+    iotdata_node_diagnostics_end(IOTDATA_NODE_BB_LC_STOP, 0);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -307,6 +290,7 @@ static void gateway_state_end(store_state_t *state) {
 #include "iotdata_gateway_survey.h"
 #include "iotdata_gateway_trace.h"
 #include "iotdata_gateway_state.h"
+#include "iotdata_gateway_content.h"
 #include "iotdata_gateway_ctrl.h"
 #include "iotdata_gateway_exec.h"
 
@@ -328,7 +312,6 @@ typedef struct {
     ctrl_state_t ctrl_state;
     survey_state_t survey_state;
     trace_state_t trace_state;
-    bbox_state_t bbox_state;
     store_state_t store_state;
     iotdata_node_t inode;
     process_state_t process_state;
@@ -455,12 +438,8 @@ int main(int argc, char *argv[]) {
         PRINTF_WARN("version: build stamp is unset -- this binary cannot say when it was built\n");
 
     BUFFER_POOL_INIT(s_pool, BUFFER_SLOTS_TOTAL, BUFFER_LENGTH_TOTAL, BUFFER_LENGTH_PREFIX);
-    gateway_blackbox_begin(&state->bbox_state, &(const bbox_conf_t){ .enabled = iotdata_node_config_bool(BLACKBOX_ENABLED),
-                                                                     .directory = iotdata_node_config_string(BLACKBOX_FILE_DIRECTORY),
-                                                                     .max_records = iotdata_node_config_u32(BLACKBOX_MAX_RECORDS),
-                                                                     .max_seconds = iotdata_node_config_u32(BLACKBOX_MAX_SECONDS),
-                                                                     .max_bytes = iotdata_node_config_u32(BLACKBOX_MAX_BYTES),
-                                                                     .generations = iotdata_node_config_u8(BLACKBOX_FILE_GENERATIONS) });
+    gateway_blackbox_begin();
+    gateway_content_begin(hw_time_ms());
     gateway_state_begin(&state->store_state, &(const store_conf_t){ .directory = iotdata_node_config_string(STATE) });
     iotdata_node_init(&state->inode, iotdata_node_settings_station(&gateway_settings), &state->store_state.node, STATE_NODE_TAG);
     iotdata_node_settings_console_attach(&gateway_settings, &state->store_state.node);
@@ -490,8 +469,8 @@ int main(int argc, char *argv[]) {
 
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
     (void)netw_begin(&state->process_state.network);
-    if (!node_begin(&state->node_state, &state->inode, &state->iotd_caps, &state->stat_state, &state->bbox_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row,
-                    ctrl_from_iotdata_keys, (uint8_t)(sizeof(ctrl_from_iotdata_keys) / sizeof(ctrl_from_iotdata_keys[0])), iotdata_node_config_string(MQTT_TOPIC_PREFIX)))
+    if (!node_begin(&state->node_state, &state->inode, &state->iotd_caps, &state->stat_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row, ctrl_from_iotdata_keys,
+                    CTRL_FROM_IOTDATA_KEYS_COUNT, iotdata_node_config_string(MQTT_TOPIC_PREFIX)))
         goto end_mqtt;
     node_settings_attach(&state->node_state, &gateway_settings, &state->store_state.node);
     if (!mesh_begin(&state->mesh_state, &state->inode, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
@@ -503,7 +482,7 @@ int main(int argc, char *argv[]) {
         goto end_mesh;
     survey_begin(&state->survey_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &s_pool);
     trace_begin(&state->trace_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &s_pool);
-    if (!ctrl_begin(&state->ctrl_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->bbox_state, &state->survey_state, &state->trace_state, &s_pool))
+    if (!ctrl_begin(&state->ctrl_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->survey_state, &state->trace_state, &s_pool))
         goto end_ddup;
     /* AND THE SUBSCRIPTION AFTER ddup_begin(), not with the will above: a retained presence can be
        delivered the instant we subscribe, and the handler calls into ddup's peer table -- whose
@@ -538,7 +517,8 @@ end_device:
     lora_stop();
 end_all:
     gateway_state_end(&state->store_state);
-    gateway_blackbox_end(&state->bbox_state);
+    gateway_content_end();
+    gateway_blackbox_end();
     return ret;
 }
 

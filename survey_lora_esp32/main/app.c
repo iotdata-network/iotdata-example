@@ -133,6 +133,7 @@
 #include "d_interface_button.h"
 #include "d_interface_led.h"
 #include "d_module_datastore_esp32.h"
+#include "d_module_filestore_esp32.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // IOTDATA PROTOCOL + PLATFORM
@@ -159,6 +160,7 @@
 
 #define IOTDATA_NODE_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_MANUAL /* a sleeping node flushes before it sleeps */
 #include "iotdata_node_platform.h"
+#include "iotdata_node_content_control.h"
 static void _node_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
 }
@@ -170,11 +172,13 @@ static void _node_diagnostics_emit(const char *const line) {
 static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
 #define IOTDATA_NODE_CONFIG_LORA_NOTIFY on_lora_changed
 #include "iotdata_node_config_device_e22900t22.h"
+#include "iotdata_node_config_content.h"
 
 #define IOTDATA_NODE_CONFIG_ENTRIES(X) \
     /*NAME  id  TYPE  min  max  default  flags  validate  notify */ \
     X(SURVEY_AUTO_S, 0x001, U16, 5, 3600, 30, 0, NULL, NULL, "seconds between automatic reports, once a long press turns them on") \
-    IOTDATA_NODE_CONFIG_ENTRIES_LORA(X)
+    IOTDATA_NODE_CONFIG_ENTRIES_LORA(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_CONTENT(X)
 
 #include "iotdata_node_config.h"
 #include "iotdata_node_config_device_e22900t22.h"
@@ -196,6 +200,48 @@ static bool _app_config_apply(const uint8_t *buf, size_t len, bool *reboot_out);
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static const char *__tag_app = "app";
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static filestore_esp32_t _state_filestore;
+static iotdata_node_content_t _state_content;
+
+static void app_content_begin(const uint32_t now_ms) {
+    const bool enabled = iotdata_node_config_bool(CONTENT_ENABLED);
+    const iotdata_node_content_backend_t *const be = enabled ? filestore_esp32_mount(&_state_filestore) : NULL;
+    iotdata_node_content_init(&_state_content, be);
+    iotdata_node_content_control_init(&_state_content, NULL); /* no OTA device: not a target yet */
+    if (!enabled) {
+        ESP_LOGI(__tag_app, "content: disabled -- the store will not be mounted");
+        return;
+    }
+    if (be == NULL) {
+        ESP_LOGW(__tag_app, "content: no store -- the `storage` partition would not mount");
+        return;
+    }
+    const int offered = iotdata_node_content_begin(&_state_content, now_ms);
+    uint32_t total = 0u, used = 0u;
+    (void)filestore_esp32_info(&_state_filestore, &total, &used);
+    ESP_LOGI(__tag_app, "content: %" PRIu32 " file(s), %d offered, %u owned, %" PRIu32 " of %" PRIu32 " bytes used", iotdata_node_content_count(&_state_content), offered, (unsigned)_state_content.owns, used, total);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static bool app_node_control(__attribute__((unused)) const uint16_t station, const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    switch (subject) {
+    case IOTDATA_NODE_TLV_DIAGNOSTICS:
+        return iotdata_node_diagnostics_control(subject, action, val, vlen);
+    case IOTDATA_NODE_TLV_CONTENT:
+        return iotdata_node_content_control(subject, action, val, vlen);
+    default:
+        return false; /* not ours: the node layer counts it unknown */
+    }
+}
+
+/* ADVERTISED WHETHER OR NOT THE STORE MOUNTED, because the handler answers either way -- a node
+   that dropped a word when a partition failed would look like one running older firmware. */
+static const uint8_t _state_control_actions[] = { IOTDATA_NODE_DIAGNOSTICS_CONTROL_ACTION_PAIRS IOTDATA_NODE_CONTENT_CONTROL_ACTION_PAIRS };
+#define APP_CONTROL_ACTIONS_COUNT ((uint8_t)(sizeof(_state_control_actions) / 2u))
 
 /* Before the state struct that holds a survey_t. It takes this board's answers -- how a packet is
    built, how the radio is brought up -- as function POINTERS, resolved where the config literal is
@@ -234,9 +280,9 @@ static state_running_t _state_running = { .iotdata_node_cfg = {
                                               .caps = &_state_operating.caps,
                                               .status = _app_node_status,
                                               .tx = _app_node_transmit,
-                                              .control = IOTDATA_NODE_DIAGNOSTICS_CONTROL,
-                                              .control_actions = iotdata_node_diagnostics_control_actions,
-                                              .control_actions_count = IOTDATA_NODE_DIAGNOSTICS_CONTROL_ACTIONS_COUNT,
+                                              .control = app_node_control,
+                                              .control_actions = _state_control_actions,
+                                              .control_actions_count = APP_CONTROL_ACTIONS_COUNT,
                                               .diag = IOTDATA_NODE_DIAGNOSTICS_PULL,
                                               .receive_every_ms = IOTDATA_NODE_RECEIVE_EVERY_MS,
                                               .receive_window_ms = IOTDATA_NODE_RECEIVE_WINDOW_MS,
@@ -370,12 +416,14 @@ static void app_exec_status(void) {
 
 bool app_exec(void) {
     for (;;) {
+        const uint32_t now_ms = hw_time_ms();
+        iotdata_node_diagnostics_tick(now_ms); /* clock + canary */
+        (void)iotdata_node_content_tick(&_state_content, now_ms);
         app_exec_receive();
         (void)esp_task_wdt_reset();
         app_exec_refresh_gnss();
         survey_poll(&app_state.operating->survey);
         app_exec_status();
-        (void)iotdata_node_diagnostics_pump();
         app_state.operating->cycles++;
     }
 }
@@ -458,6 +506,8 @@ bool app_init(void) {
             ESP_LOGW(__tag_app, "gnss: would not start -- carrying on without a fix");
         }
     }
+
+    app_content_begin(hw_time_ms());
 
     return true;
 }

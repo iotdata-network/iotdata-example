@@ -75,6 +75,7 @@
 #include "d_hardware_uart.h"
 #include "d_interface_e22900t22.h"
 #include "d_module_datastore_esp32.h"
+#include "d_module_filestore_esp32.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // IOTDATA PROTOCOL + PLATFORM
@@ -101,6 +102,7 @@
 #define IOTDATA_NODE_DIAGNOSTICS_FLUSH BLACKBOX_FLUSH_BATCH_TIME
 #define IOTDATA_NODE_STATE_BLOCKS_MAX  (2 * IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX + 4) /* two blocks per simulated sensor + boards own */
 #include "iotdata_node_platform.h"
+#include "iotdata_node_content_control.h"
 static void _node_diagnostics_emit(const char *const line) {
     ESP_LOGI("app", "%s", line); // XXX
 }
@@ -112,6 +114,7 @@ static void _node_diagnostics_emit(const char *const line) {
 static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *was, const iotdata_node_config_info_t *info);
 #define IOTDATA_NODE_CONFIG_LORA_NOTIFY on_lora_changed
 #include "iotdata_node_config_device_e22900t22.h"
+#include "iotdata_node_config_content.h"
 
 static bool sim_transmit_min_ok(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *v, const struct iotdata_node_config_update *u);
 static bool sim_transmit_max_ok(const iotdata_node_config_row_t *row, const iotdata_node_config_value_t *v, const struct iotdata_node_config_update *u);
@@ -122,7 +125,8 @@ static bool sim_transmit_max_ok(const iotdata_node_config_row_t *row, const iotd
     X(EXTRA_FIELDS, 0x003, U8, 1, 100, IOTDATA_NODE_CONFIG_SIMULATOR_EXTRA_FIELDS, 0, NULL, NULL, "extra fields per reading, to vary the packet size") \
     X(TRANSMIT_MIN_S, 0x004, U16, 1, 3600, (IOTDATA_NODE_CONFIG_SIMULATOR_TRANSMIT_MIN_MS / 1000), 0, sim_transmit_min_ok, NULL, "the shortest gap between simulated transmissions") \
     X(TRANSMIT_MAX_S, 0x005, U16, 1, 3600, (IOTDATA_NODE_CONFIG_SIMULATOR_TRANSMIT_MAX_MS / 1000), 0, sim_transmit_max_ok, NULL, "the longest, so they do not fall into step") \
-    IOTDATA_NODE_CONFIG_ENTRIES_LORA(X)
+    IOTDATA_NODE_CONFIG_ENTRIES_LORA(X) \
+    IOTDATA_NODE_CONFIG_ENTRIES_CONTENT(X)
 
 #include "iotdata_node_config.h"
 #include "iotdata_node_config_device_e22900t22.h"
@@ -151,6 +155,50 @@ static const iotdata_node_console_t s_app_cons[] = {
     IOTDATA_NODE_CONFIG_CONSOLE_COMMAND,
     IOTDATA_NODE_SETTINGS_CONSOLE_COMMAND,
 };
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// CONTENT
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static filestore_esp32_t s_filestore;
+static iotdata_node_content_t s_content;
+
+static void sim_content_begin(const uint32_t now_ms) {
+    const bool enabled = iotdata_node_config_bool(CONTENT_ENABLED);
+    const iotdata_node_content_backend_t *const be = enabled ? filestore_esp32_mount(&s_filestore) : NULL;
+    iotdata_node_content_init(&s_content, be);
+    iotdata_node_content_control_init(&s_content, NULL); /* no OTA device: this board is not a target */
+    if (!enabled) {
+        ESP_LOGI("content", "disabled -- the store is not mounted");
+        return;
+    }
+    if (be == NULL) {
+        ESP_LOGW("content", "no store -- the `storage` partition would not mount");
+        return;
+    }
+    const int offered = iotdata_node_content_begin(&s_content, now_ms);
+    uint32_t total = 0u, used = 0u;
+    (void)filestore_esp32_info(&s_filestore, &total, &used);
+    ESP_LOGI("content", "%" PRIu32 " file(s), %d offered, %u owned, %" PRIu32 " of %" PRIu32 " bytes used", iotdata_node_content_count(&s_content), offered, (unsigned)s_content.owns, used, total);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// CONTROL
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static bool sim_node_control(__attribute__((unused)) const uint16_t station, const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    switch (subject) {
+    case IOTDATA_NODE_TLV_DIAGNOSTICS:
+        return iotdata_node_diagnostics_control(subject, action, val, vlen);
+    case IOTDATA_NODE_TLV_CONTENT:
+        return iotdata_node_content_control(subject, action, val, vlen);
+    default:
+        return false; /* not ours: the node layer counts it unknown */
+    }
+}
+
+static const uint8_t s_node_control_actions[] = { IOTDATA_NODE_DIAGNOSTICS_CONTROL_ACTION_PAIRS IOTDATA_NODE_CONTENT_CONTROL_ACTION_PAIRS };
+#define SIM_NODE_CONTROL_ACTIONS_COUNT ((uint8_t)(sizeof(s_node_control_actions) / 2u))
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -246,9 +294,9 @@ static const iotdata_node_params_t s_conf_template = {
     .caps = &s_caps,
     .status = sim_node_status,
     .tx = sim_node_tx,
-    .control = IOTDATA_NODE_DIAGNOSTICS_CONTROL,
-    .control_actions = iotdata_node_diagnostics_control_actions,
-    .control_actions_count = IOTDATA_NODE_DIAGNOSTICS_CONTROL_ACTIONS_COUNT,
+    .control = sim_node_control,
+    .control_actions = s_node_control_actions,
+    .control_actions_count = SIM_NODE_CONTROL_ACTIONS_COUNT,
     .diag = IOTDATA_NODE_DIAGNOSTICS_PULL,
     .receive_always = (RECEIVE_ALWAYS != 0),
     .receive_every_ms = IOTDATA_NODE_RECEIVE_EVERY_MS,
@@ -401,6 +449,8 @@ bool app_init(void) {
     iotdata_node_console_init(s_app_cons, sizeof s_app_cons / sizeof s_app_cons[0]);
     ESP_LOGI(__tag_app, "console: ready, %u config entries (try `help`, or `conf`)", (unsigned)IOTDATA_NODE_CFG_COUNT);
 
+    sim_content_begin(hw_time_ms());
+
     /* Each node registers its own sequence as it comes up; the load afterwards fills them all in
        one pass, and nothing may register after it. */
     for (int i = 0; i < SIM_SENSORS; i++) {
@@ -438,19 +488,19 @@ bool app_init(void) {
 
 bool app_exec(void) {
     const uint32_t start_ms = hw_time_ms();
-    uint32_t tx_count_last = 0, window_last_ms = hw_time_ms();
+    uint32_t tx_count_last = 0, window_last_ms = start_ms;
     do {
-        const uint32_t delta = hw_time_ms() - window_last_ms;
-        window_last_ms = hw_time_ms();
+        const uint32_t now_ms = hw_time_ms();
+        iotdata_node_diagnostics_tick(now_ms); /* clock + canary, before anything writes */
+        (void)iotdata_node_content_tick(&s_content, now_ms);
+        const uint32_t delta = now_ms - window_last_ms;
+        window_last_ms = now_ms;
         for (int i = 0; i < SIM_SENSORS; i++)
             (void)iotdata_node_window_advance(&s_nodes[i], delta);
-
         transmit_packets(&g_sim);
         receive_packets(&g_sim);
-        iotdata_node_diagnostics_tick(hw_time_ms());
-        iotdata_node_console_poll(); /* non-blocking: reads whatever bytes are already in */
-        iotdata_node_diagnostics_pump();
-        iotdata_node_state_tick(&s_state, hw_time_ms());
+        iotdata_node_console_tick(now_ms);
+        iotdata_node_state_tick(&s_state, now_ms);
 
         if (tx_count >= tx_count_last + STATUS_EVERY_N_TX) {
             tx_count_last = tx_count;

@@ -453,6 +453,15 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
 
     while (*running) {
 
+        const uint32_t now_ms = hw_time_ms();
+
+        // the recorder's clock and guard bands, before anything in this pass writes a record
+        if (*running)
+            iotdata_node_diagnostics_tick(now_ms);
+        // and the content store, which has an abandoned insert to notice and will have consumers
+        if (*running)
+            gateway_content_tick(now_ms);
+
         // packet processing
         if (*running)
             process_packet(st);
@@ -461,7 +470,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
         if (*running && st->state_mesh->enabled && intervalable_and_initial(st->state_mesh->beacon_interval_s, &st->state_mesh->beacon_last))
             mesh_transmit_beacon(st->state_mesh);
         if (*running)
-            ctrl_tick(state_ctrl, state_node);
+            ctrl_tick(state_ctrl, state_node, now_ms);
         if (*running)
             survey_tick(state_survey, state_mesh);
         if (*running)
@@ -469,7 +478,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
         if (*running)
             node_tick(state_node);
         if (*running)
-            iotdata_node_console_poll();
+            iotdata_node_console_tick(now_ms);
         if (*running && st->state_peer != NULL)
             peer_presence_tick(st->state_peer, time(NULL)); // ddup
         if (*running)
@@ -489,7 +498,7 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
 
         // state
         if (*running)
-            iotdata_node_state_tick(state_store, hw_time_ms());
+            iotdata_node_state_tick(state_store, now_ms);
     }
 
     if (st->rx_held != BUFFER_NONE) {

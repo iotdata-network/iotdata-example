@@ -68,13 +68,11 @@ typedef struct {
        The target station travels as the queue entry's key; the length lives in the buffer. */
     buffer_queue_t queue;
     buffer_queue_entry_t queue_slot[CTRL_QUEUE_MAX];
-    bbox_state_t *bbox;
     survey_state_t *survey;
     trace_state_t *trace;
     char topic_resp[128];
     char _buffer_resp[244];
     char _buffer_blackbox_rec[BLACKBOX_LINE_MAX];
-    time_t blackbox_tick_last; /* for the periodic (batched) flush tick */
     /* stats (the queue keeps its own: added, expired, rejected) */
     uint32_t stat_req_rx, stat_req_bad;
 } ctrl_state_t;
@@ -128,13 +126,20 @@ static cJSON *ctrl_respond_begin(const char *const resp, const char *const cmd) 
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void ctrl_respond_diag(ctrl_state_t *const st, const char *const cmd, const char *const text) {
+/* The SOURCE is a parameter because the envelope above says it is one: the recorder is a
+   diagnostic and not the definition of one, and the content store is a second place the same class
+   of answer comes from. A client reads "source" rather than guessing from the text. */
+static void ctrl_respond_diag_source(ctrl_state_t *const st, const char *const source, const char *const cmd, const char *const text) {
     cJSON *const root = ctrl_respond_begin("diag", cmd);
     if (root != NULL) {
-        cJSON_AddStringToObject(root, "source", CTRL_DIAG_SOURCE);
+        cJSON_AddStringToObject(root, "source", source);
         cJSON_AddStringToObject(root, "text", text);
         ctrl_respond(st, root);
     }
+}
+
+static void ctrl_respond_diag(ctrl_state_t *const st, const char *const cmd, const char *const text) {
+    ctrl_respond_diag_source(st, CTRL_DIAG_SOURCE, cmd, text);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -164,7 +169,7 @@ static void ctrl_respond_error(ctrl_state_t *const st, const char *const cmd, co
 
 static void ctrl_diag_enable(const bool on) {
     ctrl_state_t *const st = g_ctrl;
-    blackbox_enable(&st->bbox->handle, on);
+    iotdata_node_diagnostics_enable(on);
     ctrl_respond_diag(st, on ? "diag-enable" : "diag-disable", on ? "enabled" : "disabled");
 }
 
@@ -172,7 +177,7 @@ static void ctrl_diag_enable(const bool on) {
 
 static void ctrl_diag_clear(void) {
     ctrl_state_t *const st = g_ctrl;
-    blackbox_clear(&st->bbox->handle);
+    iotdata_node_diagnostics_clear();
     ctrl_respond_diag(st, "diag-clear", "cleared");
 }
 
@@ -182,7 +187,7 @@ static void ctrl_diag_dump(void) {
     ctrl_state_t *const st = g_ctrl;
     size_t cur = 0;
     int n = 0;
-    while (blackbox_pull(&st->bbox->handle, &cur, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0)
+    while (iotdata_node_diagnostics_pull(&cur, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0)
         ctrl_respond_diag_record(st, "diag-dump", n++, st->_buffer_blackbox_rec);
     ctrl_respond_diag(st, "diag-dump", snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "dumped %d records", n));
 }
@@ -462,12 +467,39 @@ static void ctrl_report_filter(const filter_t *const f) {
     }
 }
 
-static const uint8_t ctrl_from_iotdata_keys[] = {
-    IOTDATA_NODE_TLV_STATUS,      IOTDATA_NODE_ACTION_NODE_STATIONS_DUMP, IOTDATA_NODE_TLV_STATUS,      IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, IOTDATA_NODE_TLV_STATUS,      IOTDATA_NODE_ACTION_NODE_FILTERS_CLEAR,
-    IOTDATA_NODE_TLV_STATUS,      IOTDATA_NODE_ACTION_NODE_FILTERS_DUMP,  IOTDATA_NODE_SUBJECT_MESH,    IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE,   IOTDATA_NODE_SUBJECT_MESH,    IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR,
-    IOTDATA_NODE_SUBJECT_MESH,    IOTDATA_NODE_ACTION_MESH_PEERS_DUMP,    IOTDATA_NODE_TLV_DIAGNOSTICS, IOTDATA_NODE_ACTION_DIAG_BBOX_ENABLE,    IOTDATA_NODE_TLV_DIAGNOSTICS, IOTDATA_NODE_ACTION_DIAG_BBOX_CLEAR,
-    IOTDATA_NODE_TLV_DIAGNOSTICS, IOTDATA_NODE_ACTION_DIAG_BBOX_DUMP,
-};
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static void ctrl_content_say(const char *const line) {
+    ctrl_state_t *const st = g_ctrl;
+    if (st != NULL && line != NULL)
+        ctrl_respond_diag_source(st, "content", "content", line);
+}
+
+static bool ctrl_action_content(const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+    const iotdata_node_content_emit_fn was = iotdata_node_content_emit_set(ctrl_content_say);
+    const bool handled = iotdata_node_content_control(IOTDATA_NODE_TLV_CONTENT, action, val, vlen);
+    (void)iotdata_node_content_emit_set(was);
+    return handled;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static const uint8_t ctrl_from_iotdata_keys[] = { IOTDATA_NODE_TLV_STATUS,
+                                                  IOTDATA_NODE_ACTION_NODE_STATIONS_DUMP,
+                                                  IOTDATA_NODE_TLV_STATUS,
+                                                  IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE,
+                                                  IOTDATA_NODE_TLV_STATUS,
+                                                  IOTDATA_NODE_ACTION_NODE_FILTERS_CLEAR,
+                                                  IOTDATA_NODE_TLV_STATUS,
+                                                  IOTDATA_NODE_ACTION_NODE_FILTERS_DUMP,
+                                                  IOTDATA_NODE_SUBJECT_MESH,
+                                                  IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE,
+                                                  IOTDATA_NODE_SUBJECT_MESH,
+                                                  IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR,
+                                                  IOTDATA_NODE_SUBJECT_MESH,
+                                                  IOTDATA_NODE_ACTION_MESH_PEERS_DUMP,
+                                                  IOTDATA_NODE_DIAGNOSTICS_CONTROL_ACTION_PAIRS IOTDATA_NODE_CONTENT_CONTROL_ACTION_PAIRS };
+#define CTRL_FROM_IOTDATA_KEYS_COUNT ((uint8_t)(sizeof(ctrl_from_iotdata_keys) / 2u))
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -591,6 +623,8 @@ static bool ctrl_from_iotdata(const uint8_t subject, const uint8_t action, const
         return ctrl_action_mesh(st, action, val, vlen);
     case IOTDATA_NODE_TLV_DIAGNOSTICS:
         return ctrl_action_diag(action, val, vlen); /* the recorder is global: no process state */
+    case IOTDATA_NODE_TLV_CONTENT:
+        return ctrl_action_content(action, val, vlen); /* and so is the store */
     default:
         return false; /* not ours: the node layer counts it unknown */
     }
@@ -598,8 +632,7 @@ static bool ctrl_from_iotdata(const uint8_t subject, const uint8_t action, const
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
-    const uint32_t now_ms = hw_time_ms();
+void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns, const uint32_t now_ms) {
     const uint16_t stale = buffer_queue_expire(&st->queue, now_ms);
     if (stale > 0)
         PRINTF_WARN("ctrl: %u staged command(s) expired unsent\n", (unsigned)stale);
@@ -610,20 +643,12 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns) {
         node_on_mqtt(ns, buffer_data(st->pool, h), buffer_len(st->pool, h), (uint16_t)target, ctrl_tag_tlv(tag));
         buffer_unref(st->pool, h); /* the reference the queue handed over */
     }
-    const time_t now = time(NULL);
-    if (st->blackbox_tick_last != 0 && st->blackbox_tick_last != now)
-        blackbox_tick(&st->bbox->handle, (uint32_t)(now - st->blackbox_tick_last) * 1000u);
-    st->blackbox_tick_last = now;
 }
 
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, iotdata_node_t *inode, bbox_state_t *bbox, survey_state_t *survey, trace_state_t *trace, buffer_pool_t *pool) {
-    assert(st && bbox && survey && trace && pool);
+bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, iotdata_node_t *inode, survey_state_t *survey, trace_state_t *trace, buffer_pool_t *pool) {
+    assert(st && survey && trace && pool);
     *st = (ctrl_state_t){ 0 };
     st->inode = inode;
-    st->bbox = bbox;
     st->survey = survey;
     st->trace = trace;
     st->pool = pool;

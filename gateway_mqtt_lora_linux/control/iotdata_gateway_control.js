@@ -138,6 +138,8 @@ function parseStation(s) {
  * `takes` says what a command consumes from the remaining arguments:
  *   'station'  a station id, required   (which node the command is ABOUT; --target says who to ask)
  *   'scope'    an optional scope word, in that command's own vocabulary
+ *   'content'  a content id, required, read as HEX -- §4's ids are (station << 12) | counter and
+ *              are only legible that way, which is why this one is not parsed like a station
  */
 const COMMANDS = {
     // --- the system TLVs: one request each --------------------------------------------------
@@ -181,6 +183,15 @@ const COMMANDS = {
     'mesh-peers-update': { summary: 'update one peer in the table', takes: 'station+action', actions: 'remove | none' },
     'mesh-peers-clear': { summary: 'remove all peers (forcing re-discovery)' },
     'mesh-peers-dump': { summary: 'print the peers table on the node\'s console' },
+
+    // --- content ------------------------------------------------------------------------------
+    // Insert and download are absent and are not an omission: both are a byte STREAM, and the
+    // only thing here that can carry one is the node's own serial console (esp32-tool) until the
+    // CONTENT TLVs exist. These four are what can be asked of a store from a distance.
+    'content-list': { summary: 'print the content store on the node\'s console' },
+    'content-delete': { summary: 'delete one file from the store', takes: 'content', contents: '<id in hex>   e.g. 1a2b3c' },
+    'content-inspect': { summary: 'describe one file, and parse it if it is an OTA bundle', takes: 'content', contents: '<id in hex>   e.g. 1a2b3c' },
+    'content-validate': { summary: 'read one file back and report its CRC-64', takes: 'content', contents: '<id in hex>   e.g. 1a2b3c' },
 
     // --- mesh diagnostics: a DIRECTIVE, not a node command --------------------------------------
     'survey': { summary: 'ask the mesh who hears a station, and how well', takes: 'stations', stations: '<station> [<station> ...] or a comma-separated list, with --duration/--batch/--id' },
@@ -279,6 +290,11 @@ function buildRequest(name, args) {
     else if (spec.takes === 'station+action') {
         req.station = parseStation(args[0]);
         if (args[1] !== undefined) req.action = args[1];
+    } else if (spec.takes === 'content') {
+        const word = args[0];
+        if (word === undefined) throw new Error(`${name}: name a content id (in hex)`);
+        if (!/^(0[xX])?[0-9a-fA-F]{1,6}$/.test(word)) throw new Error(`${name}: '${word}' is not a content id`);
+        req.content = word;
     } else if (spec.takes === 'scope' && args[0] !== undefined) req.scope = args[0];
     else if (spec.takes === 'config') req.set = parseConfigAssignments(args);
     else if (spec.takes === 'stations') {
@@ -329,6 +345,7 @@ function usage() {
         if (c.takes === 'config') display.log(`  ${pad}   takes ${c.config}`);
         if (c.takes === 'stations') display.log(`  ${pad}   takes ${c.stations}`);
         if (c.takes === 'id') display.log(`  ${pad}   takes ${c.ids}`);
+        if (c.takes === 'content') display.log(`  ${pad}   takes ${c.contents}`);
         if (c.actions) display.log(`  ${pad}   action: ${c.actions}`);
         if (c.scopes) display.log(`  ${pad}   scope: ${c.scopes}`);
     }

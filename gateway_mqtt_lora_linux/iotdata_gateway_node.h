@@ -37,7 +37,6 @@ typedef struct {
     const iotdata_node_version_caps_t *caps;
     bool reboot_requested; /* a REBOOT arrived: the loop stops and the supervisor restarts us */
     const stat_state_t *stat;
-    bbox_state_t *bbox;
 
     /* how we answer */
     node_tx_handler_t tx; /* radio */
@@ -190,7 +189,7 @@ static int node_build_diagnostics(node_state_t *st, uint8_t *buf, const size_t s
     size_t prev = cursor;
     uint8_t packed = 0;
     bool more = false;
-    while (blackbox_pull(&st->bbox->handle, &cursor, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
+    while (iotdata_node_diagnostics_pull(&cursor, st->_buffer_blackbox_rec, sizeof(st->_buffer_blackbox_rec)) > 0) {
         const size_t n = strlen(st->_buffer_blackbox_rec);
         if (n <= 255u) { /* a KV value length is one byte; larger is unreachable today, and skipped */
             if (kv.len + 2u + n > size) {
@@ -689,13 +688,12 @@ static void node_settings_attach(node_state_t *st, iotdata_node_settings_t *sett
     st->state = state;
 }
 
-static bool node_begin(node_state_t *st, iotdata_node_t *const inode, const iotdata_node_version_caps_t *caps, const stat_state_t *stat, bbox_state_t *bbox, buffer_pool_t *pool, node_tx_handler_t tx, node_control_handler_t control,
+static bool node_begin(node_state_t *st, iotdata_node_t *const inode, const iotdata_node_version_caps_t *caps, const stat_state_t *stat, buffer_pool_t *pool, node_tx_handler_t tx, node_control_handler_t control,
                        node_status_mesh_handler_t status_mesh, node_table_count_handler_t table_count, node_table_row_handler_t table_row, const uint8_t *control_actions, const uint8_t control_actions_count, const char *topic_prefix) {
-    assert(stat && bbox && pool && tx && topic_prefix);
+    assert(stat && pool && tx && topic_prefix);
     st->inode = inode;
     st->caps = caps;
     st->stat = stat;
-    st->bbox = bbox;
     st->pool = pool;
     st->tx = tx;
     st->control = control;
