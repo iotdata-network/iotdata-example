@@ -73,7 +73,12 @@
 #include "d_format.h"
 #include "d_module_datastore_esp32.h"
 #include "d_module_filestore_esp32.h"
+/* the OTA seams: iotdata_node_otaupdate.h assembles these, and every node that uses the
+   framework has an update path, so every node includes them. None depends on an iotdata
+   header, so they sit here in the d_ block with the rest. */
 #include "d_module_otaslot_esp32.h"
+#include "d_module_inflate_esp32.h"
+#include "d_module_hpatch.h"
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"
 #include "d_interface_e22900t22.h"

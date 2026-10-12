@@ -131,7 +131,12 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #include "d_module_buffers.h"
 #include "d_module_datastore_linux.h"
 #include "d_module_filestore_linux.h"
+/* the OTA seams: iotdata_node_otaupdate.h assembles these, and every node that uses the
+   framework has an update path, so every node includes them. None depends on an iotdata
+   header, so they sit here in the d_ block with the rest. */
 #include "d_module_otaslot_linux.h"
+#include "d_module_inflate_linux.h"
+#include "d_module_hpatch.h"
 #undef PIN_DEVICE_UART_TX
 #undef PIN_DEVICE_UART_RX
 #undef PIN_DEVICE_LORA_AUX

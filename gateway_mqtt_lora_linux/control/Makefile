@@ -28,6 +28,12 @@ check: $(SCRIPT)
 # rather than failing it.
 VOCABULARY=../../../iotdata-common/include/iotdata_node_control.h
 VOCABULARY_LOCAL=conf-set survey survey-cancel raw
+# BOTH DIRECTIONS, because only one of them was ever checked. A verb here that the node dropped is a
+# rename rotting, which this always caught. A verb the NODE has and this does not is a command that
+# can be typed at a console and never sent over MQTT -- which is how content-ota and rollback were
+# added without anyone noticing they were unreachable from a manager. Deliberate omissions go in
+# VOCABULARY_SKIP, so that "not offered" is a decision on the record rather than an oversight.
+VOCABULARY_SKIP=
 check-vocabulary: $(SCRIPT)
 	@if [ ! -f $(VOCABULARY) ]; then echo "no $(VOCABULARY), skipping vocabulary check"; exit 0; fi; \
 	grep -oE "^[[:space:]]+\{ \"[a-z-]+\"" $(VOCABULARY) | tr -d '{" \t' | sort -u > .vocab.c; \
@@ -35,8 +41,12 @@ check-vocabulary: $(SCRIPT)
 	for n in $(VOCABULARY_LOCAL); do echo $$n; done | sort -u >> .vocab.c; \
 	sort -u -o .vocab.c .vocab.c; \
 	dead=`comm -23 .vocab.js .vocab.c`; \
+	missing=`comm -13 .vocab.js .vocab.c`; \
+	for n in $(VOCABULARY_SKIP); do missing=`echo "$$missing" | grep -vx $$n || true`; done; \
 	rm -f .vocab.c .vocab.js; \
 	if [ -n "$$dead" ]; then echo "vocabulary: offered here but unknown to the gateway:"; echo "$$dead" | sed 's/^/  /'; exit 1; fi; \
+	if [ -n "$$missing" ]; then echo "vocabulary: in the node's table and NOT offered here:"; echo "$$missing" | sed 's/^/  /'; \
+	  echo "add them to $(SCRIPT), or to VOCABULARY_SKIP if they are deliberately node-only"; exit 1; fi; \
 	echo "vocabulary OK"
 .PHONY: check-vocabulary
 

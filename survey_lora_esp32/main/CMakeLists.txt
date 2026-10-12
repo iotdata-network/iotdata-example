@@ -1,6 +1,6 @@
 
 idf_component_register(
-    SRCS "app.c"
+    SRCS "app.c" "${IOTDATA_SRC_DEPEND_HPATCH}/hpatch_lite.c"
     PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_usb_serial_jtag esp_partition esp_hw_support esp_app_format esp_bootloader_format app_update nvs_flash vfs spiffs mbedtls
     INCLUDE_DIRS
         "."
@@ -9,6 +9,7 @@ idf_component_register(
         "${IOTDATA_SRC_COMMON}/include"             # iotdata_variant.h (+ the variant file it pulls in)
         "${IOTDATA_SRC_COMMON}/include/device"      # d_common.h, d_hardware_*.h, d_interface_e22900t22.h
         "${IOTDATA_SRC_DEPEND_BLACKBOX}"            # blackbox.h (only used when BLACKBOX_ENABLE > 0)
+        "${IOTDATA_SRC_DEPEND_HPATCH}"             # hpatch_lite.h, the delta applier
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE)

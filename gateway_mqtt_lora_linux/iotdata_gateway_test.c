@@ -110,6 +110,7 @@ typedef struct {
 #include "device/d_module_datastore_linux.h"
 #include "iotdata_node_state.h"
 #include "iotdata_node_settings.h"
+#include "iotdata_node_firmware.h" /* the node subject resolves ROLLBACK through it */
 #include "iotdata_node_runtime.h"
 #define STATE_NODE_TAG 0xB1E28004UL
 /* The station's identity, shared by the mesh exactly as iotdata_gateway.c shares it. No datastore
@@ -153,7 +154,12 @@ static iotdata_node_t t_inode;
    the directory backend -- while the store this suite actually runs is the RAM one below. */
 #include "d_module_filestore.h" /* the seam first: iotdata_node_content.h is written against it */
 #include "d_module_filestore_linux.h"
+/* the OTA seams: iotdata_node_otaupdate.h assembles these, and every node that uses the
+   framework has an update path, so every node includes them. None depends on an iotdata
+   header, so they sit here in the d_ block with the rest. */
 #include "d_module_otaslot_linux.h"
+#include "d_module_inflate_linux.h"
+#include "d_module_hpatch.h"
 #include "iotdata_node_content.h"
 #include "iotdata_node_content_ota.h"
 #include "iotdata_node_content_control.h"

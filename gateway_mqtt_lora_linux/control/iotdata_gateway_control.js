@@ -157,6 +157,7 @@ const COMMANDS = {
     // --- generic system control ---------------------------------------------------------------
     'boot': { summary: 'restart the node' },
 
+
     // --- diag: the recorder -------------------------------------------------------------------
     'diag-bbox-enable': { summary: 'enable recording' },
     'diag-bbox-disable': { summary: 'disable recording' },
@@ -178,6 +179,7 @@ const COMMANDS = {
     'node-filters-update': { summary: 'update one filter in the table', takes: 'station+action', actions: 'block | allow | none' },
     'node-filters-clear': { summary: 'remove all filters', takes: 'scope', scopes: 'all | manual | auto   (default: all)' },
     'node-filters-dump': { summary: 'print the filters table on the node\'s console' },
+    'node-rollback': { summary: 'boot the PREVIOUS firmware image and keep it -- refused if there is not one' },
 
     // --- mesh management ----------------------------------------------------------------------
     'mesh-peers-update': { summary: 'update one peer in the table', takes: 'station+action', actions: 'remove | none' },
@@ -192,6 +194,8 @@ const COMMANDS = {
     'content-delete': { summary: 'delete one file from the store', takes: 'content', contents: '<id in hex>   e.g. 1a2b3c' },
     'content-inspect': { summary: 'describe one file, and parse it if it is an OTA bundle', takes: 'content', contents: '<id in hex>   e.g. 1a2b3c' },
     'content-validate': { summary: 'read one file back and report its CRC-64', takes: 'content', contents: '<id in hex>   e.g. 1a2b3c' },
+    'content-ota': { summary: 'what the firmware consumer is doing, and what the last attempt did' },
+    'content-ota-apply': { summary: 'arm one held bundle to be applied now, clearing its refusal and attempt count', takes: 'content', contents: '<id in hex>   e.g. 1a2b3c' },
 
     // --- mesh diagnostics: a DIRECTIVE, not a node command --------------------------------------
     'survey': { summary: 'ask the mesh who hears a station, and how well', takes: 'stations', stations: '<station> [<station> ...] or a comma-separated list, with --duration/--batch/--id' },
