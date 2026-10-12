@@ -980,10 +980,36 @@ var UNITS = {
   temperature:'\\u00b0C', temp:'\\u00b0C', pressure:'hPa', pres:'hPa', humidity:'%', humid:'%',
   battery:'V', bat:'V', voltage:'V', wind:'m/s', wspd:'m/s', wgust:'m/s', wdir:'\\u00b0',
   rain:'mm', depth:'mm', solar:'W/m\\u00b2', light:'lx', lux:'lx',
-  cpm:'cpm', dose:'\\u00b5Sv/h', rssi:'dBm', rssi_packet:'dBm'
+  cpm:'cpm', dose:'\\u00b5Sv/h', rssi:'dBm', rssi_packet:'dBm',
+  // Children of the containers that still flatten, taken from the library's own print_*: a
+  // bare "speed 3.2" or "rate 0" is a number with its meaning left on the sensor.
+  speed:'m/s', gust:'m/s', direction:'deg', rate:'mm/hr', size:'mm/d'
 };
 // Framing/metadata, not content — shown in the header line or not at all.
 var SKIP = {variant:1, station:1, sequence:1, rssi_packet:1, packed_bits:1, packed_bytes:1};
+
+// Containers whose children say nothing on their own. A flattened battery read "level 94" and
+// "state false": the word battery, the unit, and any clue that false meant discharging had all
+// gone. These render as one chip each, worded the way the library's own print_battery/_link/
+// _solar word them, so the screen and an iotdata dump say the same thing rather than keeping
+// two vocabularies. A container not listed here (environment, wind, rain, radiation, position)
+// has self-describing children and keeps flattening, which is what flattening is for. A
+// formatter that returns null declines, and the generic walk takes the packet instead -- a
+// shape we did not expect is still better shown badly than not shown.
+var FIELDS = {
+  battery: function (v) {
+    return v.level == null ? null : v.level + ' % \\u00b7 ' + (v.state ? 'charging' : 'discharging');
+  },
+  // Flattened, this rssi is indistinguishable from the packet rssi in the header line, and the
+  // two are different measurements: this is what the STATION heard on its downlink, that is
+  // what the gateway heard from the station.
+  link: function (v) {
+    return v.rssi == null ? null : v.rssi + ' dBm \\u00b7 snr ' + v.snr + ' dB';
+  },
+  solar: function (v) {
+    return v.irradiance == null ? null : v.irradiance + ' W/m\\u00b2 \\u00b7 UV ' + v.ultraviolet;
+  }
+};
 
 function el(tag, cls, text) {
   var e = document.createElement(tag);
@@ -1014,9 +1040,13 @@ function chipsFor(obj, into) {
         else into.appendChild(chip(k, typeof e === 'object' ? JSON.stringify(e) : String(e)));
       }
     } else if (typeof v === 'object') {
-      chipsFor(v, into);
+      var f = FIELDS[k] ? FIELDS[k](v) : null;
+      if (f !== null) into.appendChild(chip(k, f));
+      else chipsFor(v, into);
     } else {
-      var u = UNITS[k];
+      // Numbers only: several of these names (size, rate, direction) are generic enough to
+      // turn up as a string somewhere else, and "small mm/d" is worse than "small".
+      var u = typeof v === 'number' ? UNITS[k] : null;
       into.appendChild(chip(k, u ? v + ' ' + u : String(v)));
     }
   }
