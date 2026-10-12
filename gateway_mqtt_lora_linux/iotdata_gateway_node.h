@@ -9,10 +9,11 @@ typedef bool (*node_tx_handler_t)(const uint8_t *packet, const int length);
 
 /* A CONTROL key this layer does not know, offered to the application. Mesh management (peers,
    filters, the station table) belongs to the app, not the node protocol -- and a gateway takes
-   part in the mesh exactly as a relay does, so it answers the same keys the same way. Returning
-   false counts the key as unknown. */
-/* An app command, already split into its subject and action by the dispatcher. */
-typedef bool (*node_control_handler_t)(uint8_t subject, uint8_t action, const uint8_t *args, uint8_t arglen);
+   part in the mesh exactly as a relay does, so it answers the same keys the same way. */
+/* An app command, already split into its subject and action by the dispatcher. Answers with one of
+   the three in iotdata_node_control.h: UNKNOWN counts the key as unknown, REFUSED means it is ours
+   and we declined on the condition named in `*reason`. See WHAT HAPPENED TO IT there. */
+typedef iotdata_node_control_result_t (*node_control_handler_t)(uint8_t subject, uint8_t action, const uint8_t *args, uint8_t arglen, const char **reason);
 
 /* Filled on demand: how this station sees the mesh it is part of. */
 typedef void (*node_status_mesh_handler_t)(iotdata_node_status_mesh_t *out);
@@ -66,6 +67,9 @@ typedef struct {
 
     /* stats */
     uint32_t stat_rx, stat_requests, stat_reports, stat_commands, stat_unknown;
+    /* ours, understood, and declined on a nameable condition: neither serviced nor unheard-of */
+    uint32_t stat_refused;
+    const char *refusal;
 
     uint8_t _buffer_kv[IOTDATA_MAX_PACKET_SIZE];
     iotdata_encoder_t _iotdata_enc;
@@ -488,11 +492,23 @@ static void node_process_control(node_state_t *st, const uint8_t *kvbuf, const s
                 st->reboot_requested = true;
                 PRINTF_INFO("node: REBOOT requested (delay=%" PRIu16 "s) -- stopping; the service unit restarts us\n", iotdata_kvr_u16(args, arglen, 0));
             } else {
-                if (st->control != NULL && st->control(subject, action, args, arglen))
+                const char *reason = NULL;
+                switch ((st->control != NULL) ? st->control(subject, action, args, arglen, &reason) : IOTDATA_NODE_CONTROL_RESULT_UNKNOWN) {
+                case IOTDATA_NODE_CONTROL_RESULT_DONE:
                     st->stat_commands++;
-                else {
-                    st->stat_unknown++; /* unknown or not implemented: skip it, do not fail the packet */
+                    break;
+                case IOTDATA_NODE_CONTROL_RESULT_REFUSED:
+                    st->stat_refused++;
+                    st->refusal = (reason != NULL) ? reason : "refused, without saying why";
+                    /* NOT "ignored (not implemented)". The gateway runs the same content module as
+                       a relay, so "updates are switched off" used to be logged here as a verb this
+                       build does not have -- which is the one thing it is not. */
+                    PRINTF_INFO("node: control %02X/%02X refused -- %s\n", subject, action, st->refusal);
+                    break;
+                default:
+                    st->stat_unknown++; /* skip it, do not fail the packet */
                     PRINTF_INFO("node: control %02X/%02X ignored (not implemented)\n", subject, action);
+                    break;
                 }
             }
         } else {

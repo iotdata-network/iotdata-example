@@ -236,14 +236,17 @@ static void app_content_begin(const uint32_t now_ms) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool app_node_control(__attribute__((unused)) const uint16_t station, const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+static iotdata_node_control_result_t app_node_control(__attribute__((unused)) const uint16_t station, const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen, const char **const reason) {
     switch (subject) {
+    /* The recorder's own API answers the narrower "was it mine?", and has no refusal to express;
+       content's answers all three, so a store that is not mounted or an update switched off comes
+       back REFUSED with its condition rather than counted as a serviced command. */
     case IOTDATA_NODE_TLV_DIAGNOSTICS:
-        return iotdata_node_diagnostics_control(subject, action, val, vlen);
+        return iotdata_node_control_result_of(iotdata_node_diagnostics_control(subject, action, val, vlen));
     case IOTDATA_NODE_TLV_CONTENT:
-        return iotdata_node_content_control(subject, action, val, vlen);
+        return iotdata_node_content_control(subject, action, val, vlen, reason);
     default:
-        return false; /* not ours: the node layer counts it unknown */
+        return IOTDATA_NODE_CONTROL_RESULT_UNKNOWN; /* not ours: the node layer counts it unknown */
     }
 }
 

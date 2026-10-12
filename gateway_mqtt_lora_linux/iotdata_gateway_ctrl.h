@@ -475,11 +475,11 @@ static void ctrl_content_say(const char *const line) {
         ctrl_respond_diag_source(st, "content", "content", line);
 }
 
-static bool ctrl_action_content(const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+static iotdata_node_control_result_t ctrl_action_content(const uint8_t action, const uint8_t *const val, const uint8_t vlen, const char **const reason) {
     const iotdata_node_content_emit_fn was = iotdata_node_content_emit_set(ctrl_content_say);
-    const bool handled = iotdata_node_content_control(IOTDATA_NODE_TLV_CONTENT, action, val, vlen);
+    const iotdata_node_control_result_t r = iotdata_node_content_control(IOTDATA_NODE_TLV_CONTENT, action, val, vlen, reason);
     (void)iotdata_node_content_emit_set(was);
-    return handled;
+    return r;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -604,21 +604,24 @@ static bool ctrl_action_diag(const uint8_t action, const uint8_t *const val, con
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool ctrl_from_iotdata(const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen) {
+static iotdata_node_control_result_t ctrl_from_iotdata(const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen, const char **const reason) {
     process_state_t *const st = g_exec;
     if (st == NULL)
-        return false;
+        return IOTDATA_NODE_CONTROL_RESULT_UNKNOWN;
     switch (subject) {
+    /* The mesh tables and the recorder have no refusals to express -- each verb either names
+       something this gateway keeps or does not -- so their bools widen to DONE or UNKNOWN. The
+       store's answers all three. */
     case IOTDATA_NODE_TLV_STATUS:
-        return ctrl_action_node(st, action, val, vlen);
+        return iotdata_node_control_result_of(ctrl_action_node(st, action, val, vlen));
     case IOTDATA_NODE_SUBJECT_MESH:
-        return ctrl_action_mesh(st, action, val, vlen);
+        return iotdata_node_control_result_of(ctrl_action_mesh(st, action, val, vlen));
     case IOTDATA_NODE_TLV_DIAGNOSTICS:
-        return ctrl_action_diag(action, val, vlen); /* the recorder is global: no process state */
+        return iotdata_node_control_result_of(ctrl_action_diag(action, val, vlen)); /* the recorder is global: no process state */
     case IOTDATA_NODE_TLV_CONTENT:
-        return ctrl_action_content(action, val, vlen); /* and so is the store */
+        return ctrl_action_content(action, val, vlen, reason); /* and so is the store */
     default:
-        return false; /* not ours: the node layer counts it unknown */
+        return IOTDATA_NODE_CONTROL_RESULT_UNKNOWN; /* not ours: the node layer counts it unknown */
     }
 }
 

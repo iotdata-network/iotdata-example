@@ -1953,7 +1953,7 @@ static bool test_mesh_node_table_report(void) {
     netw_note_receive(&ps.network, 0x0537, 4, 1, NETW_PATH_DIRECT, true, -48, 0, time(NULL));
     netw_note_receive(&ps.network, 0x06ED, 0, 1, NETW_PATH_DIRECT, true, -55, 0, time(NULL));
     stat_on_peer(&ss, 0x05BF, 7, 1, IOTDATA_MESH_FLAG_ACCEPTING);
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, (const uint8_t[]){ 0x0A, 0xF9, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK }, IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, (const uint8_t[]){ 0x0A, 0xF9, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK }, IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE, NULL));
 
     ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_STATUS_STATIONS_ENTRY), 2);
     ASSERT_EQ_INT(exec_node_table_count(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY), 1);
@@ -2492,14 +2492,14 @@ static bool test_mesh_node_filter_update_blocks_rx(void) {
     ASSERT(filter_allows(&ps.filter, 0x0537)); /* nothing filtered yet */
 
     const uint8_t block[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, block, (uint8_t)sizeof(block), NULL));
     ASSERT(!filter_allows(&ps.filter, 0x0537)); /* blocked */
     ASSERT(filter_allows(&ps.filter, 0x0538));  /* and only that one */
     ASSERT_EQ_INT(filter_count(&ps.filter), 1);
 
     /* NONE removes it: there is no separate remove command, by design */
     const uint8_t none[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, IOTDATA_NODE_CONTROL_NODE_FILTERS_NONE };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, none, (uint8_t)sizeof(none)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, none, (uint8_t)sizeof(none), NULL));
     ASSERT(filter_allows(&ps.filter, 0x0537));
     ASSERT_EQ_INT(filter_count(&ps.filter), 0);
     g_exec = NULL;
@@ -2515,7 +2515,7 @@ static bool test_mesh_node_block_drops_peer(void) {
     ASSERT_EQ_INT(ss.peers_count, 1);
 
     const uint8_t block[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, block, (uint8_t)sizeof(block)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, block, (uint8_t)sizeof(block), NULL));
     ASSERT_EQ_INT(ss.peers_count, 0);
     g_exec = NULL;
     return true;
@@ -2531,18 +2531,18 @@ static bool test_mesh_node_peers_update_and_clear(void) {
     ASSERT_EQ_INT(ss.peers_count, 2);
 
     const uint8_t forget[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0xBF, IOTDATA_NODE_CONTROL_MESH_PEER_NONE };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget), NULL));
     ASSERT_EQ_INT(ss.peers_count, 1);
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget))); /* again */
-    ASSERT_EQ_INT(ss.peers_count, 1);                                                                                             /* still 1: idempotent */
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_UPDATE, forget, (uint8_t)sizeof(forget), NULL)); /* again */
+    ASSERT_EQ_INT(ss.peers_count, 1);                                                                                                   /* still 1: idempotent */
 
     /* the hole a removal leaves must be reusable, or the table leaks slots */
     stat_on_peer(&ss, 0x0AF9, 1, 1, 0);
     ASSERT_EQ_INT(ss.peers_count, 2);
 
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR, NULL, 0));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR, NULL, 0, NULL));
     ASSERT_EQ_INT(ss.peers_count, 0);
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR, NULL, 0)); /* again */
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, IOTDATA_NODE_ACTION_MESH_PEERS_CLEAR, NULL, 0, NULL)); /* again */
     ASSERT_EQ_INT(ss.peers_count, 0);
     g_exec = NULL;
     return true;
@@ -2557,7 +2557,7 @@ static bool test_mesh_node_filter_update_takes_a_list(void) {
     const uint8_t three[3 * IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = {
         0x05, 0x37, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK, 0x05, 0x38, IOTDATA_NODE_CONTROL_NODE_FILTERS_BLOCK, 0x0A, 0xF9, IOTDATA_NODE_CONTROL_NODE_FILTERS_ALLOW,
     };
-    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, three, (uint8_t)sizeof(three)));
+    ASSERT(ctrl_from_iotdata(IOTDATA_NODE_TLV_STATUS, IOTDATA_NODE_ACTION_NODE_FILTERS_UPDATE, three, (uint8_t)sizeof(three), NULL));
     ASSERT_EQ_INT(filter_count(&ps.filter), 3);
     ASSERT(!filter_allows(&ps.filter, 0x0537));
     ASSERT(!filter_allows(&ps.filter, 0x0538));
@@ -2937,8 +2937,8 @@ static bool test_mesh_node_unimplemented_key_refused(void) {
     mesh_state_t ms;
     stat_state_t ss;
     mesh_node_test_state(&ps, &ms, &ss);
-    ASSERT(!ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, 0x7F, NULL, 0));                            /* a MESH action nobody defines */
-    ASSERT(!ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_NODE, IOTDATA_NODE_ACTION_NODE_REBOOT, NULL, 0)); /* the node layer's, not ours */
+    ASSERT(!ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_MESH, 0x7F, NULL, 0, NULL));                            /* a MESH action nobody defines */
+    ASSERT(!ctrl_from_iotdata(IOTDATA_NODE_SUBJECT_NODE, IOTDATA_NODE_ACTION_NODE_REBOOT, NULL, 0, NULL)); /* the node layer's, not ours */
     g_exec = NULL;
     return true;
 }
@@ -2981,7 +2981,7 @@ static bool test_mesh_node_control_keys_are_all_handled(void) {
     for (size_t i = 0; i + 1 < sizeof(ctrl_from_iotdata_keys); i += 2) {
         const uint8_t subject = ctrl_from_iotdata_keys[i], action = ctrl_from_iotdata_keys[i + 1];
         const uint8_t entry[IOTDATA_NODE_CONTROL_UPDATE_ENTRY_SIZE] = { 0x05, 0x37, 0x00 };
-        if (!ctrl_from_iotdata(subject, action, entry, (uint8_t)sizeof(entry))) {
+        if (!ctrl_from_iotdata(subject, action, entry, (uint8_t)sizeof(entry), NULL)) {
             printf("FAIL (advertised %02X/%02X is not handled)\n", subject, action);
             g_exec = NULL;
             g_ctrl = NULL;
