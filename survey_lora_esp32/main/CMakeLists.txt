@@ -1,6 +1,6 @@
 
 idf_component_register(
-    SRCS "app.c" "${IOTDATA_SRC_DEPEND_HPATCH}/hpatch_lite.c"
+    SRCS "app.c"
     PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_usb_serial_jtag esp_partition esp_hw_support esp_app_format esp_bootloader_format app_update nvs_flash vfs spiffs mbedtls
     INCLUDE_DIRS
         "."

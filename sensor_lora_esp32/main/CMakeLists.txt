@@ -14,7 +14,7 @@ if(NO_BATTERY_PROBE)
 endif()
 
 idf_component_register(
-    SRCS "app.c" "${IOTDATA_SRC_DEPEND_HPATCH}/hpatch_lite.c"
+    SRCS "app.c"
     PRIV_REQUIRES esp_timer esp_driver_gpio esp_driver_uart esp_driver_i2c esp_driver_usb_serial_jtag esp_adc esp_partition esp_hw_support esp_app_format esp_bootloader_format nvs_flash vfs spiffs app_update mbedtls
     INCLUDE_DIRS
         "."

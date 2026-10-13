@@ -55,16 +55,11 @@ SOURCES_DEPEND=\
     $(IOTDATA_SRC_LIBRARY_SOURCES)
 SOURCES=$(SOURCES_TARGET) $(SOURCES_DEPEND)
 
-# THE ONE SEAM THAT IS NOT HEADER-ONLY. d_module_hpatch.h is a wrapper over HPatchLite's two
-# entry points, and they live in a .c file -- so including the header is not enough, the engine
-# has to be compiled in. The esp32 projects say the same thing in their CMakeLists SRCS.
-#
-# Why this was not noticed until a -O0 build: at -O3 gcc never emits an unreferenced static
-# function, and nothing calls the patcher yet (the gateway does not run the facade's begin), so
-# _patch_apply was optimised away and its calls to hpatch_lite_open/_patch went with it. Drop the
-# optimiser -- `make CFLAGS_OPT=`, which is what a debug build does -- and the function appears,
-# along with two undefined references. The dependency was always real; -O3 was hiding it.
-SOURCES_EXTRA=$(IOTDATA_SRC_DEPEND_HPATCH)/hpatch_lite.c
+# NOTHING EXTRA TO COMPILE. HPatchLite's engine used to be named here (and in the esp32 projects'
+# SRCS) because d_module_hpatch.h is a wrapper over two entry points that live in a .c file;
+# iotdata_node_otaupdate.h now compiles that .c in itself, the way iotdata_node_diagnostics.h does
+# the blackbox, so every project gets the engine by including the header that assembles the update
+# path. Only the include path for hpatch_lite.h is still needed, above.
 
 TEST_MAIN=iotdata_gateway_test.c
 
