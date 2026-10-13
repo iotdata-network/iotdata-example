@@ -96,7 +96,7 @@ static inline uint16_t node_period_s(const node_state_t *const st, const uint8_t
 static int node_build_version(const node_state_t *st, uint8_t *buf, const size_t size) {
     iotdata_kvr_t kv;
     iotdata_kvr_init(&kv, buf, size);
-    return iotdata_node_version_pack(&kv, st->caps);
+    return iotdata_node_version_pack(&kv, &(const iotdata_node_version_t){ .caps = st->caps });
 }
 
 static int node_build_settings(const node_state_t *st, uint8_t *buf, const size_t size, const uint8_t *sel, const uint8_t sellen) {
@@ -137,6 +137,7 @@ static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t 
         s.reason = IOTDATA_NODE_REASON_UNKNOWN;
         if (st->status_mesh != NULL)
             st->status_mesh(&s.mesh);
+        s.has_image = iotdata_node_firmware_image_status(&s.image);
         if (st->table_count != NULL) {
             s.stations = st->table_count(IOTDATA_NODE_STATUS_STATIONS_ENTRY), s.has_stations = true;
             s.filters = st->table_count(IOTDATA_NODE_STATUS_FILTERS_ENTRY), s.has_filters = true;

@@ -467,7 +467,7 @@ bool app_init(void) {
     }
 
     char vbuf[IOTDATA_NODE_VERSION_STR_MAX + 1];
-    ESP_LOGI(__tag_app, "version: %s", iotdata_node_version_str(vbuf, sizeof(vbuf), &app_state.operating->caps));
+    ESP_LOGI(__tag_app, "version: %s", iotdata_node_version_str(vbuf, sizeof(vbuf), &(const iotdata_node_version_t){ .caps = &app_state.operating->caps }));
     if (!iotdata_node_version_stamp_is_real())
         ESP_LOGW(__tag_app, "version: build stamp is unset -- this binary cannot say when it was built");
 

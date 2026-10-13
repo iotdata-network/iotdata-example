@@ -2122,7 +2122,8 @@ static bool test_version_report_as_the_monitor_sees_it(void) {
     uint8_t kv[200];
     iotdata_kvr_t b;
     iotdata_kvr_init(&b, kv, sizeof(kv));
-    ASSERT(iotdata_node_version_pack(&b, &caps) > 0);
+    const iotdata_node_version_t self = { .caps = &caps };
+    ASSERT(iotdata_node_version_pack(&b, &self) > 0);
 
     cJSON *const root = cJSON_CreateObject();
     node_json_kvr(&ns, root, IOTDATA_NODE_TLV_VERSION, kv, b.len);
@@ -2145,6 +2146,20 @@ static bool test_version_report_as_the_monitor_sees_it(void) {
     ASSERT(strstr(out, "\"entries\"") != NULL);
     free(out);
     cJSON_Delete(root);
+
+    /* THE IMAGE HASH ARRIVES AS 16 RAW BYTES and must come out of the gateway as hex, because
+       that is what a manager and a person can both read. The gateway cannot hash its own binary,
+       so the key is absent from a report it packs for itself -- but it decodes reports from
+       DEVICES, which carry it. Fed by hand, because only a node can produce one. */
+    iotdata_kvr_init(&b, kv, sizeof(kv));
+    const uint8_t imagehash[IOTDATA_NODE_VERSION_IMAGE_BYTES] = { 0x9f, 0x86, 0xd0, 0x81, 0x88, 0x4c, 0x7d, 0x65, 0x9a, 0x2f, 0xea, 0xa0, 0xc5, 0x5a, 0xd0, 0x15 };
+    iotdata_kvr_add(&b, IOTDATA_NODE_VERSION_IMAGE, imagehash, (uint8_t)sizeof(imagehash));
+    cJSON *const img = cJSON_CreateObject();
+    node_json_kvr(&ns, img, IOTDATA_NODE_TLV_VERSION, kv, b.len);
+    char *const imgout = cJSON_PrintUnformatted(img);
+    ASSERT(imgout != NULL && strstr(imgout, "\"image\":\"9f86d081884c7d659a2feaa0c55ad015\"") != NULL);
+    free(imgout);
+    cJSON_Delete(img);
 
     /* a malformed value is reported as malformed rather than rendered as a guess */
     iotdata_kvr_init(&b, kv, sizeof(kv));

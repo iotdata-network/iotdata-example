@@ -437,7 +437,7 @@ int main(int argc, char *argv[]) {
     iotdata_node_version_caps_add(&state->iotd_caps, IOTDATA_NODE_VERSION_CAPS_RADIO, state->lora_config.module == LORA_MODULE_USB ? IOTDATA_NODE_VERSION_RADIO_E22_USB : IOTDATA_NODE_VERSION_RADIO_E22_DIP);
 
     char vbuf[IOTDATA_NODE_VERSION_STR_MAX + 1];
-    PRINTF_INFO("version: %s\n", iotdata_node_version_str(vbuf, sizeof(vbuf), &state->iotd_caps));
+    PRINTF_INFO("version: %s\n", iotdata_node_version_str(vbuf, sizeof(vbuf), &(const iotdata_node_version_t){ .caps = &state->iotd_caps }));
     if (!iotdata_node_version_stamp_is_real())
         PRINTF_WARN("version: build stamp is unset -- this binary cannot say when it was built\n");
 
