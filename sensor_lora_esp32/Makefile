@@ -2,17 +2,17 @@
 ##
 
 IOTDATA_SRC=../..
-include $(IOTDATA_SRC)/iotdata-common/make/config.mk
 include $(IOTDATA_SRC)/iotdata-depend/make/config.mk
+include $(IOTDATA_SRC)/iotdata-platform/make/config.mk
 
-IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
+IOTDATA_VARIANT=$(IOTDATA_SRC_PLATFORM)/include/iotdata_variant_weather_station.h
 IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_config.$(IOTDATA_HOST).h iotdata_config.$(IOTDATA_HOST).h))
 
 ##
 
 PLATFORM = esp32c3
 NAME     = sensor
-VERSION  = 0.9.9
+VERSION  = 0.9.10
 
 ##
 
@@ -28,11 +28,12 @@ SOURCES=$(SOURCES_TARGET) $(SOURCES_DEPEND)
 ##
 
 BUILDER_DEFS = \
-    -DIOTDATA_SRC_DEPEND_HPATCH=$(IOTDATA_SRC_DEPEND_HPATCH) \
     -DIOTDATA_SRC_LIBRARY=$(IOTDATA_SRC_LIBRARY) \
     -DIOTDATA_SRC_DEPEND_BLACKBOX=$(IOTDATA_SRC_DEPEND_BLACKBOX) \
+    -DIOTDATA_SRC_DEPEND_HPATCH=$(IOTDATA_SRC_DEPEND_HPATCH) \
+    -DIOTDATA_SRC_PLATFORM=$(IOTDATA_SRC_PLATFORM) \
     -DIOTDATA_SRC_EXAMPLE=$(IOTDATA_SRC_EXAMPLE) \
-    -DIOTDATA_SRC_COMMON=$(IOTDATA_SRC_COMMON) \
+    \
     -DIOTDATA_VARIANT=$(IOTDATA_VARIANT) \
     -DNO_SLEEP_DEEP=$(strip $(NO_SLEEP_DEEP)) \
     -DNO_BATTERY_PROBE=$(strip $(NO_BATTERY_PROBE))
@@ -42,7 +43,7 @@ endif
 
 ##
 
-include $(IOTDATA_SRC_COMMON)/make/target-esp32.mk
+include $(IOTDATA_SRC_PLATFORM)/make/target-esp32.mk
 
 ##
 

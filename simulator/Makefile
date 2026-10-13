@@ -2,10 +2,10 @@
 ##
 
 IOTDATA_SRC=../..
-include $(IOTDATA_SRC)/iotdata-common/make/config.mk
+include $(IOTDATA_SRC)/iotdata-platform/make/config.mk
 IOTDATA_SRC_EXAMPLE_SIMULATOR=$(IOTDATA_SRC_EXAMPLE)/simulator
 
-IOTDATA_VARIANT=$(IOTDATA_SRC_COMMON)/include/iotdata_variant_weather_station.h
+IOTDATA_VARIANT=$(IOTDATA_SRC_PLATFORM)/include/iotdata_variant_weather_station.h
 IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_config.$(IOTDATA_HOST).h iotdata_config.$(IOTDATA_HOST).h))
 
 ##
@@ -23,7 +23,7 @@ CFLAGS_DEFINES += -DIOTDATA_CONFIG='"$(abspath $(IOTDATA_CONFIG))"'
 endif
 CFLAGS_COMMON=$(IOTDATA_CFLAGS_COMMON)
 CFLAGS_OPT=$(IOTDATA_CFLAGS_OPT)
-CFLAGS_INCLUDES=-I$(IOTDATA_SRC_EXAMPLE)/include -I$(IOTDATA_SRC_LIBRARY) -I$(IOTDATA_SRC_COMMON)/include
+CFLAGS_INCLUDES=-I$(IOTDATA_SRC_EXAMPLE)/include -I$(IOTDATA_SRC_LIBRARY) -I$(IOTDATA_SRC_PLATFORM)/include
 CFLAGS= $(CFLAGS_COMMON) $(CFLAGS_DEFINES) $(CFLAGS_OPT) $(CFLAGS_INCLUDES)
 LDFLAGS=$(IOTDATA_LDFLAGS_COMMON)
 LIBS=$(IOTDATA_LIBS_COMMON)
@@ -34,12 +34,12 @@ TARGET=simulator
 MAIN=iotdata_variant_simulator.c
 SOURCES_TARGET=iotdata_variant_simulator.h
 SOURCES=$(SOURCES_TARGET) \
-    $(IOTDATA_SRC_COMMON)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
+    $(IOTDATA_SRC_PLATFORM)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
     $(IOTDATA_SRC_LIBRARY_SOURCES)
 
 ##
 
-include $(IOTDATA_SRC_COMMON)/make/target-linux.mk
+include $(IOTDATA_SRC_PLATFORM)/make/target-linux.mk
 
 ##
 

@@ -130,14 +130,12 @@
 #include "d_readings.h"
 #include "d_module_datastore_esp32.h"
 #include "d_module_filestore_esp32.h"
-/* the OTA seams: iotdata_node_otaupdate.h assembles these, and every node that uses the
-   framework has an update path, so every node includes them. None depends on an iotdata
-   header, so they sit here in the d_ block with the rest. */
 #include "d_module_otaslot_esp32.h"
 #include "d_module_inflate_esp32.h"
 #include "d_module_hpatch.h"
 #include "d_hardware_gpio.h"
 #include "d_hardware_uart.h"
+#include "d_hardware_timer.h"
 #include "d_interface_e22900t22.h"
 #include "d_interface_at6558.h"
 #include "d_interface_button.h"
@@ -322,7 +320,7 @@ static bool _app_config_apply(const uint8_t *const buf, const size_t len, bool *
 
 static void _app_node_status(__attribute__((unused)) const uint16_t station, iotdata_node_status_t *const out) {
     const state_operating_t *const s = app_state.operating;
-    out->uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    out->uptime_s = (uint32_t)(hw_time_ms() / 1000);
     out->reason = iotdata_node_reason_reset();
     out->has_heap = true;
     out->heap_free = (uint32_t)esp_get_free_heap_size();

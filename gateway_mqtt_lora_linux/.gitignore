@@ -5,5 +5,6 @@ node_modules
 package-lock.json
 iotdata_config.*.h
 monitor/iotdata_gateway_monitor.*.cfg
+*.o
 *.d
 *.buildinfo

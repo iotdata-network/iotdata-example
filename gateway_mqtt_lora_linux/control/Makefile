@@ -26,7 +26,7 @@ check: $(SCRIPT)
 # survey and survey-cancel are handled in the gateway's own ctrl_from_message rather than through
 # the control table. The header is absent in an installed copy, so a missing one skips the check
 # rather than failing it.
-VOCABULARY=../../../iotdata-common/include/iotdata_node_control.h
+VOCABULARY=../../../iotdata-platform/include/iotdata_node_control.h
 VOCABULARY_LOCAL=conf-set survey survey-cancel raw
 # BOTH DIRECTIONS, because only one of them was ever checked. A verb here that the node dropped is a
 # rename rotting, which this always caught. A verb the NODE has and this does not is a command that

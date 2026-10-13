@@ -1,5 +1,5 @@
 
-include ../iotdata-common/make/config.mk
+include ../iotdata-platform/make/config.mk
 
 NATIVE   = simulator gateway_mqtt_lora_linux
 EMBEDDED = simulator_lora_esp32 sensor_lora_esp32
@@ -31,7 +31,7 @@ config:
 	@echo "IOTDATA_SRC                   = $(IOTDATA_SRC)"
 	@echo "IOTDATA_SRC_LIBRARY           = $(IOTDATA_SRC_LIBRARY)"
 	@echo "IOTDATA_SRC_DEPEND            = $(IOTDATA_SRC_DEPEND)"
-	@echo "IOTDATA_SRC_COMMON            = $(IOTDATA_SRC_COMMON)"
+	@echo "IOTDATA_SRC_PLATFORM          = $(IOTDATA_SRC_PLATFORM)"
 	@echo "IOTDATA_SRC_EXAMPLE           = $(IOTDATA_SRC_EXAMPLE)"
 	@echo "IOTDATA_SRC_EXAMPLE_SIMULATOR = $(IOTDATA_SRC_EXAMPLE_SIMULATOR)"
 	@echo "IOTDATA_VARIANT               = $(IOTDATA_VARIANT)"

@@ -1,3 +1,5 @@
 simulator
 iotdata_config.*.h
+*.o
 *.d
+*.buildinfo
