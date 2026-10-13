@@ -116,12 +116,11 @@ static void survey_publish(survey_state_t *const st, const uint16_t directive_id
     cJSON *const root = cJSON_CreateObject();
     if (root == NULL)
         return;
-    char b_dir[4 + 1], b_obs[4 + 1], b_sta[4 + 1];
     cJSON_AddStringToObject(root, "type", "survey");
     cJSON_AddStringToObject(root, "cmd", "survey");
-    cJSON_AddStringToObject(root, "directive", snprintf_inline(b_dir, sizeof(b_dir), "%03" PRIX16, directive_id));
-    cJSON_AddStringToObject(root, "observer", snprintf_inline(b_obs, sizeof(b_obs), "%03" PRIX16, observer));
-    cJSON_AddStringToObject(root, "station", snprintf_inline(b_sta, sizeof(b_sta), "%03" PRIX16, station));
+    cJSON_AddNumberToObject(root, "directive", (double)directive_id);
+    cJSON_AddNumberToObject(root, "observer", (double)observer);
+    cJSON_AddNumberToObject(root, "station", (double)station);
     cJSON_AddNumberToObject(root, "seq", (double)sequence);
     /* OMITTED when there is no reading, rather than sent as a sentinel: anything that averages or
        plots an rssi column would fold a sentinel silently into the result. Saturation is a
@@ -140,7 +139,7 @@ static void survey_publish(survey_state_t *const st, const uint16_t directive_id
         cJSON_AddNumberToObject(root, "obs_lon", (double)observer_pos->longitude_e7 / 1e7);
         cJSON_AddNumberToObject(root, "obs_alt", (double)observer_pos->altitude_m);
     }
-    cJSON_AddNumberToObject(root, "ts", (double)time(NULL));
+    cJSON_AddNumberToObject(root, "time", (double)time(NULL));
     char *const out = cJSON_PrintUnformatted(root);
     if (out != NULL) {
         char topic[GW_TOPIC_STATION_MAX];
@@ -154,11 +153,10 @@ static void survey_publish_note(survey_state_t *const st, const char *const cmd,
     cJSON *const root = cJSON_CreateObject();
     if (root == NULL)
         return;
-    char idbuf[4 + 1];
     cJSON_AddStringToObject(root, "type", "survey");
     cJSON_AddStringToObject(root, "cmd", cmd);
     const uint16_t self = iotdata_node_station(st->inode);
-    cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, self));
+    cJSON_AddNumberToObject(root, "station", (double)self);
     cJSON_AddStringToObject(root, "text", text);
     char *const out = cJSON_PrintUnformatted(root);
     if (out != NULL) {

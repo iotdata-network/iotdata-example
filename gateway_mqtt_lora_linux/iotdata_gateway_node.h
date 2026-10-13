@@ -142,7 +142,6 @@ static int node_build_status(const node_state_t *st, uint8_t *buf, const size_t 
             s.stations = st->table_count(IOTDATA_NODE_STATUS_STATIONS_ENTRY), s.has_stations = true;
             s.filters = st->table_count(IOTDATA_NODE_STATUS_FILTERS_ENTRY), s.has_filters = true;
             s.content = st->table_count(IOTDATA_NODE_STATUS_CONTENT_ENTRY), s.has_content = true;
-            /* a table's size comes from the table, never from a second counter that could drift */
             s.mesh.peers = st->table_count(IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY);
         }
         if (iotdata_node_status_pack(&kv, &s, scope) < 0)
@@ -276,18 +275,17 @@ static void node_json_table_row(cJSON *const arr, const uint8_t entry, const uin
     cJSON *const o = cJSON_CreateObject();
     if (o == NULL)
         return;
-    char idbuf[4 + 1];
-    cJSON_AddStringToObject(o, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, iotdata_node_entry_get_u16(val, 0)));
+    cJSON_AddNumberToObject(o, "station", (double)iotdata_node_entry_get_u16(val, 0));
     switch (entry) {
     case IOTDATA_NODE_STATUS_STATIONS_ENTRY:
         cJSON_AddStringToObject(o, "kind", node_json_table_kind(val[2]));
         cJSON_AddNumberToObject(o, "variant", val[3]);
         cJSON_AddNumberToObject(o, "rssi", (double)(int8_t)val[4]);
-        cJSON_AddNumberToObject(o, "age", iotdata_node_entry_get_u16(val, 5));
-        cJSON_AddNumberToObject(o, "rx", iotdata_node_entry_get_u32(val, 7));
+        cJSON_AddNumberToObject(o, "age_secs", iotdata_node_entry_get_u16(val, 5));
+        cJSON_AddNumberToObject(o, "packets", iotdata_node_entry_get_u32(val, 7));
         break;
     case IOTDATA_NODE_STATUS_MESH_PEERS_ENTRY:
-        cJSON_AddStringToObject(o, "gateway", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, iotdata_node_entry_get_u16(val, 2)));
+        cJSON_AddNumberToObject(o, "gateway", (double)iotdata_node_entry_get_u16(val, 2));
         cJSON_AddNumberToObject(o, "cost", val[4]);
         cJSON_AddNumberToObject(o, "generation", iotdata_node_entry_get_u16(val, 5));
         cJSON_AddNumberToObject(o, "rssi", (double)(int8_t)val[7]);
@@ -416,9 +414,8 @@ static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, cons
 static void node_publish_from(node_state_t *st, const uint16_t station, const uint8_t type, const uint8_t *kvbuf, const size_t kvlen, const iotdata_node_partial_t *partial) {
     cJSON *root = cJSON_CreateObject();
     if (root) {
-        char buf[4 + 1];
         cJSON_AddStringToObject(root, "type", "node"); /* shares the subtree with the other kinds */
-        cJSON_AddStringToObject(root, "station", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, station));
+        cJSON_AddNumberToObject(root, "station", (double)station);
         cJSON_AddStringToObject(root, "tlv", iotdata_node_tlv_name(type) ? iotdata_node_tlv_name(type) : "?");
         if (partial != NULL) {
             cJSON *const jp = cJSON_AddObjectToObject(root, "_partial");

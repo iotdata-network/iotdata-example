@@ -46,14 +46,13 @@ static void trace_publish_note(trace_state_t *const st, const char *const text) 
     cJSON *const root = cJSON_CreateObject();
     if (root == NULL)
         return;
-    char idbuf[4 + 1];
     const uint16_t self = iotdata_node_station(st->inode);
     cJSON_AddStringToObject(root, "type", "trace");
     cJSON_AddStringToObject(root, "cmd", "trace");
     /* WHO IT IS FROM, which is us: it was missing here, and the topic is keyed on it */
-    cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, self));
+    cJSON_AddNumberToObject(root, "station", (double)self);
     cJSON_AddStringToObject(root, "note", text);
-    cJSON_AddNumberToObject(root, "ts", (double)time(NULL));
+    cJSON_AddNumberToObject(root, "time", (double)time(NULL));
     char *const out = cJSON_PrintUnformatted(root);
     if (out != NULL) {
         char topic[GW_TOPIC_STATION_MAX];
@@ -71,15 +70,14 @@ static void trace_publish(trace_state_t *const st, const iotdata_mesh_diag_t *co
     if (iotdata_mesh_unpack_diag_trace(buf, len, &tr)) {
         cJSON *const root = cJSON_CreateObject();
         if (root != NULL) {
-            char b_dir[4 + 1], b_sub[4 + 1], b_self[4 + 1];
-            const uint16_t self = iotdata_node_station(st->inode);
+                    const uint16_t self = iotdata_node_station(st->inode);
             cJSON_AddStringToObject(root, "type", "trace");
             cJSON_AddStringToObject(root, "cmd", "trace");
             /* WHO ANSWERED (us), as against the `subject` the trace is ABOUT -- the topic is keyed
                on this one, so a trace of F1B arrives on the gateway's topic, not on F1B's */
-            cJSON_AddStringToObject(root, "station", snprintf_inline(b_self, sizeof(b_self), "%03" PRIX16, self));
-            cJSON_AddStringToObject(root, "directive", snprintf_inline(b_dir, sizeof(b_dir), "%03" PRIX16, dg->directive_id));
-            cJSON_AddStringToObject(root, "subject", snprintf_inline(b_sub, sizeof(b_sub), "%03" PRIX16, tr.subject_station));
+            cJSON_AddNumberToObject(root, "station", (double)self);
+            cJSON_AddNumberToObject(root, "directive", (double)dg->directive_id);
+            cJSON_AddNumberToObject(root, "subject", (double)tr.subject_station);
             cJSON_AddStringToObject(root, "leg", ((tr.flags & IOTDATA_MESH_DIAG_TRACE_F_DOWN) != 0) ? "down" : "up");
             cJSON_AddStringToObject(root, "mode", ((tr.flags & IOTDATA_MESH_DIAG_TRACE_F_ONE) != 0) ? "one" : "all");
             /* Stated either way: "the path is complete" is a claim worth making, not an absence. */
@@ -98,8 +96,7 @@ static void trace_publish(trace_state_t *const st, const iotdata_mesh_diag_t *co
                     cJSON *const o = cJSON_CreateObject();
                     if (o == NULL)
                         break;
-                    char b_st[4 + 1];
-                    cJSON_AddStringToObject(o, "station", snprintf_inline(b_st, sizeof(b_st), "%03" PRIX16, h.station));
+                    cJSON_AddNumberToObject(o, "station", (double)h.station);
                     /* OMITTED rather than sent as a number: 0xFF means "has no gradient", which is what a
                        sensor or a roaming instrument is, and 255 would plot as a very distant relay. */
                     if (h.cost != IOTDATA_MESH_NBR_COST_SENSOR)
@@ -112,7 +109,7 @@ static void trace_publish(trace_state_t *const st, const iotdata_mesh_diag_t *co
                         cJSON_AddBoolToObject(o, "rssi_saturated", true);
                     cJSON_AddItemToArray(hops, o);
                 }
-            cJSON_AddNumberToObject(root, "ts", (double)time(NULL));
+            cJSON_AddNumberToObject(root, "time", (double)time(NULL));
             char *const out = cJSON_PrintUnformatted(root);
             if (out != NULL) {
                 char topic[GW_TOPIC_STATION_MAX];

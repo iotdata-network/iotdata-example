@@ -86,7 +86,7 @@ static ctrl_state_t *g_ctrl = NULL;
 
 /* Management messages are JSON under the management subtree (IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM),
    one level down per station -- `<prefix>/manage/from/<station>` -- sharing that subtree with the
-   node reports. THE SUFFIX IS ALWAYS THE PAYLOAD'S `station` FIELD (gateway_topic_for_station),
+   node reports. THE SUFFIX IS THE HEX OF THE PAYLOAD'S `station` (gateway_topic_for_station),
    so the topic and the body cannot disagree, and the field stays in the payload because a message
    that ends up in a log or a database should still say who it came from.
    Text that used to be published bare -- a blackbox status line, a record,
@@ -107,9 +107,8 @@ static ctrl_state_t *g_ctrl = NULL;
 
 static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
     if (root != NULL) {
-        char idbuf[4 + 1];
         const uint16_t station = iotdata_node_station(st->inode);
-        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, station));
+        cJSON_AddNumberToObject(root, "station", (double)station);
         char *const out = cJSON_PrintUnformatted(root);
         if (out != NULL) {
             char topic[GW_TOPIC_STATION_MAX];

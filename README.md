@@ -468,8 +468,12 @@ openscad -o gen_lora_i2c_case_base.stl -D 'part="base"' gen_lora_i2c_case.scad
 A Linux gateway that receives iotdata packets from an EBYTE E22-900T22U module
 (USB variant), decodes them to JSON, and publishes to MQTT. The variant byte in
 each packet header determines the MQTT topic automatically:
-`<prefix>/<variant_name>/<station_id>` (where station_id is the 4-digit 0-padded
+`<prefix>/variant/<variant_name>/<station>` (where station is the 3-digit 0-padded
 hex encoded 16-bit station identifier).
+
+The first segment after the prefix is always a category -- `variant` for telemetry,
+`manage` for the management channel, `stats` for the gateway's own counters -- so
+`<prefix>/variant/#` is every reading and nothing has to be excluded by name.
 
 Features:
 

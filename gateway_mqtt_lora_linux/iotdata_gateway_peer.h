@@ -8,7 +8,7 @@
 // configuration.
 //
 // exec/main owns MQTT here; ddup only exposes the lockable peer add/remove. Presence is published
-// retained to iotdata/ddup/<gwid> = {"ip":..,"port":..,"ts":<epoch>}; the LWT is an empty retained
+// retained to iotdata/ddup/<gwid> = {"ip":..,"port":..,"time":<epoch>}; the LWT is an empty retained
 // message (offline). The topic is fleet-bridged (iotdata/ddup/#, both directions), so every gateway
 // sees every other's address. On receipt we ddup_peer_insert/remove (keyed by gateway-id); our own
 // presence (the bridge echo) is ignored. The `ts` lets a peer be aged out when its box/bridge dies and
@@ -96,7 +96,9 @@ static void peer_presence_on_msg(void *ctx, const char *topic, const void *paylo
         return;
     const cJSON *jip = cJSON_GetObjectItem(j, "ip");
     const cJSON *jport = cJSON_GetObjectItem(j, "port");
-    const cJSON *jts = cJSON_GetObjectItem(j, "ts");
+    const cJSON *jts = cJSON_GetObjectItem(j, "time");
+    if (!cJSON_IsNumber(jts))
+        jts = cJSON_GetObjectItem(j, "ts");
     if (cJSON_IsString(jip) && jip->valuestring[0]) {
         const uint16_t port = cJSON_IsNumber(jport) ? (uint16_t)jport->valueint : pp->ddup->port;
         const time_t ts = cJSON_IsNumber(jts) ? (time_t)jts->valuedouble : 0; // 0 = un-stamped (legacy peer)
@@ -135,7 +137,7 @@ static void peer_presence_tick(peer_presence_t *pp, time_t now) {
         const bool changed = strcmp(ip, pp->last_ip) != 0;
         if (changed || pp->last_pub == 0 || (now - pp->last_pub) >= PEER_PRESENCE_REPUBLISH_SECS) {
             char payload[128];
-            const int n = snprintf(payload, sizeof(payload), "{\"ip\":\"%s\",\"port\":%u,\"ts\":%lld}", ip, (unsigned)pp->ddup->port, (long long)now);
+            const int n = snprintf(payload, sizeof(payload), "{\"ip\":\"%s\",\"port\":%u,\"time\":%lld}", ip, (unsigned)pp->ddup->port, (long long)now);
             if (mqtt_send_retained(pp->topic, payload, n)) {
                 if (changed)
                     PRINTF_INFO("ddup-peer: presence %s -> %s\n", pp->topic, payload);

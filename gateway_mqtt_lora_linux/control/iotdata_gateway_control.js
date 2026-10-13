@@ -17,11 +17,11 @@
 // Everything a station says comes back as JSON under <prefix>/manage/from/<station> -- an answer
 // to a request and a node's own periodic report arrive the same way -- and the "type" field
 // says what it is -- there is no topic per producer to keep track of:
-//   {"type":"node", "station":"05BF","tlv":"status","data":{...}}        a node TLV report
-//   {"type":"diag", "station":"0001","cmd":"diag","source":"blackbox","text":"..."}
-//   {"type":"diag", "station":"0001","cmd":"diag-dump","source":"blackbox","index":0,"record":"..."}
-//   {"type":"error","station":"0001","cmd":"node-foo","text":"unknown tlv 'foo'"}
-//   {"type":"survey","directive":"321","observer":"101","station":"537","seq":77,"rssi":-119,"snr":-10}
+//   {"type":"node", "station":1471,"tlv":"status","data":{...}}          a node TLV report
+//   {"type":"diag", "station":1,"cmd":"diag","source":"blackbox","text":"..."}
+//   {"type":"diag", "station":1,"cmd":"diag-dump","source":"blackbox","index":0,"record":"..."}
+//   {"type":"error","station":1,"cmd":"node-foo","text":"unknown tlv 'foo'"}
+//   {"type":"survey","directive":801,"observer":257,"station":1335,"seq":77,"rssi":-119,"snr":-10}
 //
 // A SURVEY is the one command here that is NOT a node CONTROL key. It is a mesh directive: it
 // asks every relay that takes it to report which packets it hears DIRECTLY from the named

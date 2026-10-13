@@ -325,14 +325,16 @@ static cJSON *stat_json_windows(const stat_ring_t *const r, const time_t now) {
 }
 
 cJSON *stat_build_links_json(const stat_state_t *const s, const time_t now, const mesh_state_t *const mesh) {
-    cJSON *root = cJSON_CreateObject(), *links = cJSON_AddArrayToObject(root, "links");
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "count", 1); /* one radio today; the shape does not assume it */
+    cJSON *links = cJSON_AddArrayToObject(root, "entries");
     {
         cJSON *link = cJSON_CreateObject();
         cJSON_AddStringToObject(link, "name", s->link.name ? s->link.name : "");
         cJSON_AddStringToObject(link, "type", s->link.type ? s->link.type : "");
         cJSON *config = cJSON_AddObjectToObject(link, "config");
-        cJSON_AddNumberToObject(config, "address", (double)s->link.address);
-        cJSON_AddNumberToObject(config, "network", (double)s->link.network);
+        cJSON_AddNumberToObject(config, "e22_address", (double)s->link.address);
+        cJSON_AddNumberToObject(config, "e22_network", (double)s->link.network);
         cJSON_AddNumberToObject(config, "channel", (double)s->link.channel);
         cJSON_AddNumberToObject(config, "frequency_khz", (double)s->link.frequency_khz);
         cJSON_AddNumberToObject(config, "packet_size_bytes", (double)s->link.packet_size_bytes);
@@ -364,7 +366,7 @@ cJSON *stat_build_links_json(const stat_state_t *const s, const time_t now, cons
 cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "count", (double)s->stations_count);
-    cJSON *arr = cJSON_AddArrayToObject(root, "stations");
+    cJSON *arr = cJSON_AddArrayToObject(root, "entries");
     /* by station id: a station keeps its line between two snapshots (iotdata_node_utils.h) */
     iotdata_node_order_t ord[sizeof(s->stations) / sizeof(s->stations[0])];
     int ordered = 0;
@@ -373,11 +375,11 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
     for (int k = 0; k < ordered; k++) {
         const stat_station_t *st = &s->stations[ord[k].slot];
         cJSON *o = cJSON_CreateObject();
-        char buf[4 + 1];
-        cJSON_AddStringToObject(o, "id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, st->station_id));
+        cJSON_AddNumberToObject(o, "station", (double)st->station_id);
         cJSON_AddNumberToObject(o, "first_seen", (double)st->first_seen);
         cJSON_AddNumberToObject(o, "last_seen", (double)st->last_seen);
-        cJSON_AddNumberToObject(o, "age_secs", (double)(now - st->last_seen));
+        if (st->last_seen != 0)
+            cJSON_AddNumberToObject(o, "age_secs", (double)(now - st->last_seen));
         cJSON_AddNumberToObject(o, "packets", (double)st->packet_count);
         cJSON_AddNumberToObject(o, "bytes", (double)st->bytes_rx);
         cJSON_AddNumberToObject(o, "missed", (double)st->stat_missed);
@@ -407,9 +409,7 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
     if (mesh) {
         cJSON *m = cJSON_AddObjectToObject(root, "mesh");
         cJSON_AddBoolToObject(m, "enabled", mesh->enabled);
-        char buf[4 + 1];
-        cJSON_AddStringToObject(m, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, iotdata_node_station(mesh->inode)));
-        cJSON_AddNumberToObject(m, "beacons_tx", (double)mesh->stat_beacons_tx);
+        cJSON_AddNumberToObject(m, "station", (double)iotdata_node_station(mesh->inode));
         /* per frame type: only types actually seen are emitted, so the object stays small on a
            quiet link but gains a key the first time a new type appears */
         cJSON *const frames = cJSON_AddObjectToObject(m, "frames");
@@ -419,13 +419,13 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
                 if (c->rx > 0 || c->err > 0) {
                     cJSON *const ft = cJSON_AddObjectToObject(frames, iotdata_mesh_ctrl_name((uint8_t)t));
                     if (ft != NULL) {
-                        cJSON_AddNumberToObject(ft, "rx", (double)c->rx);
-                        cJSON_AddNumberToObject(ft, "err", (double)c->err);
+                        cJSON_AddNumberToObject(ft, "packets", (double)c->rx);
+                        cJSON_AddNumberToObject(ft, "errors", (double)c->err);
                         cJSON_AddNumberToObject(ft, "bytes", (double)c->bytes);
                     }
                 }
             }
-        cJSON_AddNumberToObject(m, "rx", (double)mesh_stat_total(mesh, false));
+        cJSON_AddNumberToObject(m, "rx_packets", (double)mesh_stat_total(mesh, false));
         cJSON_AddNumberToObject(m, "rx_errors", (double)mesh_stat_total(mesh, true));
         cJSON_AddNumberToObject(m, "rx_runts", (double)mesh->stat_ctrl_runt);
         cJSON_AddNumberToObject(m, "forwards_unwrapped", (double)mesh->stat_forwards_unwrapped);
@@ -443,7 +443,7 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         for (int k = 0; k < ordered_peer; k++) {
             const stat_peer_t *const e = &s->peers[ord_peer[k].slot];
             cJSON *p = cJSON_CreateObject();
-            cJSON_AddStringToObject(p, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, e->station_id));
+            cJSON_AddNumberToObject(p, "station", (double)e->station_id);
             cJSON_AddNumberToObject(p, "generation", (double)e->generation);
             cJSON_AddNumberToObject(p, "cost", (double)e->cost);
             cJSON_AddNumberToObject(p, "flags", (double)e->flags);
@@ -503,7 +503,8 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
 }
 
 cJSON *stat_build_variants_json(const stat_state_t *const s, const time_t now) {
-    cJSON *root = cJSON_CreateObject(), *arr = cJSON_AddArrayToObject(root, "variants");
+    cJSON *root = cJSON_CreateObject(), *arr = cJSON_AddArrayToObject(root, "entries");
+    int counted = 0;
     for (int v = 0; v < (int)(sizeof(s->variants) / sizeof(s->variants[0])); v++) {
         const stat_variant_t *const e = &s->variants[v];
         if (e->packet_count > 0 || e->decode_errors > 0 || e->process_errors > 0) {
@@ -516,21 +517,24 @@ cJSON *stat_build_variants_json(const stat_state_t *const s, const time_t now) {
             cJSON_AddNumberToObject(o, "decode_errors", (double)e->decode_errors);
             cJSON_AddNumberToObject(o, "process_errors", (double)e->process_errors);
             cJSON_AddNumberToObject(o, "last_seen", (double)e->last_seen);
-            cJSON_AddNumberToObject(o, "age_secs", (double)(e->last_seen ? (now - e->last_seen) : 0));
+            if (e->last_seen != 0)
+                cJSON_AddNumberToObject(o, "age_secs", (double)(now - e->last_seen));
             cJSON_AddItemToObject(o, "windows", stat_json_windows(&e->ring, now));
             cJSON_AddItemToArray(arr, o);
+            counted++;
         }
     }
+    cJSON_AddNumberToObject(root, "count", (double)counted);
     return root;
 }
 
 cJSON *stat_build_mqtt_json(__attribute__((unused)) const stat_state_t *const s, __attribute__((unused)) const time_t now) {
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "connected_state", mqtt_is_connected());
-    cJSON_AddNumberToObject(root, "connected_time", (double)mqtt_stat_last_connect_time);
-    cJSON_AddNumberToObject(root, "connected", (double)mqtt_stat_connects);
-    cJSON_AddNumberToObject(root, "disconnected", (double)mqtt_stat_disconnects);
-    cJSON_AddNumberToObject(root, "reconnected", (double)mqtt_stat_reconnects);
+    cJSON_AddBoolToObject(root, "connected", mqtt_is_connected());
+    cJSON_AddNumberToObject(root, "connected_since", (double)mqtt_stat_last_connect_time);
+    cJSON_AddNumberToObject(root, "connects", (double)mqtt_stat_connects);
+    cJSON_AddNumberToObject(root, "disconnects", (double)mqtt_stat_disconnects);
+    cJSON_AddNumberToObject(root, "reconnects", (double)mqtt_stat_reconnects);
     cJSON_AddNumberToObject(root, "published", (double)mqtt_stat_publishes);
     cJSON_AddNumberToObject(root, "published_bytes", (double)mqtt_stat_publish_bytes);
     cJSON_AddNumberToObject(root, "published_errors", (double)mqtt_stat_publish_errors);
@@ -540,8 +544,7 @@ cJSON *stat_build_mqtt_json(__attribute__((unused)) const stat_state_t *const s,
 cJSON *stat_build_stat_json(const stat_state_t *const s, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
     const time_t now = time(NULL);
     cJSON *root = cJSON_CreateObject();
-    char buf[4 + 1];
-    cJSON_AddStringToObject(root, "station_id", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, iotdata_node_station(s->inode)));
+    cJSON_AddNumberToObject(root, "station", (double)iotdata_node_station(s->inode));
     cJSON_AddStringToObject(root, "version", s->version ? s->version : "");
     cJSON_AddNumberToObject(root, "time", (double)now);
     cJSON_AddNumberToObject(root, "uptime_secs", (double)(now - s->start_time));
@@ -643,7 +646,10 @@ void stat_publish(stat_state_t *const s, const mesh_state_t *const mesh, const d
         cJSON_Delete(root);
         if (json) {
             const char *const mqtt_topic = iotdata_node_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX);
-            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s%s%03" PRIX16, mqtt_topic, (mqtt_topic[0] != '\0' && mqtt_topic[strlen(mqtt_topic) - 1] == '/') ? "" : "/", iotdata_node_station(s->inode)), json,
+            /* `<prefix>/gateway/<station>`, so the level below `stats` is always a KIND -- the
+               network table publishes to `<prefix>/network/<station>` and this used to publish
+               straight to `<prefix>/<station>`, which left one level meaning two things. */
+            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s%sgateway/%03" PRIX16, mqtt_topic, (mqtt_topic[0] != '\0' && mqtt_topic[strlen(mqtt_topic) - 1] == '/') ? "" : "/", iotdata_node_station(s->inode)), json,
                             (int)strlen(json));
             free(json);
         }

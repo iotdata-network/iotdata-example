@@ -2049,8 +2049,10 @@ static bool test_table_report_json(void) {
     /* the whole table's count, and a row decoded into named fields */
     ASSERT(strstr(out, "\"mesh_peers_count\":1") != NULL);
     ASSERT(strstr(out, "\"peers\":[") != NULL);
-    ASSERT(strstr(out, "\"station\":\"F1B\"") != NULL); /* 3 hex digits: a station is 12 bits */
-    ASSERT(strstr(out, "\"gateway\":\"001\"") != NULL); /* survived the NUL */
+    /* NUMERIC IN JSON, hex only where a person reads it (topics, log lines, the console): a
+       document a program parses should not make it parse a base too. 0xF1B == 3867, 0x001 == 1. */
+    ASSERT(strstr(out, "\"station\":3867") != NULL);
+    ASSERT(strstr(out, "\"gateway\":1") != NULL); /* survived the NUL */
     ASSERT(strstr(out, "\"cost\":1") != NULL);
     ASSERT(strstr(out, "\"rssi\":-42") != NULL);
     ASSERT(strstr(out, "\"accepting\":true") != NULL);

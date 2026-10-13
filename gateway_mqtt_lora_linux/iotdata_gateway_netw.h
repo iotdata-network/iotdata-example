@@ -104,13 +104,13 @@ typedef struct {
 const char *netw_kind_name(netw_kind_t k) {
     switch (k) {
     case NETW_KIND_GATEWAY:
-        return "GATE";
+        return "gateway";
     case NETW_KIND_RELAY:
-        return "RLAY";
+        return "relay";
     case NETW_KIND_SENSOR:
-        return "SENS";
+        return "sensor";
     default:
-        return "?";
+        return "unknown";
     }
 }
 
@@ -367,11 +367,13 @@ static cJSON *netw_build_json(const netw_t *const n, const uint16_t gateway_id, 
     cJSON *const root = cJSON_CreateObject();
     if (root == NULL)
         return NULL;
-    char idbuf[8];
-    cJSON_AddStringToObject(root, "gateway", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, gateway_id));
+    cJSON_AddNumberToObject(root, "station", (double)gateway_id);
     cJSON_AddNumberToObject(root, "time", (double)now);
-    cJSON_AddNumberToObject(root, "stations", (double)n->count);
-    cJSON *const arr = cJSON_AddArrayToObject(root, "network");
+    cJSON *const net = cJSON_AddObjectToObject(root, "network");
+    if (net == NULL)
+        return root;
+    cJSON_AddNumberToObject(net, "count", (double)n->count);
+    cJSON *const arr = cJSON_AddArrayToObject(net, "entries");
     if (arr == NULL)
         return root;
     for (int i = 0; i < n->count; i++) {
@@ -379,23 +381,24 @@ static cJSON *netw_build_json(const netw_t *const n, const uint16_t gateway_id, 
         cJSON *const o = cJSON_CreateObject();
         if (o == NULL)
             break;
-        cJSON_AddStringToObject(o, "id", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, e->station));
+        cJSON_AddNumberToObject(o, "station", (double)e->station);
         cJSON_AddStringToObject(o, "kind", netw_kind_name(e->kind));
-        cJSON_AddNumberToObject(o, "age_secs", (double)(now - e->last_seen));
-        cJSON_AddNumberToObject(o, "rx", (double)e->rx_count);
+        if (e->last_seen != 0)
+            cJSON_AddNumberToObject(o, "age_secs", (double)(now - e->last_seen));
+        cJSON_AddNumberToObject(o, "packets", (double)e->rx_count);
         if (e->rssi < 0)
             cJSON_AddNumberToObject(o, "rssi", (double)e->rssi); /* what WE hear it at */
         if (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) {
             cJSON_AddNumberToObject(o, "cost", (double)e->cost);
             cJSON_AddBoolToObject(o, "accepting", e->accepting);
-            cJSON_AddStringToObject(o, "gw", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, e->gateway));
+            cJSON_AddNumberToObject(o, "gateway", (double)e->gateway);
             cJSON_AddNumberToObject(o, "beacons", (double)e->beacon_rx);
             cJSON_AddNumberToObject(o, "forwards", (double)e->fwd_sent);
         }
         /* the other end of the stick: how well the best relay hears this station */
         if (e->relay_rssi < 0) {
             cJSON_AddNumberToObject(o, "relay_rssi", (double)e->relay_rssi);
-            cJSON_AddStringToObject(o, "relay_rssi_from", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, e->relay_rssi_from));
+            cJSON_AddNumberToObject(o, "relay_rssi_from", (double)e->relay_rssi_from);
         }
         if (e->hears_count > 0) {
             cJSON *const hears = cJSON_AddArrayToObject(o, "hears");
@@ -403,8 +406,9 @@ static cJSON *netw_build_json(const netw_t *const n, const uint16_t gateway_id, 
                 cJSON *const hh = cJSON_CreateObject();
                 if (hh == NULL)
                     break;
-                cJSON_AddStringToObject(hh, "id", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, e->hears[k].station));
-                cJSON_AddNumberToObject(hh, "cost", (double)e->hears[k].cost);
+                cJSON_AddNumberToObject(hh, "station", (double)e->hears[k].station);
+                if (e->hears[k].cost != IOTDATA_MESH_NBR_COST_SENSOR)
+                    cJSON_AddNumberToObject(hh, "cost", (double)e->hears[k].cost);
                 if (e->hears[k].rssi < 0)
                     cJSON_AddNumberToObject(hh, "rssi", (double)e->hears[k].rssi);
                 cJSON_AddItemToArray(hears, hh);
@@ -459,7 +463,7 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
     for (int k = 0; k < ordered; k++) {
         const netw_station_t *e = &n->s[ord[k].slot];
         if (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) {
-            PRINTF_INFO("      %03" PRIX16 " %-4s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%" PRIu8 " gen=%" PRIu8 " gw=%03" PRIX16 "%s\n", e->station,
+            PRINTF_INFO("      %03" PRIX16 " %-7s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%" PRIu8 " gen=%" PRIu8 " gw=%03" PRIX16 "%s\n", e->station,
                         netw_kind_name(e->kind), e->rssi, (long)(now - e->last_seen), e->tx.rx, e->tx.gaps, netw_rate_per_min(e->tx.rx, e->first_seen, now), e->beacon_rx, e->fwd_sent, netw_rate_per_min(e->fwd_sent, e->first_seen, now),
                         e->accepting ? 'Y' : 'N', e->cost, e->generation, e->gateway, netw_hears_format(e, n->_buffer_hears, sizeof(n->_buffer_hears)));
         }
@@ -468,7 +472,7 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
         const netw_station_t *e = &n->s[ord[k].slot];
         if (!(e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) && !netw_is_stale(e, now)) {
             char via[80], rly[40];
-            PRINTF_INFO("      %03" PRIX16 " %-4s rssi=%ddBm%s age=%lds var=%" PRIu8 " uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32
+            PRINTF_INFO("      %03" PRIX16 " %-7s rssi=%ddBm%s age=%lds var=%" PRIu8 " uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32
                         ")%s\n",
                         e->station, netw_kind_name(e->kind), e->rssi, e->relay_rssi != 0 ? snprintf_inline(rly, sizeof(rly), " relay=%ddBm(%03" PRIX16 ")", e->relay_rssi, e->relay_rssi_from) : "", (long)(now - e->last_seen), e->variant,
                         e->uniq.rx, e->uniq.gaps, netw_loss_pct(e->uniq.gaps, e->uniq.rx), netw_rate_per_min(e->uniq.rx, e->first_seen, now), e->direct.rx, e->direct.dup, e->direct.gaps, e->mesh.rx, e->mesh.dup, e->mesh.gaps,
