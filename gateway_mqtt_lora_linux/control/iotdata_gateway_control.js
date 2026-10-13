@@ -14,17 +14,18 @@
 // vocabulary of its own; it is not any more.) Add a command by adding a CONTROL key
 // there and a line for it in the gateway's ctrl_on_message.
 //
-// Every response comes back as JSON on ONE topic, <prefix>/manage/resp, and the "resp" field
+// Everything a station says comes back as JSON under <prefix>/manage/from/<station> -- an answer
+// to a request and a node's own periodic report arrive the same way -- and the "type" field
 // says what it is -- there is no topic per producer to keep track of:
-//   {"resp":"node", "station":"05BF","tlv":"status","data":{...}}        a node TLV report
-//   {"resp":"diag", "station":"0001","cmd":"diag","source":"blackbox","text":"..."}
-//   {"resp":"diag", "station":"0001","cmd":"diag-dump","source":"blackbox","index":0,"record":"..."}
-//   {"resp":"error","station":"0001","cmd":"node-foo","text":"unknown tlv 'foo'"}
-//   {"resp":"survey","directive":"321","observer":"101","station":"537","seq":77,"rssi":-119,"snr":-10}
+//   {"type":"node", "station":"05BF","tlv":"status","data":{...}}        a node TLV report
+//   {"type":"diag", "station":"0001","cmd":"diag","source":"blackbox","text":"..."}
+//   {"type":"diag", "station":"0001","cmd":"diag-dump","source":"blackbox","index":0,"record":"..."}
+//   {"type":"error","station":"0001","cmd":"node-foo","text":"unknown tlv 'foo'"}
+//   {"type":"survey","directive":"321","observer":"101","station":"537","seq":77,"rssi":-119,"snr":-10}
 //
 // A SURVEY is the one command here that is NOT a node CONTROL key. It is a mesh directive: it
 // asks every relay that takes it to report which packets it hears DIRECTLY from the named
-// stations, and at what margin. Observations stream back on the same response topic, one per
+// stations, and at what margin. Observations stream back on the same management subtree, one per
 // observer per packet -- join them on {station, seq} to get the reception pattern for a single
 // transmission. An observer reporting zero for a window says so in words; that is a result (no
 // coverage there) and not the same as a relay that never got the directive and stays silent.
@@ -486,7 +487,7 @@ async function main() {
     if (opts.watch > 0) {
         const watchTopic = `${opts.prefix}/#`;
         const convert = opts.definitions ? makeRecordConverter(opts.definitions) : null;
-        display.log(`watching ${watchTopic} for ${opts.watch}s  (responses arrive on ${opts.prefix}/manage/resp as JSON; table dumps go to the target's own console)`);
+        display.log(`watching ${watchTopic} for ${opts.watch}s  (replies and reports arrive on ${opts.prefix}/manage/from/<station> as JSON; table dumps go to the target's own console)`);
         client.on('message', (topic, msg) => {
             const text = msg.toString();
             display.log(`<- ${topic}  ${convert ? convertResponse(text, convert) : text}`);

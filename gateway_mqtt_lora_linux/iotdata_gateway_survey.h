@@ -13,7 +13,7 @@
 //      the survey and the easiest to forget to collect;
 //   3. COLLECT what the relays send back and publish it.
 //
-// EVERYTHING COMES BACK ON ONE TOPIC, the management response channel, as {"resp":"survey"}. A
+// EVERYTHING COMES BACK ON ONE SUBTREE, the management channel, as {"type":"survey"}. A
 // survey produces a stream of small facts from several places at once, and giving each observer
 // its own topic would make a client reassemble by subscription rather than by reading a field.
 //
@@ -62,7 +62,7 @@ typedef struct {
 typedef struct survey_state_s {
     iotdata_node_t *inode;
     buffer_pool_t *pool;
-    char topic_resp[128];
+    char topic_from[128];
     gw_survey_directive_t d[GW_SURVEY_DIRECTIVES_MAX];
     buffer_queue_t queue;
     buffer_queue_entry_t queue_slot[GW_SURVEY_QUEUE_MAX];
@@ -117,7 +117,7 @@ static void survey_publish(survey_state_t *const st, const uint16_t directive_id
     if (root == NULL)
         return;
     char b_dir[4 + 1], b_obs[4 + 1], b_sta[4 + 1];
-    cJSON_AddStringToObject(root, "resp", "survey");
+    cJSON_AddStringToObject(root, "type", "survey");
     cJSON_AddStringToObject(root, "cmd", "survey");
     cJSON_AddStringToObject(root, "directive", snprintf_inline(b_dir, sizeof(b_dir), "%03" PRIX16, directive_id));
     cJSON_AddStringToObject(root, "observer", snprintf_inline(b_obs, sizeof(b_obs), "%03" PRIX16, observer));
@@ -143,7 +143,8 @@ static void survey_publish(survey_state_t *const st, const uint16_t directive_id
     cJSON_AddNumberToObject(root, "ts", (double)time(NULL));
     char *const out = cJSON_PrintUnformatted(root);
     if (out != NULL) {
-        (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
+        char topic[GW_TOPIC_STATION_MAX];
+        (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, station), out, (int)strlen(out));
         free(out);
     }
     cJSON_Delete(root);
@@ -154,13 +155,15 @@ static void survey_publish_note(survey_state_t *const st, const char *const cmd,
     if (root == NULL)
         return;
     char idbuf[4 + 1];
-    cJSON_AddStringToObject(root, "resp", "survey");
+    cJSON_AddStringToObject(root, "type", "survey");
     cJSON_AddStringToObject(root, "cmd", cmd);
-    cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, iotdata_node_station(st->inode)));
+    const uint16_t self = iotdata_node_station(st->inode);
+    cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, self));
     cJSON_AddStringToObject(root, "text", text);
     char *const out = cJSON_PrintUnformatted(root);
     if (out != NULL) {
-        (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
+        char topic[GW_TOPIC_STATION_MAX];
+        (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, self), out, (int)strlen(out));
         free(out);
     }
     cJSON_Delete(root);
@@ -368,7 +371,7 @@ static void survey_begin(survey_state_t *const st, const char *const topic_prefi
     st->pool = pool;
     buffer_queue_init(&st->queue, st->queue_slot, GW_SURVEY_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, survey_tag_name);
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
+    snprintf(st->topic_from, sizeof(st->topic_from), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM, topic_prefix);
 }
 
 static void survey_end(survey_state_t *const st) {

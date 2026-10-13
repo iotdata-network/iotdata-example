@@ -29,7 +29,7 @@
 typedef struct trace_state_s {
     iotdata_node_t *inode;
     buffer_pool_t *pool;
-    char topic_resp[128];
+    char topic_from[128];
     buffer_queue_t queue;
     buffer_queue_entry_t queue_slot[GW_TRACE_QUEUE_MAX];
     uint16_t next_id;
@@ -46,13 +46,18 @@ static void trace_publish_note(trace_state_t *const st, const char *const text) 
     cJSON *const root = cJSON_CreateObject();
     if (root == NULL)
         return;
-    cJSON_AddStringToObject(root, "resp", "trace");
+    char idbuf[4 + 1];
+    const uint16_t self = iotdata_node_station(st->inode);
+    cJSON_AddStringToObject(root, "type", "trace");
     cJSON_AddStringToObject(root, "cmd", "trace");
+    /* WHO IT IS FROM, which is us: it was missing here, and the topic is keyed on it */
+    cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, self));
     cJSON_AddStringToObject(root, "note", text);
     cJSON_AddNumberToObject(root, "ts", (double)time(NULL));
     char *const out = cJSON_PrintUnformatted(root);
     if (out != NULL) {
-        (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
+        char topic[GW_TOPIC_STATION_MAX];
+        (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, self), out, (int)strlen(out));
         free(out);
     }
     cJSON_Delete(root);
@@ -66,9 +71,13 @@ static void trace_publish(trace_state_t *const st, const iotdata_mesh_diag_t *co
     if (iotdata_mesh_unpack_diag_trace(buf, len, &tr)) {
         cJSON *const root = cJSON_CreateObject();
         if (root != NULL) {
-            char b_dir[4 + 1], b_sub[4 + 1];
-            cJSON_AddStringToObject(root, "resp", "trace");
+            char b_dir[4 + 1], b_sub[4 + 1], b_self[4 + 1];
+            const uint16_t self = iotdata_node_station(st->inode);
+            cJSON_AddStringToObject(root, "type", "trace");
             cJSON_AddStringToObject(root, "cmd", "trace");
+            /* WHO ANSWERED (us), as against the `subject` the trace is ABOUT -- the topic is keyed
+               on this one, so a trace of F1B arrives on the gateway's topic, not on F1B's */
+            cJSON_AddStringToObject(root, "station", snprintf_inline(b_self, sizeof(b_self), "%03" PRIX16, self));
             cJSON_AddStringToObject(root, "directive", snprintf_inline(b_dir, sizeof(b_dir), "%03" PRIX16, dg->directive_id));
             cJSON_AddStringToObject(root, "subject", snprintf_inline(b_sub, sizeof(b_sub), "%03" PRIX16, tr.subject_station));
             cJSON_AddStringToObject(root, "leg", ((tr.flags & IOTDATA_MESH_DIAG_TRACE_F_DOWN) != 0) ? "down" : "up");
@@ -106,7 +115,8 @@ static void trace_publish(trace_state_t *const st, const iotdata_mesh_diag_t *co
             cJSON_AddNumberToObject(root, "ts", (double)time(NULL));
             char *const out = cJSON_PrintUnformatted(root);
             if (out != NULL) {
-                (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
+                char topic[GW_TOPIC_STATION_MAX];
+                (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, self), out, (int)strlen(out));
                 free(out);
             }
             cJSON_Delete(root);
@@ -251,7 +261,7 @@ static void trace_begin(trace_state_t *const st, const char *const topic_prefix,
     st->pool = pool;
     buffer_queue_init(&st->queue, st->queue_slot, GW_TRACE_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, trace_tag_name);
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
+    snprintf(st->topic_from, sizeof(st->topic_from), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM, topic_prefix);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

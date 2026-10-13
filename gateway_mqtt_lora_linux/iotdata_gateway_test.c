@@ -2101,7 +2101,7 @@ static bool test_text_values_still_render_as_strings(void) {
     return true;
 }
 
-/* What a `vers` request actually puts on manage/resp. The four buckets arrive as strings, and
+/* What a `vers` request actually puts on manage/from. The four buckets arrive as strings, and
    capabilities -- 16-bit entries, so hex by any generic rule -- must arrive DECODED, or whoever
    asked has to own a copy of the bit registry to read the answer. */
 static bool test_version_report_as_the_monitor_sees_it(void) {
@@ -2305,8 +2305,8 @@ static bool test_ctrl_response_topic_is_shared(void) {
     (void)ctrl_begin(&st, "pre", &t_inode, &sv, &tv, &t_pool);
 
     ASSERT(strcmp(st.topic_req, "pre/manage/req") == 0);
-    ASSERT(strcmp(st.topic_resp, "pre/manage/resp") == 0);
-    ASSERT(strcmp(ns.topic_resp, st.topic_resp) == 0);
+    ASSERT(strcmp(st.topic_from, "pre/manage/from") == 0);
+    ASSERT(strcmp(ns.topic_from, st.topic_from) == 0);
     return true;
 }
 
@@ -2431,6 +2431,20 @@ static bool test_ctrl_staged_command_expires(void) {
    unsigned delta of 4.29 billion does both. The two properties that make that impossible are
    asserted here: the FIRST tick advances nothing however large now_ms already is, and every tick
    after it advances by exactly the difference. */
+/* THE RESPONSE TOPIC IS KEYED THE SAME WAY THE TELEMETRY TOPIC IS. A station rendered any other
+   way -- lower case, un-padded, decimal -- would put a node's answers somewhere a subscriber
+   watching its telemetry would never think to look, and nothing else would complain. */
+static bool test_manage_from_topic_is_keyed_by_station(void) {
+    char topic[GW_TOPIC_STATION_MAX];
+    ASSERT(strcmp(gateway_topic_for_station(topic, sizeof(topic), "iotdata/manage/from", 0xF1B), "iotdata/manage/from/F1B") == 0);
+    /* three digits, zero-padded and upper case, exactly as the telemetry topic spells it */
+    ASSERT(strcmp(gateway_topic_for_station(topic, sizeof(topic), "iotdata/manage/from", 0x001), "iotdata/manage/from/001") == 0);
+    ASSERT(strcmp(gateway_topic_for_station(topic, sizeof(topic), "iotdata/manage/from", 0xABC), "iotdata/manage/from/ABC") == 0);
+    /* and the prefix is whatever the deployment uses, not a literal */
+    ASSERT(strcmp(gateway_topic_for_station(topic, sizeof(topic), "site7/manage/from", 0x445), "site7/manage/from/445") == 0);
+    return true;
+}
+
 static bool test_diagnostics_clock_is_monotonic_and_seeded(void) {
     ASSERT(iotdata_node_diagnostics_begin(0, true));
     blackbox_handle_t *const h = iotdata_node_diagnostics_handle();
@@ -3398,6 +3412,7 @@ int main(void) {
     RUN_TEST(ctrl_queue_full_is_refused);
     RUN_TEST(ctrl_multiple_targets);
     RUN_TEST(ctrl_staged_command_expires);
+    RUN_TEST(manage_from_topic_is_keyed_by_station);
     RUN_TEST(diagnostics_clock_is_monotonic_and_seeded);
 
     /* Every frame the suite built came from the pool, so every one must have come back. A leaked

@@ -60,7 +60,7 @@ typedef struct {
 
     const uint8_t *control_actions;
     uint8_t control_actions_count;
-    char topic_resp[128]; /* mqtt */
+    char topic_from[128]; /* mqtt */
 
     /* down frames we are holding for nodes that were not listening when we sent them */
     iotdata_node_down_t down;
@@ -417,7 +417,7 @@ static void node_publish_from(node_state_t *st, const uint16_t station, const ui
     cJSON *root = cJSON_CreateObject();
     if (root) {
         char buf[4 + 1];
-        cJSON_AddStringToObject(root, "resp", "node"); /* shares a topic with the other responses */
+        cJSON_AddStringToObject(root, "type", "node"); /* shares the subtree with the other kinds */
         cJSON_AddStringToObject(root, "station", snprintf_inline(buf, sizeof(buf), "%03" PRIX16, station));
         cJSON_AddStringToObject(root, "tlv", iotdata_node_tlv_name(type) ? iotdata_node_tlv_name(type) : "?");
         if (partial != NULL) {
@@ -434,7 +434,8 @@ static void node_publish_from(node_state_t *st, const uint16_t station, const ui
         }
         char *out = cJSON_PrintUnformatted(root);
         if (out != NULL) {
-            (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
+            char topic[GW_TOPIC_STATION_MAX];
+            (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, station), out, (int)strlen(out));
             PRINTF_INFO("node: report %s (%zu bytes kv)\n", iotdata_node_tlv_name(type) ? iotdata_node_tlv_name(type) : "?", kvlen);
             free(out);
         }
@@ -728,8 +729,8 @@ static bool node_begin(node_state_t *st, iotdata_node_t *const inode, const iotd
         st->startup = IOTDATA_NODE_SETTINGS_DEFAULT_STARTUP;
     if (st->period[IOTDATA_NODE_TLV_STATUS] == 0)
         st->period[IOTDATA_NODE_TLV_STATUS] = (uint16_t)IOTDATA_NODE_SETTINGS_DEFAULT_PERIOD_STATUS_S;
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP, topic_prefix ? topic_prefix : "iotdata");
-    PRINTF_INFO("node: station=%03" PRIX16 ", responses on %s\n", iotdata_node_station(st->inode), st->topic_resp);
+    snprintf(st->topic_from, sizeof(st->topic_from), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM, topic_prefix ? topic_prefix : "iotdata");
+    PRINTF_INFO("node: station=%03" PRIX16 ", responses on %s/<station>\n", iotdata_node_station(st->inode), st->topic_from);
     return true;
 }
 

@@ -56,6 +56,13 @@ void ema_update_timed(int16_t value, int16_t *value_ema, uint32_t *value_cnt, ti
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+#define GW_TOPIC_STATION_MAX 160
+static inline const char *gateway_topic_for_station(char *const out, const size_t size, const char *const base, const uint16_t station) {
+    return snprintf_inline(out, size, "%s/%03" PRIX16, base, station);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static inline void debug_inject_random_latency_ms(unsigned ms) {
     if (ms == 0)
         return;

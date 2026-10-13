@@ -181,8 +181,8 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
                        two hops out can only ever be heard this way, so without this its reports are
                        handed to the telemetry path alone and never reach the node topic. Addressed
                        by the ORIGIN, not the relay that carried it. */
-                    (void)node_on_packet(st->state_node, fw.inner_packet, (size_t)fw.inner_len, fw.origin_station);
                     process_admit_sensor(st, fw.inner_packet, fw.inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi_dbm);
+                    (void)node_on_packet(st->state_node, fw.inner_packet, (size_t)fw.inner_len, fw.origin_station);
                 } else {
                     PRINTF_ERROR("exec: mesh FORWARD inner packet peek failed (len=%d)\n", fw.inner_len);
                     stat_on_link_rx_drop(st->state_stat);
@@ -388,8 +388,6 @@ void process_packet(process_state_t *st) {
                 // heard both directly and via a relay publishes once — whichever path adds {station,
                 // seq} first wins, the other is suppressed. is_new is true unless it was a duplicate
                 // (always true when mesh is off). Track the reception either way for observability.
-                /* a packet may carry system TLVs (node reports) as well as telemetry */
-                (void)node_on_packet(st->state_node, rxbuf, (size_t)packet_length, station_id);
                 /* The driver's value goes in UNTRANSLATED. It already distinguishes a reading
                    (< 0) from saturation (0) from none (LORA_RSSI_NONE), and the survey
                    encoding uses the same convention -- mapping "none" onto 0 here, as this
@@ -411,6 +409,7 @@ void process_packet(process_state_t *st) {
                     PRINTF_ERROR("exec: undecodable frame from station=%03" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station_id, sequence, packet_length,
                                  iotdata_strerror(iotdata_decode(rxbuf, (size_t)packet_length, &st->_iotdata_dec)));
                 }
+                (void)node_on_packet(st->state_node, rxbuf, (size_t)packet_length, station_id);
             }
             if (st->rx_held != BUFFER_NONE && buffer_refs(st->pool, st->rx_held) > 1) {
                 buffer_unref(st->pool, st->rx_held);

@@ -70,7 +70,7 @@ typedef struct {
     buffer_queue_entry_t queue_slot[CTRL_QUEUE_MAX];
     survey_state_t *survey;
     trace_state_t *trace;
-    char topic_resp[128];
+    char topic_from[128];
     char _buffer_resp[244];
     char _buffer_blackbox_rec[BLACKBOX_LINE_MAX];
     /* stats (the queue keeps its own: added, expired, rejected) */
@@ -84,15 +84,20 @@ static ctrl_state_t *g_ctrl = NULL;
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-/* Management responses are JSON on the one response topic (IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP), sharing it
-   with the node reports. Text that used to be published bare -- a blackbox status line, a record,
+/* Management messages are JSON under the management subtree (IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM),
+   one level down per station -- `<prefix>/manage/from/<station>` -- sharing that subtree with the
+   node reports. THE SUFFIX IS ALWAYS THE PAYLOAD'S `station` FIELD (gateway_topic_for_station),
+   so the topic and the body cannot disagree, and the field stays in the payload because a message
+   that ends up in a log or a database should still say who it came from.
+   Text that used to be published bare -- a blackbox status line, a record,
    an error -- is now a field, so a client parses one shape instead of sniffing at payloads.
  *
- * "resp" is the CLASS of response:
+ * "type" is the KIND of message -- not whether anyone asked for it, which the gateway does not
+ * always know (see the topic note in iotdata_node_control.h):
  *   node   a node TLV report          (+ "tlv", "data")   -- see node_publish_from
  *   diag   diagnostic output          (+ "source", and "text" or "index"/"record")
  *   error  the request was not usable (+ "text")
- * and "station" is always the node that answered, which for these is this gateway.
+ * and "station" is always the node the message is from, which for these is this gateway.
  *
  * A diag response names its SOURCE, because the blackbox recorder is one possible diagnostic and
  * not the definition of one: a different recorder, or a remote node's DIAGNOSTICS TLV, is the same
@@ -103,10 +108,12 @@ static ctrl_state_t *g_ctrl = NULL;
 static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
     if (root != NULL) {
         char idbuf[4 + 1];
-        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, iotdata_node_station(st->inode)));
+        const uint16_t station = iotdata_node_station(st->inode);
+        cJSON_AddStringToObject(root, "station", snprintf_inline(idbuf, sizeof(idbuf), "%03" PRIX16, station));
         char *const out = cJSON_PrintUnformatted(root);
         if (out != NULL) {
-            (void)mqtt_send(st->topic_resp, out, (int)strlen(out));
+            char topic[GW_TOPIC_STATION_MAX];
+            (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, station), out, (int)strlen(out));
             free(out);
         }
         cJSON_Delete(root);
@@ -115,10 +122,10 @@ static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static cJSON *ctrl_respond_begin(const char *const resp, const char *const cmd) {
+static cJSON *ctrl_respond_begin(const char *const type, const char *const cmd) {
     cJSON *const root = cJSON_CreateObject();
     if (root != NULL) {
-        cJSON_AddStringToObject(root, "resp", resp);
+        cJSON_AddStringToObject(root, "type", type);
         cJSON_AddStringToObject(root, "cmd", cmd);
     }
     return root;
@@ -650,7 +657,7 @@ bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, iotdata_node_t *inod
     buffer_queue_init(&st->queue, st->queue_slot, CTRL_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, ctrl_tag_name);
     snprintf(st->topic_req, sizeof(st->topic_req), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_REQ, topic_prefix);
-    snprintf(st->topic_resp, sizeof(st->topic_resp), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_RESP, topic_prefix);
+    snprintf(st->topic_from, sizeof(st->topic_from), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM, topic_prefix);
     g_ctrl = st;
     if (!mqtt_subscribe(st->topic_req, MQTT_PUBLISH_QOS, ctrl_from_message)) {
         PRINTF_ERROR("ctrl: subscribe to '%s' failed\n", st->topic_req);
