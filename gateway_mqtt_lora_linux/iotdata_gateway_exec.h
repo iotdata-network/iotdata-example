@@ -112,7 +112,7 @@ void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, in
         return;
     }
     stat_on_packet_decoded(st->state_stat, station_id, sequence, variant_id, (uint16_t)packet_length, &st->_iotdata_scratch.dec);
-    snprintf(st->_buffer_mqtt_topic, sizeof(st->_buffer_mqtt_topic), "%s/%s/%03" PRIX16, topic_prefix, vdef->name, station_id);
+    snprintf(st->_buffer_mqtt_topic, sizeof(st->_buffer_mqtt_topic), "%s" IOTDATA_NODE_MQTT_VARIANT_TOPIC "/%s/%03" PRIX16, topic_prefix, vdef->name, station_id);
     // Splice rssi_packet in as the first member rather than teaching the decoder about it: the
     // decoder emits the packet's own payload, and reception strength is not part of that payload.
     // Keeping it out of the codec means every variant gains the field for free and none of them
@@ -445,7 +445,8 @@ bool process_run(process_state_t *st, iotdata_node_state_t *state_store, node_st
 
     for (int i = 0; i < IOTDATA_VARIANT_MAPS_COUNT; i++) {
         const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)i);
-        PRINTF_INFO("exec: variant[%d] = \"%s\" (pres_bytes=%" PRIu8 ") -> %s/%s/<station>\n", i, vdef->name, vdef->num_pres_bytes, iotdata_node_config_string(MQTT_TOPIC_PREFIX), vdef->name);
+        PRINTF_INFO("exec: variant[%d] = \"%s\" (pres_bytes=%" PRIu8 ") -> %s" IOTDATA_NODE_MQTT_VARIANT_TOPIC "/%s/<station>\n", i, vdef->name, vdef->num_pres_bytes, iotdata_node_config_string(MQTT_TOPIC_PREFIX),
+                    vdef->name);
     }
     if (st->state_mesh->enabled)
         PRINTF_INFO("exec: variant[15] = mesh control (gateway station=%03" PRIX16 ")\n", iotdata_node_station(st->state_mesh->inode));
