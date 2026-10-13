@@ -369,11 +369,7 @@ static cJSON *netw_build_json(const netw_t *const n, const uint16_t gateway_id, 
         return NULL;
     cJSON_AddNumberToObject(root, "station", (double)gateway_id);
     cJSON_AddNumberToObject(root, "time", (double)now);
-    cJSON *const net = cJSON_AddObjectToObject(root, "network");
-    if (net == NULL)
-        return root;
-    cJSON_AddNumberToObject(net, "count", (double)n->count);
-    cJSON *const arr = cJSON_AddArrayToObject(net, "entries");
+    cJSON *const arr = cJSON_AddArrayToObject(root, "network");
     if (arr == NULL)
         return root;
     for (int i = 0; i < n->count; i++) {

@@ -1596,6 +1596,36 @@ static bool stat_is_dense(const stat_state_t *s) {
 }
 #define ASSERT_COUNT_STAT(s) ASSERT(stat_is_dense(s))
 
+/* THE SHAPE OF THE STATS DOCUMENT, which a generic reader walks by key: every collection is a
+   bare array under a key that names it, and `mesh`/`ddup` are siblings of `stations` rather than
+   nested inside it. The previous {count, entries} wrapper made all three collections identical,
+   so anything flattening the document printed `entries` three times and said nothing. */
+static bool test_stat_json_shape(void) {
+    static stat_state_t s;
+    memset(&s, 0, sizeof(s));
+    iotdata_node_init(&t_inode, 0x0F1B, NULL, 0u);
+    s.inode = &t_inode;
+    s.version = "9.9.9";
+    s.start_time = time(NULL) - 60;
+    (void)stat_station_find_or_create(&s, 0x111, time(NULL));
+
+    cJSON *const root = stat_build_stat_json(&s, NULL, NULL);
+    ASSERT(root != NULL);
+    char *const out = cJSON_PrintUnformatted(root);
+    ASSERT(out != NULL);
+
+    ASSERT(strstr(out, "\"station\":3867") != NULL); /* numeric, as everywhere in the JSON */
+    ASSERT(strstr(out, "\"links\":[") != NULL);
+    ASSERT(strstr(out, "\"stations\":[") != NULL);
+    ASSERT(strstr(out, "\"variants\":[") != NULL);
+    /* and NOT the doubled nesting, nor a count beside a thing that has a length */
+    ASSERT(strstr(out, "\"entries\"") == NULL);
+    ASSERT(strstr(out, "\"links\":{") == NULL && strstr(out, "\"stations\":{") == NULL);
+    free(out);
+    cJSON_Delete(root);
+    return true;
+}
+
 static bool test_stat_station_create_and_find(void) {
     static stat_state_t s;
     memset(&s, 0, sizeof(s));
@@ -3351,6 +3381,7 @@ int main(void) {
 
     printf("\n=== Stat Table Tests ===\n\n");
 
+    RUN_TEST(stat_json_shape);
     RUN_TEST(stat_station_create_and_find);
     RUN_TEST(stat_station_fill_and_evict);
     RUN_TEST(stat_station_all_findable);

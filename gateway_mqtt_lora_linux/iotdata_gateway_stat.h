@@ -325,9 +325,8 @@ static cJSON *stat_json_windows(const stat_ring_t *const r, const time_t now) {
 }
 
 cJSON *stat_build_links_json(const stat_state_t *const s, const time_t now, const mesh_state_t *const mesh) {
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "count", 1); /* one radio today; the shape does not assume it */
-    cJSON *links = cJSON_AddArrayToObject(root, "entries");
+    cJSON *root = cJSON_CreateArray();
+    cJSON *links = root;
     {
         cJSON *link = cJSON_CreateObject();
         cJSON_AddStringToObject(link, "name", s->link.name ? s->link.name : "");
@@ -363,10 +362,9 @@ cJSON *stat_build_links_json(const stat_state_t *const s, const time_t now, cons
     return root;
 }
 
-cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "count", (double)s->stations_count);
-    cJSON *arr = cJSON_AddArrayToObject(root, "entries");
+void stat_build_stations_json(cJSON *const dest, const stat_state_t *const s, const time_t now, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
+    cJSON *const root = dest;
+    cJSON *arr = cJSON_AddArrayToObject(root, "stations");
     /* by station id: a station keeps its line between two snapshots (iotdata_node_utils.h) */
     iotdata_node_order_t ord[sizeof(s->stations) / sizeof(s->stations[0])];
     int ordered = 0;
@@ -499,12 +497,10 @@ cJSON *stat_build_stations_json(const stat_state_t *const s, const time_t now, c
         cJSON_AddNumberToObject(d, "id_clash", (double)ddup->stat_id_clash);
         cJSON_AddNumberToObject(d, "recv_unknown", (double)ddup->stat_recv_unknown);
     }
-    return root;
 }
 
 cJSON *stat_build_variants_json(const stat_state_t *const s, const time_t now) {
-    cJSON *root = cJSON_CreateObject(), *arr = cJSON_AddArrayToObject(root, "entries");
-    int counted = 0;
+    cJSON *root = cJSON_CreateArray(), *arr = root;
     for (int v = 0; v < (int)(sizeof(s->variants) / sizeof(s->variants[0])); v++) {
         const stat_variant_t *const e = &s->variants[v];
         if (e->packet_count > 0 || e->decode_errors > 0 || e->process_errors > 0) {
@@ -521,10 +517,8 @@ cJSON *stat_build_variants_json(const stat_state_t *const s, const time_t now) {
                 cJSON_AddNumberToObject(o, "age_secs", (double)(now - e->last_seen));
             cJSON_AddItemToObject(o, "windows", stat_json_windows(&e->ring, now));
             cJSON_AddItemToArray(arr, o);
-            counted++;
         }
     }
-    cJSON_AddNumberToObject(root, "count", (double)counted);
     return root;
 }
 
@@ -549,7 +543,7 @@ cJSON *stat_build_stat_json(const stat_state_t *const s, const mesh_state_t *con
     cJSON_AddNumberToObject(root, "time", (double)now);
     cJSON_AddNumberToObject(root, "uptime_secs", (double)(now - s->start_time));
     cJSON_AddItemToObject(root, "links", stat_build_links_json(s, now, mesh));
-    cJSON_AddItemToObject(root, "stations", stat_build_stations_json(s, now, mesh, ddup));
+    stat_build_stations_json(root, s, now, mesh, ddup); /* adds `stations`, `mesh`, `ddup` */
     cJSON_AddItemToObject(root, "variants", stat_build_variants_json(s, now));
     cJSON_AddItemToObject(root, "mqtt", stat_build_mqtt_json(s, now));
     if (s->pool) {
