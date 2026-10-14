@@ -1019,8 +1019,8 @@ static void ddup_peers_tick(ddup_peers_t *pp, time_t now) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 // Set ONLY the last-will. MUST be called BEFORE mqtt_begin() (the will is registered at
-// connect). The aux subscription is deferred to ddup_peers_start() because the handler calls
-// into ddup, whose mutex isn't initialised until ddup_begin() (after the config connect/settle).
+// connect). The subscription is deferred to ddup_peers_begin() because the handler calls into
+// ddup, whose mutex isn't initialised until ddup_begin() (after the config connect/settle).
 __attribute__((unused)) static void ddup_peers_init(ddup_peers_t *pp, ddup_state_t *ddup, uint16_t gwid) {
     *pp = (ddup_peers_t){ .ddup = ddup, .gwid = gwid };
     mqtt_set_will(ddup_peers_topic(gwid, pp->topic, sizeof(pp->topic))); // LWT: empty retained = offline. BEFORE mqtt_begin(), or it is never registered.
@@ -1030,7 +1030,7 @@ __attribute__((unused)) static void ddup_peers_init(ddup_peers_t *pp, ddup_state
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 __attribute__((unused)) static void ddup_peers_begin(ddup_peers_t *pp) {
-    (void)mqtt_subscribe_aux("iotdata/ddup/#", "iotdata/ddup/", ddup_peers_on_message, pp);
+    (void)mqtt_subscribe("iotdata/ddup/#", MQTT_PUBLISH_QOS, ddup_peers_on_message, pp);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

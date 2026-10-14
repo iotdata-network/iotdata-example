@@ -265,8 +265,8 @@ static size_t ctrl_config_build(const cJSON *const root, uint8_t *const out, con
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void ctrl_from_message(const char *topic __attribute__((unused)), const unsigned char *payload, const int len) {
-    ctrl_state_t *const st = g_ctrl;
+static void ctrl_from_message(void *const ctx, const char *const topic __attribute__((unused)), const void *const payload, const int len) {
+    ctrl_state_t *const st = (ctrl_state_t *)ctx;
     st->stat_req_rx++;
     cJSON *const root = cJSON_ParseWithLength((const char *)payload, (size_t)len);
     if (root) {
@@ -655,7 +655,7 @@ bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, iotdata_node_t *inod
     snprintf(st->topic_req, sizeof(st->topic_req), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_REQ, topic_prefix);
     snprintf(st->topic_from, sizeof(st->topic_from), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM, topic_prefix);
     g_ctrl = st;
-    if (!mqtt_subscribe(st->topic_req, MQTT_PUBLISH_QOS, ctrl_from_message)) {
+    if (!mqtt_subscribe(st->topic_req, MQTT_PUBLISH_QOS, ctrl_from_message, st)) {
         PRINTF_ERROR("ctrl: subscribe to '%s' failed\n", st->topic_req);
         return false;
     }

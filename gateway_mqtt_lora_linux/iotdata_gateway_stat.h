@@ -523,14 +523,15 @@ cJSON *stat_build_variants_json(const stat_state_t *const s, const time_t now) {
 cJSON *stat_build_mqtt_json(__attribute__((unused)) const stat_state_t *const s, __attribute__((unused)) const time_t now) {
     cJSON *root = cJSON_CreateObject();
     if (root) {
+        const mqtt_stats_t *const stats = mqtt_stats();
         cJSON_AddBoolToObject(root, "connected", mqtt_is_connected());
-        cJSON_AddNumberToObject(root, "connected_since", (double)mqtt_stat_last_connect_time);
-        cJSON_AddNumberToObject(root, "connects", (double)mqtt_stat_connects);
-        cJSON_AddNumberToObject(root, "disconnects", (double)mqtt_stat_disconnects);
-        cJSON_AddNumberToObject(root, "reconnects", (double)mqtt_stat_reconnects);
-        cJSON_AddNumberToObject(root, "published", (double)mqtt_stat_publishes);
-        cJSON_AddNumberToObject(root, "published_bytes", (double)mqtt_stat_publish_bytes);
-        cJSON_AddNumberToObject(root, "published_errors", (double)mqtt_stat_publish_errors);
+        cJSON_AddNumberToObject(root, "connected_since", (double)stats->last_connect_time);
+        cJSON_AddNumberToObject(root, "connects", (double)stats->connects);
+        cJSON_AddNumberToObject(root, "disconnects", (double)stats->disconnects);
+        cJSON_AddNumberToObject(root, "reconnects", (double)stats->reconnects);
+        cJSON_AddNumberToObject(root, "published", (double)stats->publishes);
+        cJSON_AddNumberToObject(root, "published_bytes", (double)stats->publish_bytes);
+        cJSON_AddNumberToObject(root, "published_errors", (double)stats->publish_errors);
     }
     return root;
 }
@@ -625,7 +626,7 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
         last->recv_entries = ddup->stat_recv_entries;
         last->injected = ddup->stat_injected;
     }
-    STAT_APPEND(", mqtt{%s, disconnects=%" PRIu32 "}", mqtt_is_connected() ? "up" : "down", mqtt_stat_disconnects);
+    STAT_APPEND(", mqtt{%s, disconnects=%" PRIu32 "}", mqtt_is_connected() ? "up" : "down", mqtt_stats()->disconnects);
     if (s->pool)
         STAT_APPEND(", buffers{%u/%u, hi=%u, fail=%" PRIu32 "}", (unsigned)buffer_pool_used(s->pool), (unsigned)buffer_pool_total(s->pool), (unsigned)buffer_pool_high_water(s->pool), buffer_pool_fails(s->pool));
 #undef STAT_APPEND

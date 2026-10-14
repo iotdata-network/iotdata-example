@@ -137,6 +137,10 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #include "d_module_otaslot_linux.h"
 #include "d_module_inflate_linux.h"
 #include "d_module_hpatch.h"
+#define MQTT_CONNECT_TIMEOUT 60
+#define MQTT_PUBLISH_QOS     0
+#define MQTT_PUBLISH_RETAIN  false
+#include "d_module_mqtt_linux.h"
 #undef PIN_DEVICE_UART_TX
 #undef PIN_DEVICE_UART_RX
 #undef PIN_DEVICE_LORA_AUX
@@ -151,14 +155,6 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 static bool lora_packet_write(const uint8_t *const packet, const int length) {
     return length > 0 && lora_write(packet, (size_t)length) == ESP_OK;
 }
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
-#define MQTT_CONNECT_TIMEOUT 60
-#define MQTT_PUBLISH_QOS     0
-#define MQTT_PUBLISH_RETAIN  false
-#include "mqtt_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // IOTDATA PROTOCOL + PLATFORM

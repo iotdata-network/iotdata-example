@@ -23,7 +23,7 @@ CFLAGS_DEFINES += -DIOTDATA_CONFIG='"$(abspath $(IOTDATA_CONFIG))"'
 endif
 CFLAGS_COMMON=$(IOTDATA_CFLAGS_COMMON)
 CFLAGS_OPT=$(IOTDATA_CFLAGS_OPT)
-CFLAGS_INCLUDES=-Iinclude -I$(IOTDATA_SRC_EXAMPLE)/include -I$(IOTDATA_SRC_LIBRARY) -I$(IOTDATA_SRC_PLATFORM)/include/device -I$(IOTDATA_SRC_PLATFORM)/include -I$(IOTDATA_SRC_DEPEND_BLACKBOX) -I$(IOTDATA_SRC_DEPEND_HPATCH)
+CFLAGS_INCLUDES=-I$(IOTDATA_SRC_EXAMPLE)/include -I$(IOTDATA_SRC_LIBRARY) -I$(IOTDATA_SRC_PLATFORM)/include/device -I$(IOTDATA_SRC_PLATFORM)/include -I$(IOTDATA_SRC_DEPEND_BLACKBOX) -I$(IOTDATA_SRC_DEPEND_HPATCH)
 CFLAGS=$(CFLAGS_COMMON) $(CFLAGS_OPT) $(CFLAGS_DEFINES) $(CFLAGS_INCLUDES)
 LDFLAGS=$(IOTDATA_LDFLAGS_COMMON)
 # -lz FOR THE OTA CODEC SEAM. d_module_inflate_linux.h is zlib's raw-deflate inflater, and the
@@ -41,12 +41,12 @@ TARGET=iotdata_gateway
 MAIN=iotdata_gateway.c
 SOURCES_TARGET=iotdata_gateway_conf.h iotdata_gateway_ctrl.h iotdata_gateway_ddup.h iotdata_gateway_exec.h iotdata_gateway_mesh.h iotdata_gateway_mesh_survey.h \
     iotdata_gateway_mesh_trace.h iotdata_gateway_netw.h iotdata_gateway_node.h iotdata_gateway_node_content.h iotdata_gateway_state.h iotdata_gateway_stat.h \
-    iotdata_gateway_util.h \
-    include/mqtt_linux.h
+    iotdata_gateway_util.h
 SOURCES_DEPEND=\
     $(IOTDATA_SRC_PLATFORM)/include/device/d_platform_linux.h \
     $(IOTDATA_SRC_PLATFORM)/include/device/d_common.h \
     $(IOTDATA_SRC_PLATFORM)/include/device/d_interface_e22900t22.h \
+    $(IOTDATA_SRC_PLATFORM)/include/device/d_module_mqtt_linux.h \
     $(IOTDATA_SRC_PLATFORM)/include/iotdata_variant.h $(IOTDATA_VARIANT) \
     $(IOTDATA_SRC_PLATFORM)/include/iotdata_node_diagnostics.h $(IOTDATA_SRC_DEPEND_BLACKBOX)/blackbox.h \
     $(IOTDATA_SRC_PLATFORM)/include/iotdata_node_stations.h \

@@ -70,7 +70,7 @@ BUFFER_POOL_DECLARE(t_pool, TEST_POOL_COUNT, TEST_FRAME_MAX + 8);
 #define MQTT_CONNECT_TIMEOUT 60
 #define MQTT_PUBLISH_QOS     0
 #define MQTT_PUBLISH_RETAIN  false
-#include "mqtt_linux.h"
+#include "d_module_mqtt_linux.h"
 
 #include "iotdata_gateway_util.h"
 
@@ -1923,7 +1923,8 @@ static void ctrl_test_drop(ctrl_state_t *const st) {
 
 static void ctrl_test_feed(ctrl_state_t *const st, const char *const json) {
     g_ctrl = st;
-    ctrl_from_message("test/manage/req", (const unsigned char *)json, (int)strlen(json));
+    /* st as the context, exactly as ctrl_begin() hands it to the subscriber table */
+    ctrl_from_message(st, "test/manage/req", json, (int)strlen(json));
 }
 
 static const uint8_t telemetry_0538[] = { 0x35, 0x38, 0x00, 0x01, 0x2C, 0xC1, 0x68, 0x97, 0x3E };
