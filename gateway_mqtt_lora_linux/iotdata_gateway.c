@@ -284,17 +284,32 @@ static void gateway_state_end(store_state_t *state) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+/* THE TIERS, and this order IS the dependency order, not a reading preference:
+     utilities -> network (stations) -> node framework + content -> mesh, with survey and trace
+     -> ddup -> stats + state -> control + execute
+   THE RULE THAT KEEPS IT A DAG: a struct member points DOWN a tier or SIDEWAYS within one; an
+   upward edge is a function pointer the lower tier declares and _begin() fills in from here.
+   So node declares node_control_handler_t and node_table_*_handler_t and gets ctrl_from_iotdata
+   and exec_node_* ; mesh declares mesh_dedup_handler_t and gets ddup_insert_handler, with the
+   process state arriving as a void* so its type never reaches mesh; ddup declares ddup_release_fn
+   and gets process_release_cb. Downward pointers need none of that and should not have it:
+   ctrl holds node_state_t*, survey and trace hold mesh_state_t*, all plain members.
+   The member node_state_t once held into stat_state_t was the one pointing UP -- a tier-3 header
+   reaching tier 6 for one scalar, start_time -- which is why it became node's own field rather
+   than being re-plumbed. Put an upward pointer back in and this list stops being orderable. */
+
 #include "iotdata_gateway_util.h"
-#include "iotdata_gateway_mesh.h"
-#include "iotdata_gateway_ddup.h"
-#include "iotdata_gateway_peer.h"
-#include "iotdata_gateway_stat.h"
-#include "iotdata_gateway_node.h"
 #include "iotdata_gateway_netw.h"
-#include "iotdata_gateway_survey.h"
-#include "iotdata_gateway_trace.h"
+#include "iotdata_gateway_node.h"
+#include "iotdata_gateway_node_content.h"
+#include "iotdata_gateway_mesh.h"
+#include "iotdata_gateway_mesh_survey.h"
+#include "iotdata_gateway_mesh_trace.h"
+#include "iotdata_gateway_ddup.h"
+
+#include "iotdata_gateway_stat.h"
 #include "iotdata_gateway_state.h"
-#include "iotdata_gateway_content.h"
+
 #include "iotdata_gateway_ctrl.h"
 #include "iotdata_gateway_exec.h"
 
@@ -310,7 +325,7 @@ typedef struct {
     mqtt_config_t mqtt_config;
     mesh_state_t mesh_state;
     ddup_state_t ddup_state;
-    peer_presence_t peer_presence;
+    ddup_peers_t ddup_peers;
     stat_state_t stat_state;
     node_state_t node_state;
     ctrl_state_t ctrl_state;
@@ -335,7 +350,7 @@ static bool gateway_config_changed(__attribute__((unused)) const iotdata_node_co
     state->mesh_state.debug = iotdata_node_config_bool(MESH_DEBUG);
     state->mesh_state.beacon_interval_s = iotdata_node_config_u16(MESH_BEACON_INTERVAL_S);
     state->ddup_state.hold_ms = iotdata_node_config_u32(DDUP_HOLD_MS);
-    if (state->ddup_state.enabled && state->ddup_state.running != NULL)
+    if (state->ddup_state.enabled && state->ddup_state.running)
         ddup_reconfigure(&state->ddup_state, iotdata_node_config_string(DDUP_PEERS), iotdata_node_config_u16(DDUP_DELAY_MS), iotdata_node_config_bool(DDUP_DEBUG), (unsigned)iotdata_node_config_u32(DDUP_DEBUG_INJECT_LATENCY_MS));
     else {
         state->ddup_state.delay_ms = iotdata_node_config_u16(DDUP_DELAY_MS);
@@ -435,7 +450,6 @@ int main(int argc, char *argv[]) {
 
     iotdata_node_version_caps_init(&state->iotd_caps);
     iotdata_node_version_caps_add(&state->iotd_caps, IOTDATA_NODE_VERSION_CAPS_RADIO, state->lora_config.module == LORA_MODULE_USB ? IOTDATA_NODE_VERSION_RADIO_E22_USB : IOTDATA_NODE_VERSION_RADIO_E22_DIP);
-
     char vbuf[IOTDATA_NODE_VERSION_STR_MAX + 1];
     PRINTF_INFO("version: %s\n", iotdata_node_version_str(vbuf, sizeof(vbuf), &(const iotdata_node_version_t){ .caps = &state->iotd_caps }));
     if (!iotdata_node_version_stamp_is_real())
@@ -463,7 +477,7 @@ int main(int argc, char *argv[]) {
     PRINTF_INFO("device: connect success (port=%s)\n", state->lora_port);
 
     if (state->ddup_state.enabled && state->ddup_state.auto_peer)
-        peer_presence_init(&state->peer_presence, &state->ddup_state, iotdata_node_station(&state->inode));
+        ddup_peers_init(&state->ddup_peers, &state->ddup_state, iotdata_node_station(&state->inode));
 
     // MQTT BROKER
     if (!mqtt_begin(&state->mqtt_config))
@@ -473,47 +487,39 @@ int main(int argc, char *argv[]) {
 
     // IOTDATA (NETW/NODE/MESH/DDUP/CTRL)
     (void)netw_begin(&state->process_state.network);
-    if (!node_begin(&state->node_state, &state->inode, &state->iotd_caps, &state->stat_state, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row, ctrl_from_iotdata_keys,
+    if (!node_begin(&state->node_state, &state->inode, &state->iotd_caps, &s_pool, lora_packet_write, ctrl_from_iotdata, exec_node_status_mesh, exec_node_table_count, exec_node_table_row, ctrl_from_iotdata_keys,
                     CTRL_FROM_IOTDATA_KEYS_COUNT, iotdata_node_config_string(MQTT_TOPIC_PREFIX)))
         goto end_mqtt;
     node_settings_attach(&state->node_state, &gateway_settings, &state->store_state.node);
-    if (!mesh_begin(&state->mesh_state, &state->inode, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state))
-        goto end_node;
-    /* BY VALUE, not by node: ddup keeps its own copy of the gateway id because the election compares
-       it on the receive thread, and reaching through a node from there would be a second reader of
-       something the main loop can change. gateway_config_changed() refreshes it -- see there. */
+    mesh_begin(&state->mesh_state, &state->inode, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state);
+    survey_begin(&state->survey_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->mesh_state, &s_pool);
+    trace_begin(&state->trace_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->mesh_state, &s_pool);
     if (!ddup_begin(&state->ddup_state, iotdata_node_station(&state->inode), &state->mesh_state.dedup_ring, &state->running))
         goto end_mesh;
-    survey_begin(&state->survey_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &s_pool);
-    trace_begin(&state->trace_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &s_pool);
-    if (!ctrl_begin(&state->ctrl_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->survey_state, &state->trace_state, &s_pool))
-        goto end_ddup;
-    /* AND THE SUBSCRIPTION AFTER ddup_begin(), not with the will above: a retained presence can be
-       delivered the instant we subscribe, and the handler calls into ddup's peer table -- whose
-       mutex does not exist until ddup_begin() has run. */
     if (state->ddup_state.enabled && state->ddup_state.auto_peer) {
-        peer_presence_start(&state->peer_presence);
-        state->process_state.state_peer = &state->peer_presence; /* NULL otherwise: the loop skips it */
+        ddup_peers_begin(&state->ddup_peers);
+        state->process_state.peers_ddup = &state->ddup_peers; /* NULL otherwise: the loop skips it */
     }
+    if (!ctrl_begin(&state->ctrl_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->node_state, &state->survey_state, &state->trace_state, &s_pool))
+        goto end_ddup;
 
     // PROCESS
     gateway_state_restore(&state->store_state);
     stat_begin(&state->stat_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, IOTDATA_GATEWAY_VERSION, &state->lora_config, &s_pool);
-    state->process_state.pool = &s_pool;
+    state->process_state.buffer_pool = &s_pool;
     ret = process_run(&state->process_state, &state->store_state.node, &state->node_state, &state->mesh_state, &state->ddup_state, &state->stat_state, &state->ctrl_state, &state->survey_state, &state->trace_state, &state->running)
               ? EXIT_SUCCESS
               : EXIT_FAILURE;
     stat_end(&state->stat_state);
 
-    peer_presence_shutdown(&state->peer_presence);
     ctrl_end(&state->ctrl_state);
-    survey_end(&state->survey_state);
-    trace_end(&state->trace_state);
 end_ddup:
+    ddup_peers_end(&state->ddup_peers);
     ddup_end(&state->ddup_state);
 end_mesh:
+    trace_end(&state->trace_state);
+    survey_end(&state->survey_state);
     mesh_end(&state->mesh_state);
-end_node:
     node_end(&state->node_state);
 end_mqtt:
     mqtt_end();

@@ -61,10 +61,10 @@ typedef struct {
 typedef struct {
     uint16_t station;
     netw_kind_t kind;
-    uint8_t variant;   /* last variant seen */
-    int rssi;          /* dBm of the last direct reception (0 = not known) */
-    time_t first_seen; /* when we first heard this station (for lifetime-average rates) */
-    time_t last_seen;
+    uint8_t variant;        /* last variant seen */
+    int rssi;               /* dBm of the last direct reception (0 = not known) */
+    uint32_t first_seen_ms; /* when we first heard this station -- an OFFSET only, never a stamp */
+    uint32_t last_seen_ms;  /* 0 = never heard, as it was with the wall clock */
     uint32_t rx_count;
     /* sensor-data reception stats: per path + the deduped (published) stream */
     netw_pathstat_t direct;
@@ -132,25 +132,25 @@ int netw_locate(const netw_t *n, uint16_t station) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-netw_station_t *netw_upsert(netw_t *n, uint16_t station, time_t now) {
+netw_station_t *netw_upsert(netw_t *n, uint16_t station, const uint32_t now_ms) {
     int slot = -1, slot_oldest = 0;
     for (int i = 0; i < n->count; i++) {
         if (n->s[i].station == station) {
             slot = i;
             break;
         }
-        if (n->s[i].last_seen < n->s[slot_oldest].last_seen)
+        /* the OLDEST is the largest age, not the smallest stamp: a tick wraps every 49.7 days and
+           a station heard just after the wrap would otherwise look like the stalest thing here */
+        if ((uint32_t)(now_ms - n->s[i].last_seen_ms) > (uint32_t)(now_ms - n->s[slot_oldest].last_seen_ms))
             slot_oldest = i;
     }
     if (slot < 0) {
         slot = (n->count < (int)(sizeof(n->s) / sizeof(n->s[0]))) ? n->count++ : slot_oldest;
         netw_station_t *const e = &n->s[slot];
-        *e = (netw_station_t){ 0 };
-        e->station = station;
-        e->first_seen = now;
+        *e = (netw_station_t){ .station = station, .first_seen_ms = now_ms };
     }
     netw_station_t *const e = &n->s[slot];
-    e->last_seen = now;
+    e->last_seen_ms = now_ms;
     e->rx_count++;
     return e;
 }
@@ -174,10 +174,12 @@ static inline void netw_seq_track(netw_pathstat_t *p, uint16_t seq) {
     }
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 // Record one sensor-data reception (direct or via a mesh forward). `is_new` comes from the dedup
 // ring: true = first time we have seen {station,seq} (it was published), false = duplicate.
-void netw_note_receive(netw_t *n, uint16_t station, uint8_t variant, uint16_t sequence, netw_path_t path, bool is_new, int rssi_dbm, uint16_t via_relay, time_t now) {
-    netw_station_t *e = netw_upsert(n, station, now);
+void netw_note_receive(netw_t *n, uint16_t station, uint8_t variant, uint16_t sequence, netw_path_t path, bool is_new, int rssi_dbm, uint16_t via_relay, const uint32_t now_ms) {
+    netw_station_t *e = netw_upsert(n, station, now_ms);
     e->variant = variant;
     e->kind = NETW_KIND_SENSOR;
     if (rssi_dbm != 0) /* direct rssi only; a forwarded packet's rssi is the relay hop, not the sensor */
@@ -208,19 +210,23 @@ void netw_note_receive(netw_t *n, uint16_t station, uint8_t variant, uint16_t se
     }
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 // Every mesh frame a node sends carries sender_seq from one shared counter, so this is the ONLY
 // gap we can measure: frames of ANY type we missed = relay->gateway link loss. Call once per
-// received mesh frame (station_id / sequence from the header).
-void netw_note_transmit(netw_t *n, uint16_t station, uint16_t sender_seq, time_t now) {
-    netw_station_t *e = netw_upsert(n, station, now);
+// received mesh frame (station / sequence from the header).
+void netw_note_transmit(netw_t *n, uint16_t station, uint16_t sender_seq, const uint32_t now_ms) {
+    netw_station_t *e = netw_upsert(n, station, now_ms);
     e->tx.rx++;
     netw_seq_track(&e->tx, sender_seq);
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 // Beacon specifics: liveliness count, the ACCEPTING flag, and cost/generation/gateway topology.
 // The sequence gap is tracked by netw_note_tx across all frame types, not here.
-void netw_note_beacon(netw_t *n, uint16_t station, uint8_t flags, uint8_t cost, uint16_t generation, uint16_t gateway, int rssi_dbm, time_t now) {
-    netw_station_t *e = netw_upsert(n, station, now);
+void netw_note_beacon(netw_t *n, uint16_t station, uint8_t flags, uint8_t cost, uint16_t generation, uint16_t gateway, int rssi_dbm, const uint32_t now_ms) {
+    netw_station_t *e = netw_upsert(n, station, now_ms);
     e->kind = (cost == 0) ? NETW_KIND_GATEWAY : NETW_KIND_RELAY;
     e->variant = IOTDATA_MESH_VARIANT;
     if (rssi_dbm != 0)
@@ -232,21 +238,25 @@ void netw_note_beacon(netw_t *n, uint16_t station, uint8_t flags, uint8_t cost, 
     e->beacon_rx++;
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 // A FORWARD arrived from this relay: bump how many it has forwarded to us (its forwarding load).
-void netw_note_forward(netw_t *n, uint16_t relay_station, time_t now) {
-    netw_station_t *e = netw_upsert(n, relay_station, now);
+void netw_note_forward(netw_t *n, uint16_t relay_station, const uint32_t now_ms) {
+    netw_station_t *e = netw_upsert(n, relay_station, now_ms);
     e->fwd_sent++;
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 // Ingest a relay's NEIGHBOUR_REPORT: replace its `hears=[...]` list with what it now reports, and
 // fold each heard station's relay-end RSSI into the both-ends view (keeping the strongest). The
 // heard list is collected locally FIRST, so the reporting relay's own entry can be written last --
 // after any netw_upsert evictions the per-neighbour loop may trigger -- with no dangling pointer.
-void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, const iotdata_mesh_neighbour_report_t *const r, time_t now) {
+void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, const iotdata_mesh_neighbour_report_t *const r, const uint32_t now_ms) {
     /* Two passes over the report, deliberately. The neighbour upserts must all happen BEFORE the
        sender's entry is resolved: a full table evicts the stalest entry, and while the sender is
-       the freshest thing in it (last_seen == now), that only protects it while some other entry is
-       strictly staler. With every entry tied at the same `now`, the eviction scan falls back to the
+       the freshest thing in it (last_seen_ms == now_ms), that only protects it while some other entry is
+       strictly staler. With every entry tied at the same `now_ms`, the eviction scan falls back to the
        lowest valid index -- which could be the sender. Resolving `rel` after the loop sidesteps the
        question entirely, and lets the entries be written straight into rel->hears[] rather than
        staged in an on-stack array first. */
@@ -255,7 +265,7 @@ void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, const io
         if (!iotdata_mesh_neighbour_report_entry(buf, len, k, &ent))
             break;
         const int rssi = ent.rssi_dbm;
-        netw_station_t *const s = netw_upsert(n, ent.station, now); /* used immediately, not held */
+        netw_station_t *const s = netw_upsert(n, ent.station, now_ms); /* used immediately, not held */
         if (s->kind == NETW_KIND_UNKNOWN)
             s->kind = (ent.cost == IOTDATA_MESH_NBR_COST_SENSOR) ? NETW_KIND_SENSOR : (ent.cost == 0 ? NETW_KIND_GATEWAY : NETW_KIND_RELAY);
         if (s->relay_rssi == 0 || rssi > s->relay_rssi) {
@@ -264,7 +274,7 @@ void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, const io
         }
     }
 
-    netw_station_t *const rel = netw_upsert(n, r->sender_station, now); /* resolved last: no eviction can move it */
+    netw_station_t *const rel = netw_upsert(n, r->sender_station, now_ms); /* resolved last: no eviction can move it */
     if (rel->kind == NETW_KIND_UNKNOWN)
         rel->kind = (r->my_cost == 0) ? NETW_KIND_GATEWAY : NETW_KIND_RELAY;
     if (r->my_cost != IOTDATA_MESH_NBR_COST_SENSOR)
@@ -281,12 +291,16 @@ void netw_note_neighbour_report(netw_t *n, const uint8_t *buf, int len, const io
     rel->hears_count = hc;
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 // Lifetime-average rate (events/minute) since first heard. Stable for slow, fixed-interval
 // senders where a per-report-interval delta would just read 0 or 1.
-static inline double netw_rate_per_min(uint32_t count, time_t first_seen, time_t now) {
-    const double secs = (double)(now - first_seen);
+static inline double netw_rate_per_min(uint32_t count, const uint32_t first_seen_ms, const uint32_t now_ms) {
+    const double secs = (double)(uint32_t)(now_ms - first_seen_ms) / 1000.0;
     return (secs >= 1.0) ? ((double)count * 60.0 / secs) : 0.0;
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 // Format a sensor's forwarding relays as "[0xAAAA=n,0xBBBB=m]" (empty if none), the top 5 by
 // count, "…" if more. Bounded and truncation-safe.
@@ -318,6 +332,8 @@ static inline const char *netw_via_format(const netw_station_t *e, char *out, si
     return out;
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 // Format a relay's heard stations as " hears=[0F1B/1/-45dBm,0AFA/255/-55dBm]" (empty if none) --
 // station/cost/rssi, cost 255 = a sensor. Includes its own leading " hears=" so callers append it
 // unconditionally. Bounded + truncation-safe.
@@ -347,9 +363,31 @@ static inline double netw_loss_pct(uint32_t gaps, uint32_t rx) {
     return gaps + rx ? ((double)gaps * 100.0 / (double)(gaps + rx)) : 0.0;
 }
 
-static inline bool netw_is_stale(const netw_station_t *e, time_t now) {
-    return (now - e->last_seen) > NETW_STALE_SEC;
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static inline bool netw_is_node(__attribute__((unused)) const netw_station_t *const e) {
+    return true;
 }
+
+static inline bool netw_is_peer(const netw_station_t *const e) {
+    return e->beacon_rx > 0u;
+}
+
+static inline int netw_peer_count(const netw_t *const n) {
+    int c = 0;
+    for (int i = 0; i < n->count; i++)
+        if (netw_is_peer(&n->s[i]))
+            c++;
+    return c;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static inline bool netw_is_stale(const netw_station_t *e, const uint32_t now_ms) {
+    return (uint32_t)(now_ms - e->last_seen_ms) > (uint32_t)NETW_STALE_SEC * 1000u;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 /* THE NETWORK, AS A DOCUMENT. netw_report() renders the same table for a console, which is for
  * someone watching; this is for keeping. A season of terrain data is the point of several of these
@@ -363,76 +401,78 @@ static inline bool netw_is_stale(const netw_station_t *e, time_t now) {
  * they are omitted in a survey observation: a receiver that had nothing to say must not appear to
  * have measured the strongest signal on the list.
  */
-static cJSON *netw_build_json(const netw_t *const n, const uint16_t gateway_id, const time_t now) {
+static cJSON *netw_build_json(const netw_t *const n, const uint16_t gateway_id, const uint32_t now_ms) {
     cJSON *const root = cJSON_CreateObject();
-    if (root == NULL)
-        return NULL;
-    cJSON_AddNumberToObject(root, "station", (double)gateway_id);
-    cJSON_AddNumberToObject(root, "time", (double)now);
-    cJSON *const arr = cJSON_AddArrayToObject(root, "network");
-    if (arr == NULL)
-        return root;
-    for (int i = 0; i < n->count; i++) {
-        const netw_station_t *const e = &n->s[i];
-        cJSON *const o = cJSON_CreateObject();
-        if (o == NULL)
-            break;
-        cJSON_AddNumberToObject(o, "station", (double)e->station);
-        cJSON_AddStringToObject(o, "kind", netw_kind_name(e->kind));
-        if (e->last_seen != 0)
-            cJSON_AddNumberToObject(o, "age_secs", (double)(now - e->last_seen));
-        cJSON_AddNumberToObject(o, "packets", (double)e->rx_count);
-        if (e->rssi < 0)
-            cJSON_AddNumberToObject(o, "rssi", (double)e->rssi); /* what WE hear it at */
-        if (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) {
-            cJSON_AddNumberToObject(o, "cost", (double)e->cost);
-            cJSON_AddBoolToObject(o, "accepting", e->accepting);
-            cJSON_AddNumberToObject(o, "gateway", (double)e->gateway);
-            cJSON_AddNumberToObject(o, "beacons", (double)e->beacon_rx);
-            cJSON_AddNumberToObject(o, "forwards", (double)e->fwd_sent);
-        }
-        /* the other end of the stick: how well the best relay hears this station */
-        if (e->relay_rssi < 0) {
-            cJSON_AddNumberToObject(o, "relay_rssi", (double)e->relay_rssi);
-            cJSON_AddNumberToObject(o, "relay_rssi_from", (double)e->relay_rssi_from);
-        }
-        if (e->hears_count > 0) {
-            cJSON *const hears = cJSON_AddArrayToObject(o, "hears");
-            for (int k = 0; hears != NULL && k < e->hears_count; k++) {
-                cJSON *const hh = cJSON_CreateObject();
-                if (hh == NULL)
+    if (root) {
+        cJSON_AddNumberToObject(root, "station", (double)gateway_id);
+        cJSON_AddNumberToObject(root, "time", (double)hw_clock()); /* the document's own instant, epoch as a reader expects */
+        cJSON *const arr = cJSON_AddArrayToObject(root, "network");
+        if (arr)
+            for (int i = 0; i < n->count; i++) {
+                const netw_station_t *const e = &n->s[i];
+                cJSON *const o = cJSON_CreateObject();
+                if (!o)
                     break;
-                cJSON_AddNumberToObject(hh, "station", (double)e->hears[k].station);
-                if (e->hears[k].cost != IOTDATA_MESH_NBR_COST_SENSOR)
-                    cJSON_AddNumberToObject(hh, "cost", (double)e->hears[k].cost);
-                if (e->hears[k].rssi < 0)
-                    cJSON_AddNumberToObject(hh, "rssi", (double)e->hears[k].rssi);
-                cJSON_AddItemToArray(hears, hh);
+                cJSON_AddNumberToObject(o, "station", (double)e->station);
+                cJSON_AddStringToObject(o, "kind", netw_kind_name(e->kind));
+                if (e->last_seen_ms != 0)
+                    cJSON_AddNumberToObject(o, "age_secs", (double)((uint32_t)(now_ms - e->last_seen_ms) / 1000u));
+                cJSON_AddNumberToObject(o, "packets", (double)e->rx_count);
+                if (e->rssi < 0)
+                    cJSON_AddNumberToObject(o, "rssi", (double)e->rssi); /* what WE hear it at */
+                if (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) {
+                    cJSON_AddNumberToObject(o, "cost", (double)e->cost);
+                    cJSON_AddBoolToObject(o, "accepting", e->accepting);
+                    cJSON_AddNumberToObject(o, "gateway", (double)e->gateway);
+                    cJSON_AddNumberToObject(o, "beacons", (double)e->beacon_rx);
+                    cJSON_AddNumberToObject(o, "forwards", (double)e->fwd_sent);
+                }
+                /* the other end of the stick: how well the best relay hears this station */
+                if (e->relay_rssi < 0) {
+                    cJSON_AddNumberToObject(o, "relay_rssi", (double)e->relay_rssi);
+                    cJSON_AddNumberToObject(o, "relay_rssi_from", (double)e->relay_rssi_from);
+                }
+                if (e->hears_count > 0) {
+                    cJSON *const hears = cJSON_AddArrayToObject(o, "hears");
+                    if (hears)
+                        for (int k = 0; k < e->hears_count; k++) {
+                            cJSON *const hh = cJSON_CreateObject();
+                            if (!hh)
+                                break;
+                            cJSON_AddNumberToObject(hh, "station", (double)e->hears[k].station);
+                            if (e->hears[k].cost != IOTDATA_MESH_NBR_COST_SENSOR)
+                                cJSON_AddNumberToObject(hh, "cost", (double)e->hears[k].cost);
+                            if (e->hears[k].rssi < 0)
+                                cJSON_AddNumberToObject(hh, "rssi", (double)e->hears[k].rssi);
+                            cJSON_AddItemToArray(hears, hh);
+                        }
+                }
+                cJSON_AddItemToArray(arr, o);
             }
-        }
-        cJSON_AddItemToArray(arr, o);
     }
     return root;
 }
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 void netw_publish(const netw_t *const n, const uint16_t gateway_id, const char *const topic_prefix, char *const topic_buf, const size_t topic_len) {
     if (!mqtt_is_connected())
         return;
-    cJSON *const root = netw_build_json(n, gateway_id, time(NULL));
-    if (root == NULL)
-        return;
-    char *const json = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (json != NULL) {
-        (void)mqtt_send(snprintf_inline(topic_buf, topic_len, "%s%snetwork/%03" PRIX16, topic_prefix, (topic_prefix[0] != '\0' && topic_prefix[strlen(topic_prefix) - 1] == '/') ? "" : "/", gateway_id), json, (int)strlen(json));
-        free(json);
+    cJSON *const root = netw_build_json(n, gateway_id, hw_time_ms());
+    if (root) {
+        char *const json = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (json) {
+            (void)mqtt_send(snprintf_inline(topic_buf, topic_len, "%s%snetwork/%03" PRIX16, topic_prefix, (topic_prefix[0] != '\0' && topic_prefix[strlen(topic_prefix) - 1] == '/') ? "" : "/", gateway_id), json, (int)strlen(json));
+            free(json);
+        }
     }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void netw_report(netw_t *n, uint16_t gateway_id) {
-    const time_t now = time(NULL);
+    const uint32_t now_ms = hw_time_ms();
     int n_relay = 0, n_sensor = 0, n_gw = 0, n_stale = 0;
     uint32_t loss = 0, rx_total = 0;
     for (int i = 0; i < n->count; i++) {
@@ -441,7 +481,7 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
             n_gw++;
         else if (e->kind == NETW_KIND_RELAY)
             n_relay++;
-        else if (netw_is_stale(e, now)) /* ghost sensor: keep the record, drop it from the live view */
+        else if (netw_is_stale(e, now_ms)) /* ghost sensor: keep the record, drop it from the live view */
             n_stale++;
         else {
             n_sensor++;
@@ -460,19 +500,19 @@ void netw_report(netw_t *n, uint16_t gateway_id) {
         const netw_station_t *e = &n->s[ord[k].slot];
         if (e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) {
             PRINTF_INFO("      %03" PRIX16 " %-7s rssi=%ddBm age=%lds tx=%" PRIu32 "(gap=%" PRIu32 ",%.1f/min) beacons=%" PRIu32 " fwd=%" PRIu32 "(%.1f/min) acc=%c cost=%" PRIu8 " gen=%" PRIu8 " gw=%03" PRIX16 "%s\n", e->station,
-                        netw_kind_name(e->kind), e->rssi, (long)(now - e->last_seen), e->tx.rx, e->tx.gaps, netw_rate_per_min(e->tx.rx, e->first_seen, now), e->beacon_rx, e->fwd_sent, netw_rate_per_min(e->fwd_sent, e->first_seen, now),
-                        e->accepting ? 'Y' : 'N', e->cost, e->generation, e->gateway, netw_hears_format(e, n->_buffer_hears, sizeof(n->_buffer_hears)));
+                        netw_kind_name(e->kind), e->rssi, (long)((uint32_t)(now_ms - e->last_seen_ms) / 1000u), e->tx.rx, e->tx.gaps, netw_rate_per_min(e->tx.rx, e->first_seen_ms, now_ms), e->beacon_rx, e->fwd_sent,
+                        netw_rate_per_min(e->fwd_sent, e->first_seen_ms, now_ms), e->accepting ? 'Y' : 'N', e->cost, e->generation, e->gateway, netw_hears_format(e, n->_buffer_hears, sizeof(n->_buffer_hears)));
         }
     }
     for (int k = 0; k < ordered; k++) {
         const netw_station_t *e = &n->s[ord[k].slot];
-        if (!(e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) && !netw_is_stale(e, now)) {
+        if (!(e->kind == NETW_KIND_RELAY || e->kind == NETW_KIND_GATEWAY) && !netw_is_stale(e, now_ms)) {
             char via[80], rly[40];
             PRINTF_INFO("      %03" PRIX16 " %-7s rssi=%ddBm%s age=%lds var=%" PRIu8 " uniq=%" PRIu32 "(gap=%" PRIu32 ",%.1f%%,%.1f/min) recv=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32 ") mesh=%" PRIu32 "(dup=%" PRIu32 ",gap=%" PRIu32
                         ")%s\n",
-                        e->station, netw_kind_name(e->kind), e->rssi, e->relay_rssi != 0 ? snprintf_inline(rly, sizeof(rly), " relay=%ddBm(%03" PRIX16 ")", e->relay_rssi, e->relay_rssi_from) : "", (long)(now - e->last_seen), e->variant,
-                        e->uniq.rx, e->uniq.gaps, netw_loss_pct(e->uniq.gaps, e->uniq.rx), netw_rate_per_min(e->uniq.rx, e->first_seen, now), e->direct.rx, e->direct.dup, e->direct.gaps, e->mesh.rx, e->mesh.dup, e->mesh.gaps,
-                        netw_via_format(e, via, sizeof(via)));
+                        e->station, netw_kind_name(e->kind), e->rssi, e->relay_rssi != 0 ? snprintf_inline(rly, sizeof(rly), " relay=%ddBm(%03" PRIX16 ")", e->relay_rssi, e->relay_rssi_from) : "",
+                        (long)((uint32_t)(now_ms - e->last_seen_ms) / 1000u), e->variant, e->uniq.rx, e->uniq.gaps, netw_loss_pct(e->uniq.gaps, e->uniq.rx), netw_rate_per_min(e->uniq.rx, e->first_seen_ms, now_ms), e->direct.rx,
+                        e->direct.dup, e->direct.gaps, e->mesh.rx, e->mesh.dup, e->mesh.gaps, netw_via_format(e, via, sizeof(via)));
         }
     }
 }

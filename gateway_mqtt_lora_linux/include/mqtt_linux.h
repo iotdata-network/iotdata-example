@@ -198,7 +198,7 @@ static void __mqtt_connect_callback(struct mosquitto *m, void *o __attribute__((
     }
     mqtt_connected = true;
     mqtt_stat_connects++;
-    mqtt_stat_last_connect_time = time(NULL);
+    mqtt_stat_last_connect_time = hw_clock();
     mqtt_reconnect_delay_current = mqtt_reconnect_delay_base;
     mqtt_reconnect_next_attempt = 0;
     PRINTF_INFO("mqtt: connected\n");
@@ -218,7 +218,7 @@ static void __mqtt_disconnect_callback(struct mosquitto *m, void *o __attribute_
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void __mqtt_reconnect_attempt(void) {
-    const time_t now = time(NULL);
+    const time_t now = hw_clock();
     if (now < mqtt_reconnect_next_attempt)
         return;
     if (mqtt_reconnect_delay_current == 0)
@@ -264,7 +264,7 @@ bool mqtt_begin(const mqtt_config_t *cfg) {
     }
     PRINTF_INFO("mqtt: connecting (host='%s', port=%d, ssl=%s, client='%s')\n", host, port, ssl ? "true" : "false", cfg->client);
     char client_id[24];
-    snprintf(client_id, sizeof(client_id), "%s-%06X", cfg->client ? cfg->client : "mqtt-linux", (unsigned int)(time(NULL) ^ getpid()) & 0xFFFFFF);
+    snprintf(client_id, sizeof(client_id), "%s-%06X", cfg->client ? cfg->client : "mqtt-linux", (unsigned int)(hw_clock() ^ getpid()) & 0xFFFFFF);
     mosquitto_lib_init();
     mosq = mosquitto_new(client_id, true, NULL);
     if (!mosq) {

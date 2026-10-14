@@ -21,6 +21,7 @@
 // tick below then periodically retries (re-resolve / re-ARP) so it recovers when the host returns.
 #define DDUP_PEER_FAIL_STREAK_MAX    8  /* consecutive sendto() failures before a peer -> unresolved */
 #define DDUP_PEER_RESOLVE_RETRY_SECS 30 /* re-resolve unresolved peers this often (boot DNS not ready, or recovery) */
+#define DDUP_CLASH_WARN_SECS         30 /* throttle the shared-gateway-id warning to one per this (every packet would clash) */
 
 // AUTO-PEER LIVENESS: the presence message (iotdata/ddup/<gwid>) is RETAINED with an empty-payload LWT,
 // so a clean death (process exit / local-broker disconnect) prunes the peer instantly. But a WHOLE-BOX or
@@ -28,7 +29,7 @@
 // LOCAL broker and never reaches us. So the presence also carries the publisher's `ts`; we prune any auto
 // peer whose ts hasn't advanced within the TTL. Using the PAYLOAD ts (not receive time) is deliberate: a
 // retained re-delivery on a bridge reconnect carries the OLD ts, so it can't falsely reset the timer.
-#define DDUP_PEER_TTL_SECS           90 /* prune an auto peer not re-announced within this (3x PEER_PRESENCE_REPUBLISH_SECS) */
+#define DDUP_PEER_TTL_SECS           90 /* prune an auto peer not re-announced within this (3x DDUP_PEERS_REPUBLISH_SECS) */
 
 #define DDUP_PKT_HEADER_SIZE         3
 #define DDUP_PKT_SIZE                (DDUP_PKT_HEADER_SIZE + DDUP_BATCH_MAX * 4) /* 131 bytes */
@@ -73,8 +74,8 @@ typedef struct {
     uint8_t packet[DDUP_HOLD_PKT_MAX]; /* copied: the rx buffer is reused next loop */
     const char *topic_prefix, *via;    /* stable pointers, carried through to the release */
     int rssi_dbm;                      /* this hop's reception, unrecoverable once the moment passes */
-    struct timespec received;          /* when we received it — for the claim-latency measurement on a drop */
-    struct timespec deadline;          /* received + dynamic hold; publish (we won) when reached */
+    uint32_t received_ms;              /* the tick we received it on — for the claim-latency measurement on a drop */
+    uint32_t deadline_ms;              /* received + dynamic hold; publish (we won) when reached */
 } ddup_hold_entry_t;
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -104,19 +105,19 @@ typedef struct {
     pthread_t thread;
     iotdata_mesh_dedup_entry_t pending[DDUP_PENDING_MAX];
     int pending_count;
-    struct timespec pending_first;
+    uint32_t pending_first_ms; /* tick the batch opened on; only read while pending_count > 0, so it needs no unset sentinel */
     uint16_t gateway_id;
     iotdata_mesh_dedup_ring_t *dedup_ring;
     volatile bool *running;
     bool debug;
     unsigned debug_inject_latency_ms;
     /* hold-and-elect queue (publish-point dedup) */
-    uint32_t hold_ms;                         /* ddup-hold-ms: the SAFETY CEILING; the dynamic hold never exceeds it (0 = publish immediately) */
-    uint32_t hold_ms_dynamic;                 /* the auto-tuned hold actually used (<= hold_ms); for reporting */
-    uint32_t claim_latency_max_ms;            /* decaying high-water of measured peer-claim latency -> drives the dynamic hold */
-    uint64_t claim_latency_sum_ms;            /* for the reported average */
-    uint32_t claim_latency_count;             /* number of claim-latency samples */
-    struct timespec claim_latency_decay_last; /* last time we bled the max down */
+    uint32_t hold_ms;                     /* ddup-hold-ms: the SAFETY CEILING; the dynamic hold never exceeds it (0 = publish immediately) */
+    uint32_t hold_ms_dynamic;             /* the auto-tuned hold actually used (<= hold_ms); for reporting */
+    uint32_t claim_latency_max_ms;        /* decaying high-water of measured peer-claim latency -> drives the dynamic hold */
+    uint64_t claim_latency_sum_ms;        /* for the reported average */
+    uint32_t claim_latency_count;         /* number of claim-latency samples */
+    uint32_t claim_latency_decay_last_ms; /* tick we last bled the max down on (0 = never) */
     ddup_hold_entry_t hold[DDUP_HOLD_MAX];
     /* statistics */
     uint32_t stat_held;          /* readings entered into the hold queue */
@@ -134,10 +135,10 @@ typedef struct {
     uint32_t stat_pending_overflow;
     uint32_t stat_peers_resolved;
     uint32_t stat_peers_unresolved;
-    uint32_t stat_peers_expired;     /* auto peers pruned by the presence-ts TTL (box/bridge death the LWT couldn't cover) */
-    uint32_t stat_id_clash;          /* peer packets seen carrying OUR gateway-id (misconfig) */
-    uint32_t stat_recv_unknown;      /* packets dropped: source IP is not a configured peer */
-    struct timespec last_clash_warn; /* throttle the clash warning */
+    uint32_t stat_peers_expired; /* auto peers pruned by the presence-ts TTL (box/bridge death the LWT couldn't cover) */
+    uint32_t stat_id_clash;      /* peer packets seen carrying OUR gateway-id (misconfig) */
+    uint32_t stat_recv_unknown;  /* packets dropped: source IP is not a configured peer */
+    uint32_t last_clash_warn_ms; /* throttle the clash warning (0 = never warned) */
 } ddup_state_t;
 
 #define DDUP_MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -162,10 +163,10 @@ typedef uint8_t ddup_packet_t[DDUP_PKT_SIZE];
     do { \
         pkt[2] = (uint8_t)(entry_count); \
     } while (0)
-#define ddup_packet_set_entry_station(pkt, entry_index, station_id) \
+#define ddup_packet_set_entry_station(pkt, entry_index, station) \
     do { \
-        pkt[(3 + entry_index * 4) + 0] = (uint8_t)((station_id) >> 8); \
-        pkt[(3 + entry_index * 4) + 1] = (uint8_t)((station_id) & 0xFF); \
+        pkt[(3 + entry_index * 4) + 0] = (uint8_t)((station) >> 8); \
+        pkt[(3 + entry_index * 4) + 1] = (uint8_t)((station) & 0xFF); \
     } while (0)
 #define ddup_packet_set_entry_sequence(pkt, entry_index, sequence) \
     do { \
@@ -208,8 +209,7 @@ void ddup_peers_parse(ddup_state_t *state, const char *peers_str) {
                 port = (uint16_t)atoi(colon + 1);
             }
             ddup_peer_t *p = &state->peers[slot];
-            *p = (ddup_peer_t){ 0 };
-            p->used = true;
+            *p = (ddup_peer_t){ .used = true };
             snprintf(p->host, sizeof(p->host), "%s", tok);
             p->port = port;
             state->peers_count++;
@@ -455,10 +455,9 @@ void ddup_recv_from_peers(ddup_state_t *state, int recv_fd) {
             state->stat_id_clash++;
             p->broken = true;
             snprintf(peerdesc, sizeof(peerdesc), "%s:%" PRIu16, p->host, p->port);
-            struct timespec now;
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            if (state->last_clash_warn.tv_sec == 0 || now.tv_sec - state->last_clash_warn.tv_sec >= 30) {
-                state->last_clash_warn = now;
+            const uint32_t now_ms = hw_time_ms();
+            if (state->last_clash_warn_ms == 0 || (now_ms - state->last_clash_warn_ms) >= DDUP_CLASH_WARN_SECS * 1000u) {
+                state->last_clash_warn_ms = now_ms;
                 warn = true;
             }
         } else {
@@ -506,16 +505,12 @@ int ddup_send_setup(__attribute__((unused)) ddup_state_t *state) {
 
 int ddup_send_collect(ddup_state_t *state, iotdata_mesh_dedup_entry_t *send_entries) {
     int send_count = 0;
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    const uint32_t now_ms = hw_time_ms();
     pthread_mutex_lock(&state->mutex);
-    if (state->pending_count > 0) {
-        const int32_t elapsed_ms = (int32_t)((now.tv_sec - state->pending_first.tv_sec) * 1000L) + (int32_t)((now.tv_nsec - state->pending_first.tv_nsec) / 1000000L);
-        if (elapsed_ms > 0 && (uint32_t)elapsed_ms >= state->delay_ms) {
-            send_count = state->pending_count;
-            memcpy(send_entries, state->pending, (size_t)send_count * sizeof(iotdata_mesh_dedup_entry_t));
-            state->pending_count = 0;
-        }
+    if (state->pending_count > 0 && (now_ms - state->pending_first_ms) >= state->delay_ms) {
+        send_count = state->pending_count;
+        memcpy(send_entries, state->pending, (size_t)send_count * sizeof(iotdata_mesh_dedup_entry_t));
+        state->pending_count = 0;
     }
     pthread_mutex_unlock(&state->mutex);
     return send_count;
@@ -532,7 +527,7 @@ void ddup_send_to_peers(ddup_state_t *state, int send_fd, iotdata_mesh_dedup_ent
         ddup_packet_set_gateway_id(pkt, state->gateway_id);
         ddup_packet_set_entry_count(pkt, entry_count);
         for (int entry_index = 0; entry_index < entry_count; entry_index++) {
-            ddup_packet_set_entry_station(pkt, entry_index, send_entries[send_offset + entry_index].station_id);
+            ddup_packet_set_entry_station(pkt, entry_index, send_entries[send_offset + entry_index].station);
             ddup_packet_set_entry_sequence(pkt, entry_index, send_entries[send_offset + entry_index].sequence);
         }
         const size_t pkt_len = ddup_packet_get_length(pkt);
@@ -602,16 +597,17 @@ void ddup_peers_reresolve(ddup_state_t *state) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void *ddup_thread_func(void *arg) {
+void *ddup_thread(void *arg) {
     ddup_state_t *state = (ddup_state_t *)arg;
     int recv_fd, send_fd;
     if ((recv_fd = ddup_recv_setup(state)) < 0)
-        goto ddup_end_all;
-    if ((send_fd = ddup_send_setup(state)) < 0)
-        goto ddup_end_send;
+        return NULL;
+    if ((send_fd = ddup_send_setup(state)) < 0) {
+        close(recv_fd);
+        return NULL;
+    }
     iotdata_mesh_dedup_entry_t send_entries[DDUP_PENDING_MAX];
-    struct timespec last_resolve;
-    clock_gettime(CLOCK_MONOTONIC, &last_resolve);
+    uint32_t last_resolve_ms = hw_time_ms();
     while (*state->running) {
         ddup_recv_from_peers(state, recv_fd);
         // Always drain `pending` (it batches new ring entries), even with no peers — otherwise a
@@ -621,35 +617,32 @@ void *ddup_thread_func(void *arg) {
         if (send_count > 0 && state->peers_count > 0)
             ddup_send_to_peers(state, send_fd, send_entries, send_count);
         // periodically retry unresolved peers (boot DNS not ready, or a dropped peer that may be back)
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        if (now.tv_sec - last_resolve.tv_sec >= DDUP_PEER_RESOLVE_RETRY_SECS) {
-            last_resolve = now;
+        const uint32_t now_ms = hw_time_ms();
+        if ((now_ms - last_resolve_ms) >= DDUP_PEER_RESOLVE_RETRY_SECS * 1000u) {
+            last_resolve_ms = now_ms;
             ddup_peers_reresolve(state);
         }
     }
     close(send_fd);
-ddup_end_send:
     close(recv_fd);
-ddup_end_all:
     return NULL;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool ddup_check_and_add(ddup_state_t *state, uint16_t station_id, uint16_t sequence) {
+bool ddup_check_and_add(ddup_state_t *state, uint16_t station, uint16_t sequence) {
     if (!state->enabled)
-        return iotdata_mesh_dedup_insert(state->dedup_ring, station_id, sequence);
+        return iotdata_mesh_dedup_insert(state->dedup_ring, station, sequence);
     else {
         pthread_mutex_lock(&state->mutex);
-        const bool is_new = iotdata_mesh_dedup_insert(state->dedup_ring, station_id, sequence);
+        const bool is_new = iotdata_mesh_dedup_insert(state->dedup_ring, station, sequence);
         if (is_new) {
             if (state->pending_count < DDUP_PENDING_MAX) {
-                state->pending[state->pending_count].station_id = station_id;
+                state->pending[state->pending_count].station = station;
                 state->pending[state->pending_count].sequence = sequence;
                 if (state->pending_count++ == 0)
-                    clock_gettime(CLOCK_MONOTONIC, &state->pending_first);
+                    state->pending_first_ms = hw_time_ms();
             } else
                 state->stat_pending_overflow++;
         }
@@ -723,16 +716,9 @@ ddup_verdict_t ddup_admit(ddup_state_t *state, uint16_t station, uint16_t sequen
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static bool ddup_ts_reached(const struct timespec *now, const struct timespec *deadline) {
-    return now->tv_sec > deadline->tv_sec || (now->tv_sec == deadline->tv_sec && now->tv_nsec >= deadline->tv_nsec);
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
-
 // Record one measured peer-claim latency (now - received) into the dynamic-hold tracker. CALLER HOLDS the lock.
-static void ddup_claim_latency_sample(ddup_state_t *state, const struct timespec *now, const struct timespec *received) {
-    const long long ms = (long long)(now->tv_sec - received->tv_sec) * 1000LL + (now->tv_nsec - received->tv_nsec) / 1000000L;
-    const uint32_t d = ms < 0 ? 0 : (uint32_t)ms;
+static void ddup_claim_latency_sample(ddup_state_t *state, uint32_t now_ms, uint32_t received_ms) {
+    const uint32_t d = now_ms - received_ms; /* unsigned: wrap-correct, and a monotonic tick never runs backwards */
     if (d > state->claim_latency_max_ms)
         state->claim_latency_max_ms = d;
     state->claim_latency_sum_ms += d;
@@ -744,14 +730,14 @@ static void ddup_claim_latency_sample(ddup_state_t *state, const struct timespec
 // The hold we ACTUALLY use: tighten BELOW the ceiling toward the measured claim latency (max*1.5 + margin),
 // but only once we have enough samples; bleed the measured-max down over time so it re-tightens if the
 // deployment gets faster. Always in [floor, ceiling]. CALLER HOLDS the lock. Also stores hold_ms_dynamic.
-static uint32_t ddup_hold_ms_effective(ddup_state_t *state, const struct timespec *now) {
-    if (state->claim_latency_decay_last.tv_sec == 0)
-        state->claim_latency_decay_last = *now;
-    long long periods = (long long)(now->tv_sec - state->claim_latency_decay_last.tv_sec) / DDUP_LATENCY_DECAY_SECS;
+static uint32_t ddup_hold_ms_effective(ddup_state_t *state, uint32_t now_ms) {
+    if (state->claim_latency_decay_last_ms == 0)
+        state->claim_latency_decay_last_ms = now_ms;
+    uint32_t periods = (now_ms - state->claim_latency_decay_last_ms) / (DDUP_LATENCY_DECAY_SECS * 1000u);
     if (periods > 0) {
         while (periods-- > 0 && state->claim_latency_max_ms > 0)
             state->claim_latency_max_ms -= state->claim_latency_max_ms / 8; /* -12.5% per period */
-        state->claim_latency_decay_last = *now;
+        state->claim_latency_decay_last_ms = now_ms;
     }
     uint32_t dyn;
     if (state->claim_latency_count < DDUP_LATENCY_MIN_SAMPLES || state->claim_latency_max_ms == 0)
@@ -774,8 +760,7 @@ static uint32_t ddup_hold_ms_effective(ddup_state_t *state, const struct timespe
 bool ddup_hold_add(ddup_state_t *state, const uint8_t *packet, int packet_len, uint8_t variant, uint16_t station, uint16_t sequence, const char *topic_prefix, const char *via, int rssi_dbm) {
     if (packet_len > DDUP_HOLD_PKT_MAX)
         packet_len = DDUP_HOLD_PKT_MAX;
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    const uint32_t now_ms = hw_time_ms();
     pthread_mutex_lock(&state->mutex);
     int slot = -1;
     for (int i = 0; i < (int)(sizeof(state->hold) / sizeof(state->hold[0])); i++) {
@@ -790,25 +775,21 @@ bool ddup_hold_add(ddup_state_t *state, const uint8_t *packet, int packet_len, u
         pthread_mutex_unlock(&state->mutex);
         return false;
     }
-    const uint32_t eff = ddup_hold_ms_effective(state, &now); /* dynamic hold (<= ceiling), under lock */
+    const uint32_t eff = ddup_hold_ms_effective(state, now_ms); /* dynamic hold (<= ceiling), under lock */
     ddup_hold_entry_t *h = &state->hold[slot];
-    h->used = true;
-    h->station = station;
-    h->sequence = sequence;
-    h->variant = variant;
+    *h = (ddup_hold_entry_t){
+        .used = true,
+        .station = station,
+        .sequence = sequence,
+        .variant = variant,
+        .topic_prefix = topic_prefix,
+        .via = via,
+        .rssi_dbm = rssi_dbm,
+        .received_ms = now_ms,
+        .deadline_ms = now_ms + eff, /* a tick deadline is one add; the compare below is wrap-safe */
+    };
     h->packet_len = packet_len;
     memcpy(h->packet, packet, (size_t)packet_len);
-    h->topic_prefix = topic_prefix;
-    h->via = via;
-    h->rssi_dbm = rssi_dbm;
-    h->received = now;
-    h->deadline = now;
-    h->deadline.tv_sec += (time_t)(eff / 1000);
-    h->deadline.tv_nsec += (long)(eff % 1000) * 1000000L;
-    if (h->deadline.tv_nsec >= 1000000000L) {
-        h->deadline.tv_sec++;
-        h->deadline.tv_nsec -= 1000000000L;
-    }
     state->stat_held++;
     pthread_mutex_unlock(&state->mutex);
     if (state->debug)
@@ -822,13 +803,12 @@ bool ddup_hold_add(ddup_state_t *state, const uint8_t *packet, int packet_len, u
 // hold) and EARLY-DROP: free the slot immediately rather than letting it sit until expiry. CALLER MUST
 // HOLD state->mutex (invoked from the recv loop, already under the lock).
 void ddup_hold_mark_dropped(ddup_state_t *state, uint16_t station, uint16_t sequence) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    const uint32_t now_ms = hw_time_ms();
     for (int i = 0, found = 0; i < (int)(sizeof(state->hold) / sizeof(state->hold[0])) && !found; i++) {
         ddup_hold_entry_t *h = &state->hold[i];
         if (h->used && h->station == station && h->sequence == sequence) {
-            ddup_claim_latency_sample(state, &now, &h->received); /* learn how long the claim took */
-            h->used = false;                                      /* early-drop: we lost, free the slot now */
+            ddup_claim_latency_sample(state, now_ms, h->received_ms); /* learn how long the claim took */
+            h->used = false;                                          /* early-drop: we lost, free the slot now */
             state->stat_dropped_peer++;
             if (state->debug)
                 PRINTF_INFO("ddup: DROP station=0x%04" PRIX16 " seq=%" PRIu16 " (lower-id peer claimed; freed)\n", station, sequence);
@@ -843,15 +823,19 @@ void ddup_hold_mark_dropped(ddup_state_t *state, uint16_t station, uint16_t sequ
 // still here is a WINNER: publish it. Snapshots one entry at a time UNDER the lock, fires the callback
 // OUTSIDE the lock (so mqtt_send never runs holding the mutex). Called each iteration of the rx/exec loop.
 void ddup_hold_release(ddup_state_t *state, ddup_release_fn cb, void *ctx) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    /* READS THE CLOCK ITSELF rather than taking the exec pass's now_ms, unlike every other tick.
+       The pass is stamped BEFORE a lora_read() that blocks for up to LORA_READ_TIMEOUT_MS, so by
+       the time the loop reaches here that stamp can be seconds old -- which against a 50-1000ms
+       hold would defer every winner by a whole further iteration. Second-scale cadences don't
+       care; a sub-second deadline does. */
+    const uint32_t now_ms = hw_time_ms();
     for (;;) {
         ddup_hold_entry_t e;
         bool found = false;
         pthread_mutex_lock(&state->mutex);
         for (int i = 0; i < (int)(sizeof(state->hold) / sizeof(state->hold[0])) && !found; i++) {
             ddup_hold_entry_t *h = &state->hold[i];
-            if (h->used && ddup_ts_reached(&now, &h->deadline)) {
+            if (h->used && (int32_t)(now_ms - h->deadline_ms) >= 0) {
                 e = *h; /* copy out before freeing the slot */
                 h->used = false;
                 state->stat_released++;
@@ -882,7 +866,7 @@ bool ddup_begin(ddup_state_t *state, uint16_t gateway_id, iotdata_mesh_dedup_rin
     PRINTF_INFO("ddup: enabled, port=%" PRIu16 ", peers=%d, gateway_id=%04" PRIX16 ", delay=%" PRIu32 "ms, debug=%c\n", state->port, state->peers_count, state->gateway_id, state->delay_ms, state->debug ? 'y' : 'n');
     ddup_peers_resolve(state);
     pthread_mutex_init(&state->mutex, NULL);
-    if (pthread_create(&state->thread, NULL, ddup_thread_func, state) != 0) {
+    if (pthread_create(&state->thread, NULL, ddup_thread, state) != 0) {
         state->enabled = false;
         PRINTF_ERROR("ddup: thread create failed: %s\n", strerror(errno));
         pthread_mutex_destroy(&state->mutex);
@@ -898,6 +882,162 @@ void ddup_end(ddup_state_t *state) {
         return;
     pthread_join(state->thread, NULL);
     pthread_mutex_destroy(&state->mutex);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// iotdata_gateway_peer.h - ddup AUTO-PEERING via MQTT presence.
+//
+// THE PROBLEM IT SOLVES: a static `ddup-peers` list is a list of addresses somebody has to keep
+// correct, on every gateway, as a fleet grows or a box changes address. Presence turns that round:
+// each gateway says where IT is, and everybody else listens. `ddup-peers = mqtt` is the whole
+// configuration.
+//
+// exec/main owns MQTT here; ddup only exposes the lockable peer add/remove. Presence is published
+// retained to iotdata/ddup/<gwid> = {"ip":..,"port":..,"time":<epoch>}; the LWT is an empty retained
+// message (offline). The topic is fleet-bridged (iotdata/ddup/#, both directions), so every gateway
+// sees every other's address. On receipt we ddup_peer_insert/remove (keyed by gateway-id); our own
+// presence (the bridge echo) is ignored. The `ts` lets a peer be aged out when its box/bridge dies and
+// the LWT can't reach us (the LWT fires on the dead box's LOCAL broker) — see DDUP_PEER_TTL_SECS. A
+// stale retained presence re-delivered on a bridge reconnect carries the OLD ts, so it can't refresh a
+// dead peer. Public/private-IP/NAT is a sysadmin concern (VPN/tunnel).
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <cjson/cJSON.h>
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+#ifndef DDUP_PEERS_REPUBLISH_SECS
+#define DDUP_PEERS_REPUBLISH_SECS 30 // re-publish at least this often (recover from a broker restart)
+#endif
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+typedef struct {
+    ddup_state_t *ddup;
+    uint16_t gwid;
+    char topic[64];   // iotdata/ddup/<gwid>
+    char last_ip[64]; // last advertised IP (re-publish when it changes)
+    time_t last_pub;
+} ddup_peers_t;
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static char *ddup_peers_topic(uint16_t gwid, char *out, size_t outsz) {
+    return snprintf_inline(out, outsz, "iotdata/ddup/%03" PRIX16, gwid);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+// Resolve our advertise IPv4 from the qualifier: a literal IP -> as-is; an interface name -> its
+// IPv4; "" -> the first non-loopback IPv4. Returns true + writes ip.
+static bool ddup_peer_resolve_advertise_ip(const char *qualifier, char *ip, size_t ipsz) {
+    bool found = false;
+    struct in_addr lit;
+    if (qualifier[0] && inet_pton(AF_INET, qualifier, &lit) == 1) {
+        snprintf(ip, ipsz, "%s", qualifier);
+        found = true;
+    } else {
+        struct ifaddrs *ifap = NULL;
+        if (getifaddrs(&ifap) == 0) {
+            for (struct ifaddrs *p = ifap; p && !found; p = p->ifa_next) {
+                if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET || (p->ifa_flags & IFF_LOOPBACK))
+                    continue;
+                if (qualifier[0] && strcmp(p->ifa_name, qualifier) != 0)
+                    continue;
+                char buf[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, &((const struct sockaddr_in *)(const void *)p->ifa_addr)->sin_addr, buf, sizeof(buf))) {
+                    snprintf(ip, ipsz, "%s", buf);
+                    found = true;
+                }
+            }
+            freeifaddrs(ifap);
+        }
+    }
+    return found;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static void ddup_peers_on_message(void *ctx, const char *topic, const void *payload, int len) {
+    ddup_peers_t *pp = (ddup_peers_t *)ctx;
+    const char *slash = strrchr(topic, '/');
+    if (!slash || !slash[1])
+        return;
+    const uint16_t gwid = (uint16_t)strtol(slash + 1, NULL, 16);
+    if (gwid == pp->gwid)
+        return;     // our own presence (bridge echo)
+    if (len <= 0) { // empty retained = offline / LWT
+        ddup_peer_remove(pp->ddup, gwid);
+        return;
+    }
+    cJSON *j = cJSON_ParseWithLength(payload, (size_t)len);
+    if (j) {
+        const cJSON *jaddr = cJSON_GetObjectItem(j, "ip");
+        const cJSON *jport = cJSON_GetObjectItem(j, "port");
+        const cJSON *jtime = cJSON_GetObjectItem(j, "time");
+        if (cJSON_IsString(jaddr) && jaddr->valuestring[0]) {
+            const uint16_t port = cJSON_IsNumber(jport) ? (uint16_t)jport->valueint : pp->ddup->port;
+            const time_t ts = cJSON_IsNumber(jtime) ? (time_t)jtime->valuedouble : 0; // 0 = un-stamped (legacy peer)
+            // A STALE retained presence (the peer's box/bridge died, the LWT fired only on its local broker)
+            // carries an old ts — treat it as offline instead of (re)inserting a ghost; otherwise insert/refresh.
+            if (ts != 0 && (long long)(hw_clock() - ts) > DDUP_PEER_TTL_SECS)
+                ddup_peer_remove(pp->ddup, gwid);
+            else
+                ddup_peer_insert(pp->ddup, gwid, jaddr->valuestring, port, ts);
+        }
+        cJSON_Delete(j);
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+static void ddup_peers_tick(ddup_peers_t *pp, time_t now) {
+    if (!pp || !pp->ddup || !pp->ddup->auto_peer || !pp->ddup->enabled) // uninitialised (static peers) / ddup-enable master switch
+        return;
+    ddup_peers_expire(pp->ddup, now); // backstop: prune peers whose presence ts went stale (box/bridge death the LWT can't cover)
+    char ip[64];
+    if (ddup_peer_resolve_advertise_ip(pp->ddup->advertise_qualifier, ip, sizeof(ip))) {
+        const bool changed = strcmp(ip, pp->last_ip) != 0;
+        if (changed || pp->last_pub == 0 || (now - pp->last_pub) >= DDUP_PEERS_REPUBLISH_SECS) {
+            char payload[128];
+            const int n = snprintf(payload, sizeof(payload), "{\"ip\":\"%s\",\"port\":%u,\"time\":%lld}", ip, (unsigned)pp->ddup->port, (long long)now);
+            if (mqtt_send_retained(pp->topic, payload, n)) {
+                if (changed)
+                    PRINTF_INFO("ddup-peer: presence %s -> %s\n", pp->topic, payload);
+                snprintf(pp->last_ip, sizeof(pp->last_ip), "%s", ip);
+                pp->last_pub = now;
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+// Set ONLY the last-will. MUST be called BEFORE mqtt_begin() (the will is registered at
+// connect). The aux subscription is deferred to ddup_peers_start() because the handler calls
+// into ddup, whose mutex isn't initialised until ddup_begin() (after the config connect/settle).
+__attribute__((unused)) static void ddup_peers_init(ddup_peers_t *pp, ddup_state_t *ddup, uint16_t gwid) {
+    *pp = (ddup_peers_t){ .ddup = ddup, .gwid = gwid };
+    mqtt_set_will(ddup_peers_topic(gwid, pp->topic, sizeof(pp->topic))); // LWT: empty retained = offline. BEFORE mqtt_begin(), or it is never registered.
+    PRINTF_INFO("ddup-peer: auto-discovery via MQTT presence on %s (advertise=%s)\n", pp->topic, ddup->advertise_qualifier[0] ? ddup->advertise_qualifier : "auto");
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+__attribute__((unused)) static void ddup_peers_begin(ddup_peers_t *pp) {
+    (void)mqtt_subscribe_aux("iotdata/ddup/#", "iotdata/ddup/", ddup_peers_on_message, pp);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+__attribute__((unused)) static void ddup_peers_end(ddup_peers_t *pp) {
+    if (pp->ddup && pp->ddup->auto_peer)
+        (void)mqtt_send_retained(pp->topic, NULL, 0);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

@@ -175,18 +175,18 @@ static bool gateway_config_set(const char *const key, const char *const text, co
 /* `key = value`, `#` and `;` to end of line, blanks ignored. */
 static bool gateway_config_read(const char *const path, const bool required, const bool from_overlay) {
     FILE *const f = fopen(path, "r");
-    if (f == NULL) {
+    if (!f) {
         if (required) /* an absent OVERLAY is the ordinary case: nothing has been changed yet */
             PRINTF_ERROR("config: could not read '%s'\n", path);
         return false;
     }
     char line[512];
-    while (fgets(line, sizeof(line), f) != NULL) {
+    while (fgets(line, sizeof(line), f)) {
         char *const hash = strpbrk(line, "#;");
-        if (hash != NULL)
+        if (hash)
             *hash = '\0';
         char *const eq = strchr(line, '=');
-        if (eq != NULL) {
+        if (eq) {
             *eq = '\0';
             char *key = line, *val = eq + 1;
             while (*key != '\0' && isspace((unsigned char)*key))
@@ -225,7 +225,7 @@ static bool gateway_config_argv(const int argc, char **const argv) {
         char name[80];
         const char *val = NULL;
         const char *const eq = strchr(argv[i] + 2, '=');
-        if (eq != NULL) {
+        if (eq) {
             const size_t n = (size_t)(eq - (argv[i] + 2));
             if (n >= sizeof(name))
                 return false;
@@ -265,7 +265,7 @@ static const char *gateway_config_argv_peek(const int argc, char **const argv, c
     for (int i = 1; i < argc; i++)
         if (strncmp(argv[i], "--", 2) == 0) {
             const char *const eq = strchr(argv[i] + 2, '=');
-            if (eq != NULL) {
+            if (eq) {
                 if ((size_t)(eq - (argv[i] + 2)) == strlen(want) && strncmp(argv[i] + 2, want, strlen(want)) == 0)
                     return eq + 1;
             } else if (strcmp(argv[i] + 2, want) == 0 && i + 1 < argc)
@@ -284,9 +284,9 @@ static const char *gateway_config_argv_peek(const int argc, char **const argv, c
  * command line still wins over both, because that is for this run and a person is watching. */
 static bool gateway_config_load(const int argc, char **const argv) {
     const char *const named = gateway_config_argv_peek(argc, argv, "config");
-    const char *const file = (named != NULL) ? named : CONFIG_FILE_DEFAULT;
+    const char *const file = (named) ? named : CONFIG_FILE_DEFAULT;
     const char *const over = gateway_config_argv_peek(argc, argv, "overlay");
-    gateway_config_overlay_path = (over != NULL) ? over : CONFIG_OVERLAY_DEFAULT;
+    gateway_config_overlay_path = (over) ? over : CONFIG_OVERLAY_DEFAULT;
     /* A file named explicitly must be readable: falling back to defaults would silently apply the
        wrong settings and, for a gateway, put the attached radio on the wrong channel. */
     /* Recorded before the read, so that `conf config` answers with the file actually in use rather
@@ -313,7 +313,7 @@ static bool gateway_config_load(const int argc, char **const argv) {
     iotdata_node_settings_defaults(&gateway_settings, iotdata_node_station_from_mac("gateway"));
     iotdata_node_settings_freeze(&gateway_settings);
 
-    if (!gateway_config_read(file, named != NULL, false) && named != NULL)
+    if (!gateway_config_read(file, named != NULL, false) && named)
         return false;
     (void)gateway_config_read(gateway_config_overlay_path, false, true);
     if (!gateway_config_argv(argc, argv))
@@ -335,13 +335,13 @@ static bool gateway_config_load(const int argc, char **const argv) {
    what it now owns; this puts the whole picture back on disk in a single atomic replace, so a
    config write can never drop the settings lines and a settings write can never drop the rows. */
 static bool gateway_overlay_write(void) {
-    if (gateway_config_overlay_path == NULL) {
+    if (!gateway_config_overlay_path) {
         PRINTF_ERROR("config: nowhere to write to -- no overlay path was set\n");
         return false;
     }
     char tmp[PATH_MAX];
     FILE *const f = fopen(snprintf_inline(tmp, sizeof(tmp), "%s.new", gateway_config_overlay_path), "w");
-    if (f == NULL) {
+    if (!f) {
         PRINTF_ERROR("config: cannot create '%s' (%s)\n", tmp, strerror(errno));
         return false;
     }
@@ -358,7 +358,7 @@ static bool gateway_overlay_write(void) {
                 for (const char *p = row->name; *p != '\0'; p++)
                     fputc((*p == '_') ? '-' : (*p | 0x20), f);
                 if (row->type == IOTDATA_NODE_CONFIG_TYPE_STRING)
-                    fprintf(f, " = %s\n", (v.s.p != NULL) ? v.s.p : "");
+                    fprintf(f, " = %s\n", (v.s.p) ? v.s.p : "");
                 else if (row->type == IOTDATA_NODE_CONFIG_TYPE_BOOL)
                     fprintf(f, " = %s\n", v.b ? "true" : "false");
                 else
@@ -410,7 +410,7 @@ static bool gateway_config_save(const struct iotdata_node_config_update *const u
        so the overlay filled up with their settings and then, being read after the file, overrode
        the file they were editing. */
     for (int i = 0; i < IOTDATA_NODE_CFG_COUNT; i++)
-        if (u != NULL && u->touched[i] && (iotdata_node_config_table[i].flags & IOTDATA_NODE_CONFIG_FLAG_STARTUP) == 0u)
+        if (u && u->touched[i] && (iotdata_node_config_table[i].flags & IOTDATA_NODE_CONFIG_FLAG_STARTUP) == 0u)
             gateway_config_owned[i] = true;
     return gateway_overlay_write();
 }
@@ -425,14 +425,13 @@ static bool gateway_config_save(const struct iotdata_node_config_update *const u
  * of the time and a ruinous one the rest, because a value the operator wrote in their own file
  * differs from the default too, and copying it here would shadow the file they were editing. */
 static bool gateway_settings_save(const iotdata_node_settings_t *const s) {
-    if (s == NULL)
+    if (!s)
         return false;
     for (int k = 0; k < IOTDATA_NODE_SETTINGS_KEY_COUNT; k++) {
         char now[32], was[32];
-        if (iotdata_node_settings_key_read(s, k, now, sizeof(now)) && iotdata_node_settings_key_read(&gateway_settings_loaded, k, was, sizeof(was))) {
+        if (iotdata_node_settings_key_read(s, k, now, sizeof(now)) && iotdata_node_settings_key_read(&gateway_settings_loaded, k, was, sizeof(was)))
             if (strcmp(now, was) != 0)
                 gateway_settings_owned[k] = true;
-        }
     }
     return gateway_overlay_write();
 }

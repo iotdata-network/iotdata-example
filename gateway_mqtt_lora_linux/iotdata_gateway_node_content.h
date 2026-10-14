@@ -1,5 +1,5 @@
-#ifndef IOTDATA_GATEWAY_CONTENT_H
-#define IOTDATA_GATEWAY_CONTENT_H
+#ifndef IOTDATA_GATEWAY_NODE_CONTENT_H
+#define IOTDATA_GATEWAY_NODE_CONTENT_H
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // THE CONTENT STORE
@@ -21,6 +21,8 @@
 static filestore_linux_t gateway_filestore;
 static iotdata_node_content_t gateway_content;
 
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 static void gateway_content_begin(const uint32_t now_ms) {
     const char *const dir = iotdata_node_config_string(CONTENT_FILE_DIRECTORY);
     const d_filestore_t *const be = filestore_linux_open(&gateway_filestore, dir, iotdata_node_config_u32(CONTENT_FILE_MAX_BYTES));
@@ -29,7 +31,7 @@ static void gateway_content_begin(const uint32_t now_ms) {
        and answer "no store" rather than going unrecognised -- a gateway that stopped admitting a
        word because of a missing directory would look like a gateway with older firmware. */
     iotdata_node_content_control_init(&gateway_content, NULL);
-    if (be == NULL) {
+    if (!be) {
         PRINTF_ERROR("content: no store -- '%s' could not be opened\n", dir);
         return;
     }
@@ -44,14 +46,17 @@ static void gateway_content_begin(const uint32_t now_ms) {
     const int offered = iotdata_node_content_begin(&gateway_content, now_ms);
     uint32_t used = 0u, budget = 0u;
     (void)filestore_linux_info(&gateway_filestore, &used, &budget);
-    PRINTF_INFO("content: %" PRIu32 " file(s), %d offered, %u owned, %" PRIu32 " of %" PRIu32 " bytes used (path=%s)\n", iotdata_node_content_count(&gateway_content), offered,
-                (unsigned)gateway_content.owns, used, budget, dir);
+    PRINTF_INFO("content: %" PRIu32 " file(s), %d offered, %u owned, %" PRIu32 " of %" PRIu32 " bytes used (path=%s)\n", iotdata_node_content_count(&gateway_content), offered, (unsigned)gateway_content.owns, used, budget, dir);
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static void gateway_content_end(void) {
     iotdata_node_content_end(&gateway_content);
     filestore_linux_close(&gateway_filestore);
 }
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 /* Beside the recorder's tick in the main loop. There is no consumer to tick for yet, so the only
    thing this can resolve today is an insert that was abandoned -- but it is wired now rather than
@@ -65,4 +70,4 @@ static void gateway_content_tick(const uint32_t now_ms) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#endif /* IOTDATA_GATEWAY_CONTENT_H */
+#endif /* IOTDATA_GATEWAY_NODE_CONTENT_H */

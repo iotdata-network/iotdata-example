@@ -68,6 +68,7 @@ typedef struct {
        The target station travels as the queue entry's key; the length lives in the buffer. */
     buffer_queue_t queue;
     buffer_queue_entry_t queue_slot[CTRL_QUEUE_MAX];
+    node_state_t *node; /* where a drained command goes: the tick needs no more of it than node_on_mqtt() */
     survey_state_t *survey;
     trace_state_t *trace;
     char topic_from[128];
@@ -106,11 +107,11 @@ static ctrl_state_t *g_ctrl = NULL;
 #define CTRL_DIAG_SOURCE "blackbox" /* the recorder this gateway happens to run */
 
 static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
-    if (root != NULL) {
+    if (root) {
         const uint16_t station = iotdata_node_station(st->inode);
         cJSON_AddNumberToObject(root, "station", (double)station);
         char *const out = cJSON_PrintUnformatted(root);
-        if (out != NULL) {
+        if (out) {
             char topic[GW_TOPIC_STATION_MAX];
             (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, station), out, (int)strlen(out));
             free(out);
@@ -123,7 +124,7 @@ static void ctrl_respond(ctrl_state_t *const st, cJSON *const root) {
 
 static cJSON *ctrl_respond_begin(const char *const type, const char *const cmd) {
     cJSON *const root = cJSON_CreateObject();
-    if (root != NULL) {
+    if (root) {
         cJSON_AddStringToObject(root, "type", type);
         cJSON_AddStringToObject(root, "cmd", cmd);
     }
@@ -137,7 +138,7 @@ static cJSON *ctrl_respond_begin(const char *const type, const char *const cmd) 
    of answer comes from. A client reads "source" rather than guessing from the text. */
 static void ctrl_respond_diag_source(ctrl_state_t *const st, const char *const source, const char *const cmd, const char *const text) {
     cJSON *const root = ctrl_respond_begin("diag", cmd);
-    if (root != NULL) {
+    if (root) {
         cJSON_AddStringToObject(root, "source", source);
         cJSON_AddStringToObject(root, "text", text);
         ctrl_respond(st, root);
@@ -152,7 +153,7 @@ static void ctrl_respond_diag(ctrl_state_t *const st, const char *const cmd, con
 
 static void ctrl_respond_diag_record(ctrl_state_t *const st, const char *const cmd, const int index, const char *const record) {
     cJSON *const root = ctrl_respond_begin("diag", cmd);
-    if (root != NULL) {
+    if (root) {
         cJSON_AddStringToObject(root, "source", CTRL_DIAG_SOURCE);
         cJSON_AddNumberToObject(root, "index", index);
         cJSON_AddStringToObject(root, "record", record);
@@ -164,7 +165,7 @@ static void ctrl_respond_diag_record(ctrl_state_t *const st, const char *const c
 
 static void ctrl_respond_error(ctrl_state_t *const st, const char *const cmd, const char *const text) {
     cJSON *const root = ctrl_respond_begin("error", cmd);
-    if (root != NULL) {
+    if (root) {
         cJSON_AddStringToObject(root, "text", text);
         ctrl_respond(st, root);
     }
@@ -268,11 +269,11 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
     ctrl_state_t *const st = g_ctrl;
     st->stat_req_rx++;
     cJSON *const root = cJSON_ParseWithLength((const char *)payload, (size_t)len);
-    if (root != NULL) {
+    if (root) {
         iotdata_node_control_args_t args;
         const iotdata_node_control_command_t *const c = iotdata_node_control_from_json(root, &args);
         const cJSON *const jc = cJSON_GetObjectItem(root, "cmd");
-        const char *const cmd = (cJSON_IsString(jc) && jc->valuestring != NULL) ? jc->valuestring : "";
+        const char *const cmd = (cJSON_IsString(jc) && jc->valuestring) ? jc->valuestring : "";
         /* A config write is not a command, so it does not come through iotdata_node_control_from_json --
            it is a CONFIG TLV, and it only borrows this path's targeting and staging. */
         /* A survey is a MESH directive, not a node command: it is not addressed to a station and
@@ -300,7 +301,7 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
             const char *why = "busy";
             if (trace_request(st->trace, id, station, down, one, respond, &why)) {
                 cJSON *const r = ctrl_respond_begin("trace", cmd);
-                if (r != NULL) {
+                if (r) {
                     cJSON_AddStringToObject(r, "text",
                                             snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "directive %03lX: %s trace of %03lX, %s paths%s", (unsigned long)id, down ? "downward" : "upward", (unsigned long)station,
                                                             one ? "single" : "all", respond ? ", answer requested" : ""));
@@ -319,7 +320,7 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
                 const uint16_t id = all ? 0u : (uint16_t)(cJSON_IsString(jid) ? strtoul(jid->valuestring, NULL, 16) : (unsigned long)jid->valuedouble);
                 if (survey_cancel(st->survey, id, all, &why)) {
                     cJSON *const r = ctrl_respond_begin("survey", cmd);
-                    if (r != NULL) {
+                    if (r) {
                         cJSON_AddStringToObject(r, "text", all ? "cancelled every survey" : snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "cancelled directive %03lX", (unsigned long)id));
                         ctrl_respond(st, r);
                     }
@@ -336,7 +337,7 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
                     cJSON_ArrayForEach(e, js) {
                         if (count >= (int)(sizeof(stations) / sizeof(stations[0])))
                             break;
-                        if (cJSON_IsString(e) && e->valuestring != NULL)
+                        if (cJSON_IsString(e) && e->valuestring)
                             stations[count++] = (uint16_t)strtoul(e->valuestring, NULL, 0);
                         else if (cJSON_IsNumber(e))
                             stations[count++] = (uint16_t)e->valuedouble;
@@ -350,7 +351,7 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
                 const uint16_t id = cJSON_IsNumber(jid) ? (uint16_t)((uint16_t)jid->valuedouble & 0x0FFFu) : (cJSON_IsString(jid) ? (uint16_t)(strtoul(jid->valuestring, NULL, 16) & 0x0FFFu) : survey_next_id(st->survey));
                 if (survey_request(st->survey, id, duration_m, batch_s, stations, count, &why)) {
                     cJSON *const r = ctrl_respond_begin("survey", cmd);
-                    if (r != NULL) {
+                    if (r) {
                         cJSON_AddStringToObject(r, "text",
                                                 snprintf_inline(st->_buffer_resp, sizeof(st->_buffer_resp), "directive %03lX: %d station(s), %um lifetime, %us window (%d running here)", (unsigned long)id, count, (unsigned)duration_m,
                                                                 (unsigned)batch_s, survey_count(st->survey)));
@@ -368,7 +369,7 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
             const size_t n = ctrl_config_build(root, built, sizeof(built), &why);
             uint16_t target = IOTDATA_STATION_BROADCAST;
             const cJSON *const jt = cJSON_GetObjectItem(root, "target");
-            if (cJSON_IsString(jt) && jt->valuestring != NULL)
+            if (cJSON_IsString(jt) && jt->valuestring)
                 target = (uint16_t)strtoul(jt->valuestring, NULL, 0);
             else if (cJSON_IsNumber(jt))
                 target = (uint16_t)jt->valuedouble;
@@ -392,7 +393,7 @@ static void ctrl_from_message(const char *topic __attribute__((unused)), const u
                     buffer_unref(st->pool, h);
                 }
             }
-        } else if (c != NULL) {
+        } else if (c) {
             /* Built ONCE: every target gets the same payload and differs only in where the DOWN
                frame is addressed, so the fan-out is a copy per target rather than a rebuild. */
             uint8_t built[CTRL_PAYLOAD_MAX];
@@ -452,10 +453,10 @@ static void ctrl_report_peers(const stat_state_t *const s) {
     iotdata_node_order_t ord[sizeof(s->peers) / sizeof(s->peers[0])];
     int ordered = 0;
     for (int i = 0; i < s->peers_count; i++)
-        ordered = iotdata_node_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->peers[i].station_id, (uint16_t)i);
+        ordered = iotdata_node_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->peers[i].station, (uint16_t)i);
     for (int k = 0; k < ordered; k++) {
         const stat_peer_t *const e = &s->peers[ord[k].slot];
-        PRINTF_INFO("exec:   %03" PRIX16 " cost=%" PRIu8 " gen=%" PRIu8 " flags=0x%02" PRIX8 " age=%lds\n", e->station_id, e->cost, e->generation, e->flags, (long)(time(NULL) - e->last_seen));
+        PRINTF_INFO("exec:   %03" PRIX16 " cost=%" PRIu8 " gen=%" PRIu8 " flags=0x%02" PRIX8 " age=%lds\n", e->station, e->cost, e->generation, e->flags, (long)(hw_clock() - e->last_seen));
     }
 }
 
@@ -477,7 +478,7 @@ static void ctrl_report_filter(const filter_t *const f) {
 
 static void ctrl_content_say(const char *const line) {
     ctrl_state_t *const st = g_ctrl;
-    if (st != NULL && line != NULL)
+    if (st && line)
         ctrl_respond_diag_source(st, "content", "content", line);
 }
 
@@ -612,7 +613,7 @@ static bool ctrl_action_diag(const uint8_t action, const uint8_t *const val, con
 
 static iotdata_node_control_result_t ctrl_from_iotdata(const uint8_t subject, const uint8_t action, const uint8_t *const val, const uint8_t vlen, const char **const reason) {
     process_state_t *const st = g_exec;
-    if (st == NULL)
+    if (!st)
         return IOTDATA_NODE_CONTROL_RESULT_UNKNOWN;
     switch (subject) {
     /* The mesh tables and the recorder have no refusals to express -- each verb either names
@@ -633,7 +634,7 @@ static iotdata_node_control_result_t ctrl_from_iotdata(const uint8_t subject, co
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns, const uint32_t now_ms) {
+void ctrl_tick(ctrl_state_t *const st, const uint32_t now_ms) {
     const uint16_t stale = buffer_queue_expire(&st->queue, now_ms);
     if (stale > 0)
         PRINTF_WARN("ctrl: %u staged command(s) expired unsent\n", (unsigned)stale);
@@ -641,18 +642,14 @@ void ctrl_tick(ctrl_state_t *const st, node_state_t *const ns, const uint32_t no
     uint8_t tag = 0;
     const buffer_handle_t h = buffer_queue_take(&st->queue, now_ms, &tag, &target);
     if (h != BUFFER_NONE) {
-        node_on_mqtt(ns, buffer_data(st->pool, h), buffer_len(st->pool, h), (uint16_t)target, ctrl_tag_tlv(tag));
+        node_on_mqtt(st->node, buffer_data(st->pool, h), buffer_len(st->pool, h), (uint16_t)target, ctrl_tag_tlv(tag));
         buffer_unref(st->pool, h); /* the reference the queue handed over */
     }
 }
 
-bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, iotdata_node_t *inode, survey_state_t *survey, trace_state_t *trace, buffer_pool_t *pool) {
-    assert(st && survey && trace && pool);
-    *st = (ctrl_state_t){ 0 };
-    st->inode = inode;
-    st->survey = survey;
-    st->trace = trace;
-    st->pool = pool;
+bool ctrl_begin(ctrl_state_t *st, const char *topic_prefix, iotdata_node_t *inode, node_state_t *node, survey_state_t *survey, trace_state_t *trace, buffer_pool_t *pool) {
+    assert(st && node && survey && trace && pool);
+    *st = (ctrl_state_t){ .inode = inode, .node = node, .survey = survey, .trace = trace, .pool = pool };
     buffer_queue_init(&st->queue, st->queue_slot, CTRL_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, ctrl_tag_name);
     snprintf(st->topic_req, sizeof(st->topic_req), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_REQ, topic_prefix);

@@ -2,32 +2,28 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-time_t intervalable(const time_t interval, time_t *last) {
-    time_t now = time(NULL);
-    if (*last == 0) {
-        *last = now;
-        return 0;
+bool intervalable(const uint16_t interval_s, uint32_t *const last_ms, const uint32_t now_ms) {
+    if (*last_ms == 0u) {
+        *last_ms = now_ms;
+        return false; /* the first call only primes: the first pass is one interval from now */
     }
-    if ((now - *last) > interval) {
-        const time_t diff = now - *last;
-        *last = now;
-        return diff;
+    if ((now_ms - *last_ms) > (uint32_t)interval_s * 1000u) {
+        *last_ms = now_ms;
+        return true;
     }
-    return 0;
+    return false;
 }
 
-time_t intervalable_and_initial(const time_t interval, time_t *last) {
-    time_t now = time(NULL);
-    if (*last == 0) {
-        *last = now;
-        return 1;
+bool intervalable_and_initial(const uint16_t interval_s, uint32_t *const last_ms, const uint32_t now_ms) {
+    if (*last_ms == 0u) {
+        *last_ms = now_ms;
+        return true; /* and this one fires on it, so a caller that must act at once does */
     }
-    if ((now - *last) > interval) {
-        const time_t diff = now - *last;
-        *last = now;
-        return diff;
+    if ((now_ms - *last_ms) > (uint32_t)interval_s * 1000u) {
+        *last_ms = now_ms;
+        return true;
     }
-    return 0;
+    return false;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -64,10 +60,8 @@ static inline const char *gateway_topic_for_station(char *const out, const size_
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static inline void debug_inject_random_latency_ms(unsigned ms) {
-    if (ms == 0)
-        return;
-    const unsigned d = (unsigned)rand() % (ms + 1);
-    (void)nanosleep(&(const struct timespec){ (time_t)(d / 1000), (long)(d % 1000) * 1000000L }, NULL);
+    if (ms > 0)
+        hw_delay_ms_yieldable((uint32_t)rand() % (ms + 1)); /* the seam, not a raw nanosleep: yieldable, because this waits for hundreds of ms */
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 #define IOTDATA_GATEWAY_TRACE_H
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-// iotdata_gateway_trace.h - DIAG kind TRACE at the gateway: a path arrives, and is published whole.
+// iotdata_gateway_mesh_trace.h - DIAG kind TRACE at the gateway: a path arrives, and is published whole.
 //
 // A TRACE IS ONE ARTIFACT, NOT A COLUMN OF OBSERVATIONS, which is what makes this different from
 // survey. A survey response is N independent sightings and each is published on its own, because
@@ -22,19 +22,25 @@
 #ifndef GW_TRACE_QUEUE_MAX
 #define GW_TRACE_QUEUE_MAX 4
 #endif
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
 #define GW_TRACE_TAG_FRAME 1
 /* A gateway originates at most a header plus its own hop; relays grow it from there. */
 #define TRACE_FRAME_GW_MAX (IOTDATA_MESH_DIAG_TRACE_HDR_SIZE + IOTDATA_MESH_DIAG_TRACE_HOP)
 
-typedef struct trace_state_s {
+typedef struct {
     iotdata_node_t *inode;
+    mesh_state_t *mesh; /* what a staged frame is aired through -- the tick needs no more of it than its packet handler */
     buffer_pool_t *pool;
-    char topic_from[128];
+    char topic_from[GW_TOPIC_STATION_MAX];
     buffer_queue_t queue;
     buffer_queue_entry_t queue_slot[GW_TRACE_QUEUE_MAX];
     uint16_t next_id;
     uint32_t stat_issued, stat_records, stat_responses, stat_errors, stat_malformed, stat_truncated;
 } trace_state_t;
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
 
 static const char *trace_tag_name(const uint8_t tag) {
     return (tag == GW_TRACE_TAG_FRAME) ? "trace" : "?";
@@ -44,22 +50,21 @@ static const char *trace_tag_name(const uint8_t tag) {
 
 static void trace_publish_note(trace_state_t *const st, const char *const text) {
     cJSON *const root = cJSON_CreateObject();
-    if (root == NULL)
-        return;
-    const uint16_t self = iotdata_node_station(st->inode);
-    cJSON_AddStringToObject(root, "type", "trace");
-    cJSON_AddStringToObject(root, "cmd", "trace");
-    /* WHO IT IS FROM, which is us: it was missing here, and the topic is keyed on it */
-    cJSON_AddNumberToObject(root, "station", (double)self);
-    cJSON_AddStringToObject(root, "note", text);
-    cJSON_AddNumberToObject(root, "time", (double)time(NULL));
-    char *const out = cJSON_PrintUnformatted(root);
-    if (out != NULL) {
-        char topic[GW_TOPIC_STATION_MAX];
-        (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, self), out, (int)strlen(out));
-        free(out);
+    if (root) {
+        const uint16_t station = iotdata_node_station(st->inode);
+        cJSON_AddStringToObject(root, "type", "trace");
+        cJSON_AddStringToObject(root, "cmd", "trace");
+        cJSON_AddNumberToObject(root, "station", (double)station);
+        cJSON_AddStringToObject(root, "note", text);
+        cJSON_AddNumberToObject(root, "time", (double)hw_clock());
+        char *const out = cJSON_PrintUnformatted(root);
+        if (out) {
+            char topic[GW_TOPIC_STATION_MAX];
+            (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, station), out, (int)strlen(out));
+            free(out);
+        }
+        cJSON_Delete(root);
     }
-    cJSON_Delete(root);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -69,13 +74,11 @@ static void trace_publish(trace_state_t *const st, const iotdata_mesh_diag_t *co
     iotdata_mesh_diag_trace_t tr;
     if (iotdata_mesh_unpack_diag_trace(buf, len, &tr)) {
         cJSON *const root = cJSON_CreateObject();
-        if (root != NULL) {
-                    const uint16_t self = iotdata_node_station(st->inode);
+        if (root) {
+            const uint16_t station = iotdata_node_station(st->inode);
             cJSON_AddStringToObject(root, "type", "trace");
             cJSON_AddStringToObject(root, "cmd", "trace");
-            /* WHO ANSWERED (us), as against the `subject` the trace is ABOUT -- the topic is keyed
-               on this one, so a trace of F1B arrives on the gateway's topic, not on F1B's */
-            cJSON_AddNumberToObject(root, "station", (double)self);
+            cJSON_AddNumberToObject(root, "station", (double)station);
             cJSON_AddNumberToObject(root, "directive", (double)dg->directive_id);
             cJSON_AddNumberToObject(root, "subject", (double)tr.subject_station);
             cJSON_AddStringToObject(root, "leg", ((tr.flags & IOTDATA_MESH_DIAG_TRACE_F_DOWN) != 0) ? "down" : "up");
@@ -83,18 +86,18 @@ static void trace_publish(trace_state_t *const st, const iotdata_mesh_diag_t *co
             /* Stated either way: "the path is complete" is a claim worth making, not an absence. */
             cJSON_AddBoolToObject(root, "truncated", (tr.flags & IOTDATA_MESH_DIAG_TRACE_F_TRUNCATED) != 0);
             cJSON *const hops = cJSON_AddArrayToObject(root, "hops");
-            if (hops != NULL)
+            if (hops)
                 for (int i = 0; i <= tr.hop_count; i++) {
                     iotdata_mesh_nbr_entry_t h;
                     if (i < tr.hop_count) {
                         if (!iotdata_mesh_diag_trace_hop(buf, len, i, &h))
                             break;
-                    } else if (final != NULL)
+                    } else if (final)
                         h = *final;
                     else
                         break;
                     cJSON *const o = cJSON_CreateObject();
-                    if (o == NULL)
+                    if (!o)
                         break;
                     cJSON_AddNumberToObject(o, "station", (double)h.station);
                     /* OMITTED rather than sent as a number: 0xFF means "has no gradient", which is what a
@@ -109,11 +112,11 @@ static void trace_publish(trace_state_t *const st, const iotdata_mesh_diag_t *co
                         cJSON_AddBoolToObject(o, "rssi_saturated", true);
                     cJSON_AddItemToArray(hops, o);
                 }
-            cJSON_AddNumberToObject(root, "time", (double)time(NULL));
+            cJSON_AddNumberToObject(root, "time", (double)hw_clock());
             char *const out = cJSON_PrintUnformatted(root);
-            if (out != NULL) {
+            if (out) {
                 char topic[GW_TOPIC_STATION_MAX];
-                (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, self), out, (int)strlen(out));
+                (void)mqtt_send(gateway_topic_for_station(topic, sizeof(topic), st->topic_from, station), out, (int)strlen(out));
                 free(out);
             }
             cJSON_Delete(root);
@@ -134,8 +137,7 @@ static bool trace_on_frame(trace_state_t *const st, const uint8_t *const buf, co
                     st->stat_truncated++;
                 if (dg.op == IOTDATA_MESH_DIAG_OP_RECORD) {
                     /* We are the end of this path, and the link we heard it over is part of it. */
-                    const iotdata_mesh_nbr_entry_t me = { .cost = 0u, .rssi_dbm = rssi_dbm, .station = iotdata_node_station(st->inode) };
-                    trace_publish(st, &dg, buf, len, &me);
+                    trace_publish(st, &dg, buf, len, &(const iotdata_mesh_nbr_entry_t){ .cost = 0u, .rssi_dbm = rssi_dbm, .station = iotdata_node_station(st->inode) });
                     st->stat_records++;
                 } else {
                     trace_publish(st, &dg, buf, len, NULL); /* a finished DOWN leg: not ours to extend */
@@ -143,15 +145,17 @@ static bool trace_on_frame(trace_state_t *const st, const uint8_t *const buf, co
                 }
                 return true;
             } else {
-                st->stat_malformed++;
                 trace_publish_note(st, snprintf_inline(note, sizeof(note), "%03" PRIX16 ": malformed trace -- body is not a whole number of hop records", dg.sender_station));
+                st->stat_malformed++;
                 return false;
             }
         } else if (dg.op == IOTDATA_MESH_DIAG_OP_ERROR) {
             const uint8_t reason = (len > IOTDATA_MESH_DIAG_HDR_SIZE) ? buf[IOTDATA_MESH_DIAG_HDR_SIZE] : 0xFFu;
-            const char *const text = (reason == IOTDATA_MESH_DIAG_ERR_UNSUPPORTED) ? "does not implement trace" : (reason == IOTDATA_MESH_DIAG_ERR_MALFORMED) ? "could not parse the request" : "refused the request";
+            trace_publish_note(st, snprintf_inline(note, sizeof(note), "%03" PRIX16 ": directive %03" PRIX16 " -- %s", dg.sender_station, dg.directive_id,
+                                                   (reason == IOTDATA_MESH_DIAG_ERR_UNSUPPORTED) ? "does not implement trace"
+                                                   : (reason == IOTDATA_MESH_DIAG_ERR_MALFORMED) ? "could not parse the request"
+                                                                                                 : "refused the request"));
             st->stat_errors++;
-            trace_publish_note(st, snprintf_inline(note, sizeof(note), "%03" PRIX16 ": directive %03" PRIX16 " -- %s", dg.sender_station, dg.directive_id, text));
             return true;
         }
     }
@@ -205,16 +209,12 @@ static bool trace_request(trace_state_t *const st, const uint16_t directive_id, 
     }
     const uint8_t flags = (uint8_t)((down ? IOTDATA_MESH_DIAG_TRACE_F_DOWN : 0u) | (one ? IOTDATA_MESH_DIAG_TRACE_F_ONE : 0u) | (respond ? IOTDATA_MESH_DIAG_TRACE_F_RESPOND : 0u));
     uint8_t frame[TRACE_FRAME_GW_MAX];
-    /* Peeked: a sequence is spent only once the frame is real AND the queue owns it. A pack that
-       would not fit must leave the counter alone, or the gap reads as a frame that went missing
-       rather than one that never existed. */
-    const uint16_t seq = iotdata_node_sequence(st->inode);
     int len;
-    if (down) {
-        const iotdata_mesh_nbr_entry_t me = { .cost = 0u, .rssi_dbm = IOTDATA_MESH_DIAG_RSSI_NONE, .station = iotdata_node_station(st->inode) };
-        len = iotdata_mesh_pack_diag_trace(frame, (int)sizeof(frame), iotdata_node_station(st->inode), seq, IOTDATA_MESH_DIAG_OP_RECORD, directive_id, flags, subject, &me, 1);
-    } else
-        len = iotdata_mesh_pack_diag_trace_request(frame, (int)sizeof(frame), iotdata_node_station(st->inode), seq, directive_id, flags, subject);
+    if (down)
+        len = iotdata_mesh_pack_diag_trace(frame, (int)sizeof(frame), iotdata_node_station(st->inode), iotdata_node_sequence(st->inode), IOTDATA_MESH_DIAG_OP_RECORD, directive_id, flags, subject,
+                                           &(const iotdata_mesh_nbr_entry_t){ .cost = 0u, .rssi_dbm = IOTDATA_MESH_DIAG_RSSI_NONE, .station = iotdata_node_station(st->inode) }, 1);
+    else
+        len = iotdata_mesh_pack_diag_trace_request(frame, (int)sizeof(frame), iotdata_node_station(st->inode), iotdata_node_sequence(st->inode), directive_id, flags, subject);
     if (len <= 0) {
         *why = "the frame would not build";
         return false;
@@ -230,8 +230,7 @@ static bool trace_request(trace_state_t *const st, const uint16_t directive_id, 
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void trace_tick(trace_state_t *const st, mesh_state_t *const mesh) {
-    const uint32_t now_ms = hw_time_ms();
+static void trace_tick(trace_state_t *const st, const uint32_t now_ms) {
     const uint16_t stale = buffer_queue_expire(&st->queue, now_ms);
     if (stale > 0)
         PRINTF_WARN("trace: %u staged frame(s) expired unsent\n", (unsigned)stale);
@@ -241,7 +240,7 @@ static void trace_tick(trace_state_t *const st, mesh_state_t *const mesh) {
     if (h != BUFFER_NONE) {
         const uint8_t *const buf = buffer_data(st->pool, h);
         const int len = (int)buffer_len(st->pool, h);
-        if (mesh->packet_handler != NULL && mesh->packet_handler(buf, len))
+        if (st->mesh->packet_handler && st->mesh->packet_handler(buf, len))
             PRINTF_INFO("trace: aired a %d byte DIAG frame\n", len);
         else
             PRINTF_ERROR("trace: could not air a staged DIAG frame (%d bytes)\n", len);
@@ -251,11 +250,9 @@ static void trace_tick(trace_state_t *const st, mesh_state_t *const mesh) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static void trace_begin(trace_state_t *const st, const char *const topic_prefix, iotdata_node_t *const inode, buffer_pool_t *const pool) {
-    assert(st && pool);
-    *st = (trace_state_t){ 0 };
-    st->inode = inode;
-    st->pool = pool;
+static void trace_begin(trace_state_t *const st, const char *const topic_prefix, iotdata_node_t *const inode, mesh_state_t *const mesh, buffer_pool_t *const pool) {
+    assert(st && mesh && pool);
+    *st = (trace_state_t){ .inode = inode, .mesh = mesh, .pool = pool };
     buffer_queue_init(&st->queue, st->queue_slot, GW_TRACE_QUEUE_MAX, pool);
     buffer_queue_set_tag_name(&st->queue, trace_tag_name);
     snprintf(st->topic_from, sizeof(st->topic_from), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM, topic_prefix);

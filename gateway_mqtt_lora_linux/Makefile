@@ -39,8 +39,9 @@ LIBS=$(IOTDATA_LIBS_COMMON) -lmosquitto -lpthread -lz
 
 TARGET=iotdata_gateway
 MAIN=iotdata_gateway.c
-SOURCES_TARGET=iotdata_gateway_conf.h iotdata_gateway_ctrl.h iotdata_gateway_ddup.h iotdata_gateway_exec.h iotdata_gateway_mesh.h iotdata_gateway_netw.h iotdata_gateway_node.h \
-    iotdata_gateway_peer.h iotdata_gateway_state.h iotdata_gateway_stat.h iotdata_gateway_survey.h iotdata_gateway_trace.h iotdata_gateway_util.h \
+SOURCES_TARGET=iotdata_gateway_conf.h iotdata_gateway_ctrl.h iotdata_gateway_ddup.h iotdata_gateway_exec.h iotdata_gateway_mesh.h iotdata_gateway_mesh_survey.h \
+    iotdata_gateway_mesh_trace.h iotdata_gateway_netw.h iotdata_gateway_node.h iotdata_gateway_node_content.h iotdata_gateway_state.h iotdata_gateway_stat.h \
+    iotdata_gateway_util.h \
     include/mqtt_linux.h
 SOURCES_DEPEND=\
     $(IOTDATA_SRC_PLATFORM)/include/device/d_platform_linux.h \
@@ -74,6 +75,23 @@ INSTALL=iotdata-gateway
 ##
 
 include $(IOTDATA_SRC_PLATFORM)/make/target-linux.mk
+
+##
+
+# THE HEADER TIERS ARE CHECKED, not just documented. The include order in iotdata_gateway.c IS the
+# dependency order -- see the comment above that block -- and the script asserts it still is: every
+# iotdata_gateway_*.h accounted for in a tier, the order exactly as the comment claims, and no
+# lower-tier header naming an identifier a higher tier defines. `test` depends on it, so the
+# reorganisation that reintroduces an upward pointer fails on the spot instead of at the next one.
+# PYTHON is overridable because this is the only thing here that needs an interpreter.
+PYTHON ?= python3
+TESTS   = tests/check_header_tiers.py
+
+.PHONY: check
+check: $(TESTS)
+	@$(PYTHON) tests/check_header_tiers.py
+
+test: check
 
 ##
 

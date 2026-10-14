@@ -6,7 +6,7 @@
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 typedef bool (*mesh_packet_handler_t)(const uint8_t *packet, const int length);
-typedef bool (*mesh_dedup_handler_t)(void *ctx, uint16_t station_id, uint16_t sequence);
+typedef bool (*mesh_dedup_handler_t)(void *ctx, uint16_t station, uint16_t sequence);
 
 typedef struct {
     uint32_t rx;    /* arrived as this type and unpacked */
@@ -24,7 +24,7 @@ typedef struct {
     uint16_t beacon_interval_s; /* the root's cadence -- ours, and stated in every beacon we send */
 
     uint16_t beacon_generation;           /* increments each beacon round */
-    time_t beacon_last;                   /* last beacon TX time */
+    uint32_t beacon_last_ms;              /* the beacon cadence, on the tick (0 = not yet primed) */
     iotdata_mesh_dedup_ring_t dedup_ring; /* dedup ring */
     /* handlers */
     mesh_packet_handler_t packet_handler;
@@ -94,8 +94,7 @@ bool mesh_transmit_beacon(mesh_state_t *st) {
         if (st->debug)
             PRINTF_INFO("mesh: tx BEACON generation=%" PRIu16 ", station=%03" PRIX16 "\n", st->beacon_generation, iotdata_node_station(st->inode));
         st->beacon_generation = (st->beacon_generation + 1) & (IOTDATA_MESH_GENERATION_MOD - 1);
-        ok = len > 0 && st->packet_handler(buf, len);
-        if (ok) {
+        if ((ok = len > 0 && st->packet_handler(buf, len))) {
             iotdata_node_sequence_used(st->inode);
             st->stat_beacons_tx++;
             st->stat_bytes_tx += (uint64_t)len;
@@ -127,8 +126,7 @@ bool mesh_transmit_ack(mesh_state_t *st, uint16_t origin_station, uint16_t origi
                                               });
         if (st->debug)
             PRINTF_INFO("mesh: tx ACK for origin={station=%03" PRIX16 ", sequence=%" PRIu16 "}\n", origin_station, origin_sequence);
-        ok = len > 0 && st->packet_handler(buf, len);
-        if (ok) {
+        if ((ok = len > 0 && st->packet_handler(buf, len))) {
             iotdata_node_sequence_used(st->inode);
             st->stat_acks_tx++;
             st->stat_bytes_tx += (uint64_t)len;
@@ -234,11 +232,18 @@ bool mesh_receive_neighbour_report_r(mesh_state_t *st, const uint8_t *buf, int l
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
-
-// -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-bool mesh_begin(mesh_state_t *st, iotdata_node_t *inode, buffer_pool_t *pool, mesh_packet_handler_t packet_handler, mesh_dedup_handler_t dedup_handler, void *dedup_handler_ctx) {
+void mesh_tick(mesh_state_t *st, const uint32_t now_ms) {
+    if (!st->enabled)
+        return;
+    if (intervalable_and_initial(st->beacon_interval_s, &st->beacon_last_ms, now_ms))
+        mesh_transmit_beacon(st);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------------
+
+void mesh_begin(mesh_state_t *st, iotdata_node_t *inode, buffer_pool_t *pool, mesh_packet_handler_t packet_handler, mesh_dedup_handler_t dedup_handler, void *dedup_handler_ctx) {
     assert(packet_handler);
     st->pool = pool;
     st->inode = inode;
@@ -247,7 +252,6 @@ bool mesh_begin(mesh_state_t *st, iotdata_node_t *inode, buffer_pool_t *pool, me
     st->dedup_handler_ctx = dedup_handler_ctx;
     iotdata_mesh_dedup_init(&st->dedup_ring);
     PRINTF_INFO("mesh: %s, station=%03" PRIX16 ", beacon-interval=%" PRIu16 "s\n", st->enabled ? "enabled" : "disabled", iotdata_node_station(st->inode), st->beacon_interval_s);
-    return true;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

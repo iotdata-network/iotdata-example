@@ -98,8 +98,8 @@ const BROKER = flag('broker') ?? cfg['mqtt-server'] ?? 'localhost';
 const MQTT_PORT = cfg['mqtt-port'] || '1883';
 const TOPIC = flag('topic') ?? cfg['mqtt-topic'] ?? 'iotdata/#';
 // Which kinds of topic under the subscription are taken, by topicKind(). Only station traffic
-// for now: manage/resp replies also carry a station field, and would otherwise surface as a
-// phantom station named after the last topic segment.
+// for now: a management report and the gateway's own stats documents carry a station field too,
+// and would otherwise surface as phantom stations named after the last topic segment.
 const ACCEPT = new Set(
     String(cfg['mqtt-accept'] ?? 'station')
         .split(',')
@@ -481,12 +481,20 @@ function handleTrackerMessage(topic, text) {
     if (pos) recordPosition(pos);
 }
 
-// A topic's kind from its shape: <prefix>/<variant>/<station-hex> is 'station'; anything else
-// is named by its second-to-last segment, so iotdata/manage/resp is 'manage'.
+// A topic's kind from its shape. Level 1 after the prefix is always a CATEGORY, and station
+// telemetry lives in exactly one of them: <prefix>/variant/<name>/<station-hex> is 'station'.
+// Anything else is named by its second-to-last segment, so iotdata/manage/from/<station> is
+// 'from' and iotdata/stats/gateway/<station> is 'gateway'.
+//
+// THE HEX IN THE LAST SEGMENT IS NOT ENOUGH ANY MORE, which is what this used to test. Every
+// category now ends in a station id -- the gateway's own stats document, the network table, a
+// management report -- and each of those carries a `station` field as well, so the shape test
+// and the payload test both passed and all three surfaced as phantom stations whose fields were
+// rendered as if they were a reading.
 function topicKind(topic) {
     const parts = String(topic).split('/');
     const last = parts[parts.length - 1];
-    if (parts.length >= 2 && /^[0-9A-Fa-f]{1,8}$/.test(last)) return 'station';
+    if (parts.length >= 3 && parts[parts.length - 3] === 'variant' && /^[0-9A-Fa-f]{1,8}$/.test(last)) return 'station';
     return parts.length >= 2 ? parts[parts.length - 2] : last;
 }
 
@@ -503,8 +511,8 @@ function handleMessage(topic, text) {
     if (!body || typeof body !== 'object' || body.station === undefined) return;
     if (!ACCEPT.has(topicKind(topic))) return;
 
-    // Topic is <prefix>/<variant-name>/<station-hex>; the variant NAME lives only here (the
-    // payload carries the numeric id), so it is worth taking rather than maintaining a table.
+    // Topic is <prefix>/variant/<variant-name>/<station-hex>; the variant NAME lives only here
+    // (the payload carries the numeric id), so it is worth taking rather than maintaining a table.
     const parts = topic.split('/');
     const station = parts.length >= 1 ? parts[parts.length - 1] : '?';
     const meta = STATIONS[station.toUpperCase()] || null;

@@ -39,7 +39,7 @@ typedef struct {
 } stat_ring_t;
 
 typedef struct {
-    uint16_t station_id;
+    uint16_t station;
     time_t first_seen;
     time_t last_seen;
     int8_t last_link_rssi;
@@ -105,7 +105,7 @@ typedef struct {
 } stat_totals_t;
 
 typedef struct {
-    uint16_t station_id;
+    uint16_t station;
     uint16_t generation;
     uint8_t cost;
     uint8_t flags;
@@ -163,10 +163,10 @@ static inline void stat_ring_count(const stat_ring_t *r, time_t now, uint32_t co
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint16_t station_id, const time_t now) {
+static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint16_t station, const time_t now) {
     int slot_oldest = 0;
     for (int i = 0; i < s->stations_count; i++) { /* the match, and the entry to recycle if there is none */
-        if (s->stations[i].station_id == station_id) {
+        if (s->stations[i].station == station) {
             s->stations[i].last_seen = now;
             return &s->stations[i];
         }
@@ -175,9 +175,7 @@ static inline stat_station_t *stat_station_find_or_create(stat_state_t *s, uint1
     }
     const int slot = (s->stations_count < (int)(sizeof(s->stations) / sizeof(s->stations[0]))) ? s->stations_count++ : slot_oldest;
     stat_station_t *e = &s->stations[slot];
-    *e = (stat_station_t){ 0 };
-    e->station_id = station_id;
-    e->first_seen = now;
+    *e = (stat_station_t){ .station = station, .first_seen = now };
     return e;
 }
 
@@ -191,7 +189,7 @@ void stat_on_link_rx_packet(stat_state_t *s, uint16_t length) {
         s->link.rx_size_min = length;
     if (length > s->link.rx_size_max)
         s->link.rx_size_max = length;
-    stat_ring_add(&s->link.rx_ring, time(NULL));
+    stat_ring_add(&s->link.rx_ring, hw_clock());
 }
 void stat_on_link_rx_error(stat_state_t *s) {
     s->link.rx_errors++;
@@ -199,12 +197,12 @@ void stat_on_link_rx_error(stat_state_t *s) {
 void stat_on_link_rx_drop(stat_state_t *s) {
     s->link.rx_drops++;
 }
-void stat_on_link_rx_mesh_unexpected(stat_state_t *s, uint16_t station_id) {
+void stat_on_link_rx_mesh_unexpected(stat_state_t *s, uint16_t station) {
     s->link.rx_mesh_unexpected++;
-    stat_station_find_or_create(s, station_id, time(NULL))->stat_mesh_unexpected++;
+    stat_station_find_or_create(s, station, hw_clock())->stat_mesh_unexpected++;
 }
 void stat_on_link_rssi_packet(stat_state_t *s, int dbm) {
-    ema_update_timed((int16_t)dbm, &s->link.rssi_packet_ema, &s->link.rssi_packet_cnt, &s->link.rssi_packet_last_time, time(NULL), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
+    ema_update_timed((int16_t)dbm, &s->link.rssi_packet_ema, &s->link.rssi_packet_cnt, &s->link.rssi_packet_last_time, hw_clock(), STAT_EMA_TIMED_TAU_SECS_DEFAULT);
 }
 void stat_on_link_rssi_packet_error(stat_state_t *s) {
     s->link.rssi_packet_err++;
@@ -224,9 +222,9 @@ void stat_get_totals(const stat_state_t *s, stat_totals_t *out) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void stat_on_packet_decoded(stat_state_t *s, uint16_t station_id, uint16_t sequence, uint8_t variant_id, uint16_t length, const iotdata_decoder_t *dec) {
-    const time_t now = time(NULL);
-    stat_station_t *st = stat_station_find_or_create(s, station_id, now);
+void stat_on_packet_decoded(stat_state_t *s, uint16_t station, uint16_t sequence, uint8_t variant_id, uint16_t length, const iotdata_decoder_t *dec) {
+    const time_t now = hw_clock();
+    stat_station_t *st = stat_station_find_or_create(s, station, now);
     st->packet_count++;
     st->bytes_rx += (uint64_t)length;
     if (st->last_sequence_valid) {
@@ -264,24 +262,24 @@ void stat_on_packet_decoded(stat_state_t *s, uint16_t station_id, uint16_t seque
     (void)dec;
 }
 
-void stat_on_packet_decode_error(stat_state_t *s, uint16_t station_id, uint8_t variant_id) {
-    stat_station_find_or_create(s, station_id, time(NULL))->decode_errors++;
+void stat_on_packet_decode_error(stat_state_t *s, uint16_t station, uint8_t variant_id) {
+    stat_station_find_or_create(s, station, hw_clock())->decode_errors++;
     if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0])))
         (&s->variants[variant_id])->decode_errors++;
 }
 
-void stat_on_packet_process_error(stat_state_t *s, uint16_t station_id, uint8_t variant_id) {
-    stat_station_find_or_create(s, station_id, time(NULL))->process_errors++;
+void stat_on_packet_process_error(stat_state_t *s, uint16_t station, uint8_t variant_id) {
+    stat_station_find_or_create(s, station, hw_clock())->process_errors++;
     if (variant_id < (int)(sizeof(s->variants) / sizeof(s->variants[0])))
         (&s->variants[variant_id])->process_errors++;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-void stat_on_peer(stat_state_t *s, uint16_t station_id, uint16_t generation, uint8_t cost, uint8_t flags) {
+void stat_on_peer(stat_state_t *s, uint16_t station, uint16_t generation, uint8_t cost, uint8_t flags) {
     int slot = -1, slot_oldest = 0;
     for (int i = 0; i < s->peers_count; i++) { /* the match, and the entry to recycle if there is none */
-        if (s->peers[i].station_id == station_id) {
+        if (s->peers[i].station == station) {
             slot = i;
             break;
         }
@@ -291,16 +289,12 @@ void stat_on_peer(stat_state_t *s, uint16_t station_id, uint16_t generation, uin
     if (slot < 0)
         slot = (s->peers_count < (int)(sizeof(s->peers) / sizeof(s->peers[0]))) ? s->peers_count++ : slot_oldest;
     stat_peer_t *const e = &s->peers[slot];
-    e->station_id = station_id;
-    e->generation = generation;
-    e->cost = cost;
-    e->flags = flags;
-    e->last_seen = time(NULL);
+    *e = (stat_peer_t){ .station = station, .generation = generation, .cost = cost, .flags = flags, .last_seen = hw_clock() };
 }
 
-bool stat_mesh_peer_remove(stat_state_t *const s, const uint16_t station_id) {
+bool stat_mesh_peer_remove(stat_state_t *const s, const uint16_t station) {
     for (int i = 0; i < s->peers_count; i++)
-        if (s->peers[i].station_id == station_id) {
+        if (s->peers[i].station == station) {
             s->peers[i] = s->peers[s->peers_count - 1];
             s->peers_count--;
             return true;
@@ -369,40 +363,42 @@ void stat_build_stations_json(cJSON *const dest, const stat_state_t *const s, co
     iotdata_node_order_t ord[sizeof(s->stations) / sizeof(s->stations[0])];
     int ordered = 0;
     for (int i = 0; i < s->stations_count; i++)
-        ordered = iotdata_node_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->stations[i].station_id, (uint16_t)i);
+        ordered = iotdata_node_order_insert(ord, ordered, (int)(sizeof(ord) / sizeof(ord[0])), s->stations[i].station, (uint16_t)i);
     for (int k = 0; k < ordered; k++) {
         const stat_station_t *st = &s->stations[ord[k].slot];
         cJSON *o = cJSON_CreateObject();
-        cJSON_AddNumberToObject(o, "station", (double)st->station_id);
-        cJSON_AddNumberToObject(o, "first_seen", (double)st->first_seen);
-        cJSON_AddNumberToObject(o, "last_seen", (double)st->last_seen);
-        if (st->last_seen != 0)
-            cJSON_AddNumberToObject(o, "age_secs", (double)(now - st->last_seen));
-        cJSON_AddNumberToObject(o, "packets", (double)st->packet_count);
-        cJSON_AddNumberToObject(o, "bytes", (double)st->bytes_rx);
-        cJSON_AddNumberToObject(o, "missed", (double)st->stat_missed);
-        cJSON_AddNumberToObject(o, "mesh_unexpected", (double)st->stat_mesh_unexpected);
-        cJSON_AddNumberToObject(o, "decode_errors", (double)st->decode_errors);
-        cJSON_AddNumberToObject(o, "process_errors", (double)st->process_errors);
-        if (st->last_link_valid)
-            cJSON_AddNumberToObject(o, "link_rssi", (double)st->last_link_rssi);
-        if (st->link_rssi_cnt > 0)
-            cJSON_AddNumberToObject(o, "link_rssi_avg", (double)st->link_rssi_sum / (double)st->link_rssi_cnt);
-        if (st->last_battery_valid) {
-            cJSON *bat = cJSON_AddObjectToObject(o, "battery");
-            cJSON_AddNumberToObject(bat, "level", (double)st->last_battery_level);
-            cJSON_AddBoolToObject(bat, "charging", st->last_battery_charging);
-        }
-        cJSON *vs = cJSON_AddObjectToObject(o, "variants");
-        for (int v = 0; v < (int)(sizeof(st->variant_count) / sizeof(st->variant_count[0])); v++)
-            if (st->variant_count[v] > 0) {
-                const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)v);
-                cJSON *vo = cJSON_AddObjectToObject(vs, vdef ? vdef->name : "?");
-                cJSON_AddNumberToObject(vo, "count", (double)st->variant_count[v]);
-                cJSON_AddNumberToObject(vo, "last_seen", (double)st->variant_last[v]);
+        if (o) {
+            cJSON_AddNumberToObject(o, "station", (double)st->station);
+            cJSON_AddNumberToObject(o, "first_seen", (double)st->first_seen);
+            cJSON_AddNumberToObject(o, "last_seen", (double)st->last_seen);
+            if (st->last_seen != 0)
+                cJSON_AddNumberToObject(o, "age_secs", (double)(now - st->last_seen));
+            cJSON_AddNumberToObject(o, "packets", (double)st->packet_count);
+            cJSON_AddNumberToObject(o, "bytes", (double)st->bytes_rx);
+            cJSON_AddNumberToObject(o, "missed", (double)st->stat_missed);
+            cJSON_AddNumberToObject(o, "mesh_unexpected", (double)st->stat_mesh_unexpected);
+            cJSON_AddNumberToObject(o, "decode_errors", (double)st->decode_errors);
+            cJSON_AddNumberToObject(o, "process_errors", (double)st->process_errors);
+            if (st->last_link_valid)
+                cJSON_AddNumberToObject(o, "link_rssi", (double)st->last_link_rssi);
+            if (st->link_rssi_cnt > 0)
+                cJSON_AddNumberToObject(o, "link_rssi_avg", (double)st->link_rssi_sum / (double)st->link_rssi_cnt);
+            if (st->last_battery_valid) {
+                cJSON *bat = cJSON_AddObjectToObject(o, "battery");
+                cJSON_AddNumberToObject(bat, "level", (double)st->last_battery_level);
+                cJSON_AddBoolToObject(bat, "charging", st->last_battery_charging);
             }
-        cJSON_AddItemToObject(o, "windows", stat_json_windows(&st->ring, now));
-        cJSON_AddItemToArray(arr, o);
+            cJSON *vs = cJSON_AddObjectToObject(o, "variants");
+            for (int v = 0; v < (int)(sizeof(st->variant_count) / sizeof(st->variant_count[0])); v++)
+                if (st->variant_count[v] > 0) {
+                    const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)v);
+                    cJSON *vo = cJSON_AddObjectToObject(vs, vdef ? vdef->name : "?");
+                    cJSON_AddNumberToObject(vo, "count", (double)st->variant_count[v]);
+                    cJSON_AddNumberToObject(vo, "last_seen", (double)st->variant_last[v]);
+                }
+            cJSON_AddItemToObject(o, "windows", stat_json_windows(&st->ring, now));
+            cJSON_AddItemToArray(arr, o);
+        }
     }
     if (mesh) {
         cJSON *m = cJSON_AddObjectToObject(root, "mesh");
@@ -411,12 +407,12 @@ void stat_build_stations_json(cJSON *const dest, const stat_state_t *const s, co
         /* per frame type: only types actually seen are emitted, so the object stays small on a
            quiet link but gains a key the first time a new type appears */
         cJSON *const frames = cJSON_AddObjectToObject(m, "frames");
-        if (frames != NULL)
+        if (frames)
             for (unsigned t = 0; t < (int)(sizeof(mesh->ctrl) / sizeof(mesh->ctrl[0])); t++) {
                 const mesh_ctrl_stat_t *const c = &mesh->ctrl[t];
                 if (c->rx > 0 || c->err > 0) {
                     cJSON *const ft = cJSON_AddObjectToObject(frames, iotdata_mesh_ctrl_name((uint8_t)t));
-                    if (ft != NULL) {
+                    if (ft) {
                         cJSON_AddNumberToObject(ft, "packets", (double)c->rx);
                         cJSON_AddNumberToObject(ft, "errors", (double)c->err);
                         cJSON_AddNumberToObject(ft, "bytes", (double)c->bytes);
@@ -437,11 +433,11 @@ void stat_build_stations_json(cJSON *const dest, const stat_state_t *const s, co
         iotdata_node_order_t ord_peer[sizeof(s->peers) / sizeof(s->peers[0])];
         int ordered_peer = 0;
         for (int i = 0; i < s->peers_count; i++)
-            ordered_peer = iotdata_node_order_insert(ord_peer, ordered_peer, (int)(sizeof(ord_peer) / sizeof(ord_peer[0])), s->peers[i].station_id, (uint16_t)i);
+            ordered_peer = iotdata_node_order_insert(ord_peer, ordered_peer, (int)(sizeof(ord_peer) / sizeof(ord_peer[0])), s->peers[i].station, (uint16_t)i);
         for (int k = 0; k < ordered_peer; k++) {
             const stat_peer_t *const e = &s->peers[ord_peer[k].slot];
             cJSON *p = cJSON_CreateObject();
-            cJSON_AddNumberToObject(p, "station", (double)e->station_id);
+            cJSON_AddNumberToObject(p, "station", (double)e->station);
             cJSON_AddNumberToObject(p, "generation", (double)e->generation);
             cJSON_AddNumberToObject(p, "cost", (double)e->cost);
             cJSON_AddNumberToObject(p, "flags", (double)e->flags);
@@ -506,17 +502,19 @@ cJSON *stat_build_variants_json(const stat_state_t *const s, const time_t now) {
         if (e->packet_count > 0 || e->decode_errors > 0 || e->process_errors > 0) {
             const iotdata_variant_def_t *vdef = iotdata_get_variant((uint8_t)v);
             cJSON *o = cJSON_CreateObject();
-            cJSON_AddNumberToObject(o, "id", (double)v);
-            cJSON_AddStringToObject(o, "name", vdef ? vdef->name : "");
-            cJSON_AddNumberToObject(o, "packets", (double)e->packet_count);
-            cJSON_AddNumberToObject(o, "bytes", (double)e->bytes_rx);
-            cJSON_AddNumberToObject(o, "decode_errors", (double)e->decode_errors);
-            cJSON_AddNumberToObject(o, "process_errors", (double)e->process_errors);
-            cJSON_AddNumberToObject(o, "last_seen", (double)e->last_seen);
-            if (e->last_seen != 0)
-                cJSON_AddNumberToObject(o, "age_secs", (double)(now - e->last_seen));
-            cJSON_AddItemToObject(o, "windows", stat_json_windows(&e->ring, now));
-            cJSON_AddItemToArray(arr, o);
+            if (o) {
+                cJSON_AddNumberToObject(o, "id", (double)v);
+                cJSON_AddStringToObject(o, "name", vdef ? vdef->name : "");
+                cJSON_AddNumberToObject(o, "packets", (double)e->packet_count);
+                cJSON_AddNumberToObject(o, "bytes", (double)e->bytes_rx);
+                cJSON_AddNumberToObject(o, "decode_errors", (double)e->decode_errors);
+                cJSON_AddNumberToObject(o, "process_errors", (double)e->process_errors);
+                cJSON_AddNumberToObject(o, "last_seen", (double)e->last_seen);
+                if (e->last_seen != 0)
+                    cJSON_AddNumberToObject(o, "age_secs", (double)(now - e->last_seen));
+                cJSON_AddItemToObject(o, "windows", stat_json_windows(&e->ring, now));
+                cJSON_AddItemToArray(arr, o);
+            }
         }
     }
     return root;
@@ -524,36 +522,42 @@ cJSON *stat_build_variants_json(const stat_state_t *const s, const time_t now) {
 
 cJSON *stat_build_mqtt_json(__attribute__((unused)) const stat_state_t *const s, __attribute__((unused)) const time_t now) {
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "connected", mqtt_is_connected());
-    cJSON_AddNumberToObject(root, "connected_since", (double)mqtt_stat_last_connect_time);
-    cJSON_AddNumberToObject(root, "connects", (double)mqtt_stat_connects);
-    cJSON_AddNumberToObject(root, "disconnects", (double)mqtt_stat_disconnects);
-    cJSON_AddNumberToObject(root, "reconnects", (double)mqtt_stat_reconnects);
-    cJSON_AddNumberToObject(root, "published", (double)mqtt_stat_publishes);
-    cJSON_AddNumberToObject(root, "published_bytes", (double)mqtt_stat_publish_bytes);
-    cJSON_AddNumberToObject(root, "published_errors", (double)mqtt_stat_publish_errors);
+    if (root) {
+        cJSON_AddBoolToObject(root, "connected", mqtt_is_connected());
+        cJSON_AddNumberToObject(root, "connected_since", (double)mqtt_stat_last_connect_time);
+        cJSON_AddNumberToObject(root, "connects", (double)mqtt_stat_connects);
+        cJSON_AddNumberToObject(root, "disconnects", (double)mqtt_stat_disconnects);
+        cJSON_AddNumberToObject(root, "reconnects", (double)mqtt_stat_reconnects);
+        cJSON_AddNumberToObject(root, "published", (double)mqtt_stat_publishes);
+        cJSON_AddNumberToObject(root, "published_bytes", (double)mqtt_stat_publish_bytes);
+        cJSON_AddNumberToObject(root, "published_errors", (double)mqtt_stat_publish_errors);
+    }
     return root;
 }
 
 cJSON *stat_build_stat_json(const stat_state_t *const s, const mesh_state_t *const mesh, const ddup_state_t *const ddup) {
-    const time_t now = time(NULL);
+    const time_t now = hw_clock();
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "station", (double)iotdata_node_station(s->inode));
-    cJSON_AddStringToObject(root, "version", s->version ? s->version : "");
-    cJSON_AddNumberToObject(root, "time", (double)now);
-    cJSON_AddNumberToObject(root, "uptime_secs", (double)(now - s->start_time));
-    cJSON_AddItemToObject(root, "links", stat_build_links_json(s, now, mesh));
-    stat_build_stations_json(root, s, now, mesh, ddup); /* adds `stations`, `mesh`, `ddup` */
-    cJSON_AddItemToObject(root, "variants", stat_build_variants_json(s, now));
-    cJSON_AddItemToObject(root, "mqtt", stat_build_mqtt_json(s, now));
-    if (s->pool) {
-        cJSON *b = cJSON_CreateObject();
-        cJSON_AddNumberToObject(b, "total", (double)buffer_pool_total(s->pool));
-        cJSON_AddNumberToObject(b, "used", (double)buffer_pool_used(s->pool));
-        cJSON_AddNumberToObject(b, "high_water", (double)buffer_pool_high_water(s->pool));
-        cJSON_AddNumberToObject(b, "acquires", (double)buffer_pool_acquires(s->pool));
-        cJSON_AddNumberToObject(b, "failures", (double)buffer_pool_fails(s->pool));
-        cJSON_AddItemToObject(root, "buffers", b);
+    if (root) {
+        cJSON_AddNumberToObject(root, "station", (double)iotdata_node_station(s->inode));
+        cJSON_AddStringToObject(root, "version", s->version ? s->version : "");
+        cJSON_AddNumberToObject(root, "time", (double)now);
+        cJSON_AddNumberToObject(root, "uptime_secs", (double)(now - s->start_time));
+        cJSON_AddItemToObject(root, "links", stat_build_links_json(s, now, mesh));
+        stat_build_stations_json(root, s, now, mesh, ddup); /* adds `stations`, `mesh`, `ddup` */
+        cJSON_AddItemToObject(root, "variants", stat_build_variants_json(s, now));
+        cJSON_AddItemToObject(root, "mqtt", stat_build_mqtt_json(s, now));
+        if (s->pool) {
+            cJSON *b = cJSON_CreateObject();
+            if (b) {
+                cJSON_AddNumberToObject(b, "total", (double)buffer_pool_total(s->pool));
+                cJSON_AddNumberToObject(b, "used", (double)buffer_pool_used(s->pool));
+                cJSON_AddNumberToObject(b, "high_water", (double)buffer_pool_high_water(s->pool));
+                cJSON_AddNumberToObject(b, "acquires", (double)buffer_pool_acquires(s->pool));
+                cJSON_AddNumberToObject(b, "failures", (double)buffer_pool_fails(s->pool));
+                cJSON_AddItemToObject(root, "buffers", b);
+            }
+        }
     }
     return root;
 }
@@ -573,7 +577,7 @@ const char *stat_build_stat_string(char *const buf, const size_t size, stat_stat
         } \
     } while (0)
 
-    const time_t now = time(NULL);
+    const time_t now = hw_clock();
     stat_delta_t *const last = &s->_delta_last;
     stat_totals_t cur_totals;
     stat_get_totals(s, &cur_totals);
@@ -640,11 +644,8 @@ void stat_publish(stat_state_t *const s, const mesh_state_t *const mesh, const d
         cJSON_Delete(root);
         if (json) {
             const char *const mqtt_topic = iotdata_node_config_string(STAT_PUBLISH_MQTT_TOPIC_PREFIX);
-            /* `<prefix>/gateway/<station>`, so the level below `stats` is always a KIND -- the
-               network table publishes to `<prefix>/network/<station>` and this used to publish
-               straight to `<prefix>/<station>`, which left one level meaning two things. */
-            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s%sgateway/%03" PRIX16, mqtt_topic, (mqtt_topic[0] != '\0' && mqtt_topic[strlen(mqtt_topic) - 1] == '/') ? "" : "/", iotdata_node_station(s->inode)), json,
-                            (int)strlen(json));
+            (void)mqtt_send(snprintf_inline(s->_buffer_topic, sizeof(s->_buffer_topic), "%s%sgateway/%03" PRIX16, mqtt_topic, (mqtt_topic[0] != '\0' && mqtt_topic[strlen(mqtt_topic) - 1] == '/') ? "" : "/", iotdata_node_station(s->inode)),
+                            json, (int)strlen(json));
             free(json);
         }
     }
@@ -665,7 +666,7 @@ bool stat_begin(stat_state_t *const s, __attribute__((unused)) const char *topic
     s->pool = pool;
     s->version = version;
     s->inode = inode;
-    s->start_time = time(NULL);
+    s->start_time = hw_clock();
     s->link.name = "e22-900t22";
     s->link.type = "lora";
     s->link.address = lora_config->e22_address;
