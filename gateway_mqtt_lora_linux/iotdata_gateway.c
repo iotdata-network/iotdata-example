@@ -97,12 +97,16 @@
 
 bool _log_enabled = false;
 
-__attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, const char level, const char *const format, ...) {
+static void _log_stamp(FILE *const to, const char level) {
     struct timespec ts;
     struct tm tm;
     clock_gettime(CLOCK_REALTIME, &ts);
     localtime_r(&ts.tv_sec, &tm);
     fprintf(to, "%c (%02d:%02d:%02d.%03ld) ", level, tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000L);
+}
+
+__attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, const char level, const char *const format, ...) {
+    _log_stamp(to, level);
     va_list args;
     va_start(args, format);
     vfprintf(to, format, args);
@@ -169,7 +173,8 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 #define IOTDATA_NODE_VERSION_HAS_MESH
-#define IOTDATA_NODE_DOWN_SLOTS BUFFER_SLOTS_DOWNSTREAM
+#define IOTDATA_NODE_DOWN_SLOTS       BUFFER_SLOTS_DOWNSTREAM
+#define IOTDATA_NODE_CONSOLE_PREFIX() _log_stamp(stdout, 'C')
 #include "iotdata_node_platform.h"
 #include "iotdata_node_down.h"
 #include "iotdata_node_stations.h"
