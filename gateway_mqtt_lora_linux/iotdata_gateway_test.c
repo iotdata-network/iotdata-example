@@ -40,6 +40,8 @@ static void test_e22_printf_stub(const char *format, ...) {
 #include "d_platform_linux.h"
 #include "d_common.h"
 #include "d_format.h"
+#include "d_module_version_linux.h"
+#include "d_console_linux.h"
 
 /* The pool as the gateway really builds it: locked, because the gateway is not single-threaded.
    The harness itself is, but compiling the same shape is the point -- an unlocked test pool would
@@ -3008,7 +3010,7 @@ static bool test_gateway_settings_fused_and_pinned(void) {
         memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
         char *bargv[] = { (char *)(uintptr_t)"gw", (char *)(uintptr_t)"--config", bare, (char *)(uintptr_t)"--overlay", barov };
         ASSERT(gateway_config_load(5, bargv));
-        ASSERT_EQ_INT(iotdata_node_settings_station(&gateway_settings), iotdata_node_station_from_mac("test"));
+        ASSERT_EQ_INT(iotdata_node_settings_station(&gateway_settings), iotdata_node_station_from_mac(NULL));
         ASSERT(iotdata_station_is_assignable(iotdata_node_settings_station(&gateway_settings)));
         (void)remove(bare);
         (void)remove(barov);

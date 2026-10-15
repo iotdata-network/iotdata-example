@@ -310,7 +310,13 @@ static bool gateway_config_load(const int argc, char **const argv) {
        this, and a `--node-station` argument overrides and pins it.
        Frozen straight after, because the console's "(default N)" has to come from somewhere and on
        a host there is no state block doing it. */
-    iotdata_node_settings_defaults(&gateway_settings, iotdata_node_station_from_mac("gateway"));
+    iotdata_node_identity_t identity;
+    iotdata_node_settings_defaults(&gateway_settings, iotdata_node_station_from_mac(&identity));
+    char ibuf[IOTDATA_NODE_IDENTITY_STR_MAX + 1];
+    if (identity.source == IOTDATA_NODE_IDENTITY_MAC)
+        PRINTF_INFO("board: %s\n", iotdata_node_identity_str(ibuf, sizeof(ibuf), &identity));
+    else
+        PRINTF_WARN("board: %s\n", iotdata_node_identity_str(ibuf, sizeof(ibuf), &identity));
     iotdata_node_settings_freeze(&gateway_settings);
 
     if (!gateway_config_read(file, named != NULL, false) && named)

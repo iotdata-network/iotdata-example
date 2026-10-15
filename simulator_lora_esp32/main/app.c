@@ -71,6 +71,8 @@
 #include "d_platform_esp32.h"
 #include "d_common.h"
 #include "d_format.h"
+#include "d_module_version_esp32.h"
+#include "d_console_esp32.h"
 #include "d_module_datastore_esp32.h"
 #include "d_module_filestore_esp32.h"
 /* the OTA seams: iotdata_node_otaupdate.h assembles these, and every node that uses the

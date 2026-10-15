@@ -112,7 +112,16 @@ static bool packet_build(app_state_t *const as, const iotdata_node_t *const node
 
 static uint16_t app_board_id(void) {
     static uint16_t cached = 0u;
-    return cached == 0u ? (cached = iotdata_node_station_from_mac(__tag_app)) : cached;
+    if (cached == 0u) {
+        iotdata_node_identity_t identity;
+        cached = iotdata_node_station_from_mac(&identity);
+        char ibuf[IOTDATA_NODE_IDENTITY_STR_MAX + 1];
+        if (identity.source == IOTDATA_NODE_IDENTITY_MAC)
+            ESP_LOGI(__tag_app, "board: %s", iotdata_node_identity_str(ibuf, sizeof(ibuf), &identity));
+        else
+            ESP_LOGW(__tag_app, "board: %s", iotdata_node_identity_str(ibuf, sizeof(ibuf), &identity));
+    }
+    return cached;
 }
 
 #define QUIRK_BOARD_BME280_ADDR_77 0x769

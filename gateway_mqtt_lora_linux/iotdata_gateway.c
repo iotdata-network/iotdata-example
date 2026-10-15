@@ -114,12 +114,25 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
     va_end(args);
 }
 
-#define PRINTF_INFO(...)  _log_write(stdout, 'I', __VA_ARGS__)
-#define PRINTF_WARN(...)  _log_write(stderr, 'W', __VA_ARGS__)
-#define PRINTF_ERROR(...) _log_write(stderr, 'E', __VA_ARGS__)
+#define PRINTF_INFO(...) \
+    do { \
+        if (platform_log_level_get() >= PLATFORM_LOG_INFO) \
+            _log_write(stdout, 'I', __VA_ARGS__); \
+    } while (0)
+#define PRINTF_WARN(...) \
+    do { \
+        if (platform_log_level_get() >= PLATFORM_LOG_WARN) \
+            _log_write(stderr, 'W', __VA_ARGS__); \
+    } while (0)
+#define PRINTF_ERROR(...) \
+    do { \
+        if (platform_log_level_get() >= PLATFORM_LOG_ERROR) \
+            _log_write(stderr, 'E', __VA_ARGS__); \
+    } while (0)
+/* Debug has two ways in: the config row that was always there, and `logl debug` at the console. */
 #define PRINTF_DEBUG(...) \
     do { \
-        if (_log_enabled) \
+        if (_log_enabled || platform_log_level_get() >= PLATFORM_LOG_DEBUG) \
             _log_write(stdout, 'D', __VA_ARGS__); \
     } while (0)
 
@@ -129,6 +142,7 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #include "d_platform_linux.h"
 #include "d_common.h"
 #include "d_format.h"
+#include "d_module_version_linux.h"
 #define BUFFER_LOCK_TYPE       pthread_mutex_t
 #define BUFFER_LOCK_INIT(l)    pthread_mutex_init((l), NULL)
 #define BUFFER_LOCK_ACQUIRE(l) pthread_mutex_lock(l)
@@ -136,9 +150,6 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 #include "d_module_buffers.h"
 #include "d_module_datastore_linux.h"
 #include "d_module_filestore_linux.h"
-/* the OTA seams: iotdata_node_otaupdate.h assembles these, and every node that uses the
-   framework has an update path, so every node includes them. None depends on an iotdata
-   header, so they sit here in the d_ block with the rest. */
 #include "d_module_otaslot_linux.h"
 #include "d_module_inflate_linux.h"
 #include "d_module_hpatch.h"
@@ -160,6 +171,7 @@ __attribute__((format(printf, 3, 4))) static void _log_write(FILE *const to, con
 static bool lora_packet_write(const uint8_t *const packet, const int length) {
     return length > 0 && lora_write(packet, (size_t)length) == ESP_OK;
 }
+#include "d_console_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // IOTDATA PROTOCOL + PLATFORM
@@ -176,6 +188,8 @@ static bool lora_packet_write(const uint8_t *const packet, const int length) {
 #define IOTDATA_NODE_VERSION_HAS_MESH
 #define IOTDATA_NODE_DOWN_SLOTS       BUFFER_SLOTS_DOWNSTREAM
 #define IOTDATA_NODE_CONSOLE_PREFIX() _log_stamp(stdout, 'C')
+#define BLACKBOX_CLOCK                iotdata_node_blackbox_clock_wall
+
 #include "iotdata_node_platform.h"
 #include "iotdata_node_down.h"
 #include "iotdata_node_stations.h"
@@ -399,7 +413,7 @@ bool system_config(system_t *state, const int argc, char *argv[]) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             iotdata_node_config_help(gateway_help_emit, argv[0]);
             static iotdata_node_settings_t help_settings;
-            iotdata_node_settings_defaults(&help_settings, iotdata_node_station_from_mac("gateway"));
+            iotdata_node_settings_defaults(&help_settings, iotdata_node_station_from_mac(NULL));
             iotdata_node_settings_help(gateway_help_emit, &help_settings);
             exit(EXIT_SUCCESS);
         }

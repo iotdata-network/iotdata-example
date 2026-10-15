@@ -127,6 +127,8 @@
 #include "d_platform_esp32.h"
 #include "d_common.h"
 #include "d_format.h"
+#include "d_module_version_esp32.h"
+#include "d_console_esp32.h"
 #include "d_readings.h"
 #include "d_module_datastore_esp32.h"
 #include "d_module_filestore_esp32.h"
@@ -458,7 +460,13 @@ bool app_init(void) {
 
     if (!_RTC_DATA_VALID(app_state.operating, STATE_MAGIC)) {
         _RTC_DATA_INIT(app_state.operating, STATE_MAGIC);
-        iotdata_node_init(&app_state.operating->node, iotdata_node_station_from_mac(__tag_app), NULL, 0u);
+        iotdata_node_identity_t identity;
+        iotdata_node_init(&app_state.operating->node, iotdata_node_station_from_mac(&identity), NULL, 0u);
+        char ibuf[IOTDATA_NODE_IDENTITY_STR_MAX + 1];
+        if (identity.source == IOTDATA_NODE_IDENTITY_MAC)
+            ESP_LOGI(__tag_app, "board: %s", iotdata_node_identity_str(ibuf, sizeof(ibuf), &identity));
+        else
+            ESP_LOGW(__tag_app, "board: %s", iotdata_node_identity_str(ibuf, sizeof(ibuf), &identity));
         iotdata_node_version_caps_init(&app_state.operating->caps);
         if ((app_state.operating->gnss_present = (gnss_setup(&gnss_config_default) == ESP_OK)))
             iotdata_node_version_caps_add(&app_state.operating->caps, IOTDATA_NODE_VERSION_CAPS_SENSOR, IOTDATA_NODE_VERSION_SENSOR_GNSS);
