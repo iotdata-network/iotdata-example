@@ -51,6 +51,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -206,14 +207,27 @@ static const iotdata_node_console_t s_gateway_cons[] = {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+static int gateway_directory_writable(const char *const dir) {
+    struct stat sb;
+    if (stat(dir, &sb) != 0)
+        return errno;
+    if (!S_ISDIR(sb.st_mode))
+        return ENOTDIR; /* not stale errno: stat succeeded, it is simply not a directory */
+    if (access(dir, W_OK | X_OK) != 0)
+        return errno; /* X_OK too: a directory needs search to reach a file inside it */
+    return 0;
+}
+
 static void gateway_blackbox_begin(void) {
     char path[256];
     const uint32_t max_seconds = iotdata_node_config_u32(BLACKBOX_MAX_SECONDS);
     const bool enabled = iotdata_node_config_bool(BLACKBOX_ENABLED);
-    if (iotdata_node_diagnostics_begin_conf(
+    const char *const dir = iotdata_node_config_string(BLACKBOX_FILE_DIRECTORY);
+    const int err = gateway_directory_writable(dir);
+    if (!iotdata_node_diagnostics_begin_conf(
             &(const iotdata_node_diagnostics_conf_t){
                 .enabled = enabled,
-                .persist_arg = snprintf_inline(path, sizeof(path), "%s/iotdata_gateway_blackbox.csv", iotdata_node_config_string(BLACKBOX_FILE_DIRECTORY)),
+                .persist_arg = snprintf_inline(path, sizeof(path), "%s/iotdata_gateway_blackbox.csv", dir),
                 .flush = (max_seconds > 0u) ? BLACKBOX_FLUSH_BATCH_TIME : BLACKBOX_FLUSH_WRITE_THROUGH,
                 .flush_ms = max_seconds * 1000u,
                 .max_records = iotdata_node_config_u32(BLACKBOX_MAX_RECORDS),
@@ -221,9 +235,13 @@ static void gateway_blackbox_begin(void) {
                 .generations = iotdata_node_config_u8(BLACKBOX_FILE_GENERATIONS),
             },
             IOTDATA_NODE_BB_LC_START, 0))
-        PRINTF_INFO("blackbox: %s (path=%s, flush=%s)\n", enabled ? "enabled" : "disabled (default)", iotdata_node_diagnostics_persist_arg(), (max_seconds > 0) ? "ram-cache/batched" : "write-through");
-    else
         PRINTF_ERROR("blackbox: init failed (path=%s)\n", path);
+    else if (err == 0)
+        PRINTF_INFO("blackbox: %s (path=%s, flush=%s)\n", enabled ? "enabled" : "disabled (default)", iotdata_node_diagnostics_persist_arg(), (max_seconds > 0) ? "ram-cache/batched" : "write-through");
+    else if (enabled)
+        PRINTF_ERROR("blackbox: enabled but cannot write '%s' (%s) -- nothing will be recorded\n", dir, strerror(err));
+    else
+        PRINTF_WARN("blackbox: disabled, and '%s' cannot be written (%s) -- nothing would be recorded\n", dir, strerror(err));
 }
 
 static void gateway_blackbox_end(void) {
