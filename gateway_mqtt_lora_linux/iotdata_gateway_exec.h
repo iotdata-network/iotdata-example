@@ -246,7 +246,7 @@ static void exec_node_status_mesh(iotdata_node_status_mesh_t *const out) {
     out->parent = 0;
     out->cost = 0;
     out->generation = st->state_mesh->beacon_generation;
-    out->parent_rssi = 0;
+    out->parent_rssi_dbm = 0;
     out->peers = (uint8_t)st->state_stat->peers_count;
     out->accepting = true;
     out->beacon_rx = st->state_mesh->ctrl[IOTDATA_MESH_CTRL_BEACON].rx;

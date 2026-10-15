@@ -294,8 +294,8 @@ static state_running_t _state_running = { .iotdata_node_cfg = {
                                               .control_actions = _state_control_actions,
                                               .control_actions_count = APP_CONTROL_ACTIONS_COUNT,
                                               .diag = IOTDATA_NODE_DIAGNOSTICS_PULL,
-                                              .receive_every_ms = IOTDATA_NODE_RECEIVE_EVERY_MS,
-                                              .receive_window_ms = IOTDATA_NODE_RECEIVE_WINDOW_MS,
+                                              .receive_every_s = IOTDATA_NODE_RECEIVE_EVERY_S,
+                                              .receive_window_s = IOTDATA_NODE_RECEIVE_WINDOW_S,
                                               .settings = &_state_running.settings,
                                               .state = &_state_running.node,
                                               .config_build = _app_config_build,
@@ -323,8 +323,8 @@ static void _app_node_status(__attribute__((unused)) const uint16_t station, iot
     out->uptime_s = (uint32_t)(hw_time_ms() / 1000);
     out->reason = iotdata_node_reason_reset();
     out->has_heap = true;
-    out->heap_free = (uint32_t)esp_get_free_heap_size();
-    out->heap_min = (uint32_t)esp_get_minimum_free_heap_size();
+    out->heap_free_bytes = (uint32_t)esp_get_free_heap_size();
+    out->heap_min_bytes = (uint32_t)esp_get_minimum_free_heap_size();
     out->has_restarts = true;
     out->restarts = (uint16_t)s->cycles;
 }
@@ -480,7 +480,7 @@ bool app_init(void) {
             ESP_LOGW(__tag_app, "state: persistence failed (bind STATE_TAG)");
         const bool restored = iotdata_node_state_load(&app_state.running->node);
         ESP_LOGI(__tag_app, "state: %u block(s), %s", (unsigned)app_state.running->node.count, restored ? "restored" : "defaulted");
-        if (iotdata_node_restore_station(&app_state.operating->node, &app_state.running->settings))
+        if (iotdata_node_station_restore(&app_state.operating->node, &app_state.running->settings))
             ESP_LOGI(__tag_app, "node: station=%" PRIu16 " restored from settings", iotdata_node_station(&app_state.operating->node));
         if (!iotdata_node_config_load(&app_state.running->datastore))
             ESP_LOGI(__tag_app, "config: nothing stored yet -- every row at its default");

@@ -265,8 +265,8 @@ static void sim_node_status(const uint16_t station, iotdata_node_status_t *const
     out->uptime_s = (uint32_t)(hw_time_ms() / 1000);
     out->reason = IOTDATA_NODE_REASON_UNKNOWN;
     out->has_heap = true;
-    out->heap_free = (uint32_t)esp_get_free_heap_size();
-    out->heap_min = (uint32_t)esp_get_minimum_free_heap_size();
+    out->heap_free_bytes = (uint32_t)esp_get_free_heap_size();
+    out->heap_min_bytes = (uint32_t)esp_get_minimum_free_heap_size();
     for (int i = 0; i < SIM_SENSORS; i++)
         if (iotdata_node_station(&s_nodes[i]) == station) {
             const iotsim_sensor_t *const s = iotsim_sensor(&g_sim, i);
@@ -309,8 +309,8 @@ static const iotdata_node_params_t s_conf_template = {
     .control_actions_count = SIM_NODE_CONTROL_ACTIONS_COUNT,
     .diag = IOTDATA_NODE_DIAGNOSTICS_PULL,
     .receive_always = (RECEIVE_ALWAYS != 0),
-    .receive_every_ms = IOTDATA_NODE_RECEIVE_EVERY_MS,
-    .receive_window_ms = IOTDATA_NODE_RECEIVE_WINDOW_MS,
+    .receive_every_s = IOTDATA_NODE_RECEIVE_EVERY_S,
+    .receive_window_s = IOTDATA_NODE_RECEIVE_WINDOW_S,
     .settings = NULL, /* per node: filled in from this template at startup */
     .state = &s_state,
     .config_build = sim_config_build,
@@ -383,7 +383,7 @@ static void transmit_packets(iotsim_t *const sim) {
             s_nodes[idx].sequence = (uint16_t)(pkt.sequence + 1u);
             if (iotdata_node_receive_announce(&s_nodes[idx])) {
                 iotdata_node_window_begin(&s_nodes[idx], hw_time_ms());
-                ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " receive window open for %ums", iotdata_node_station(&s_nodes[idx]), (unsigned)IOTDATA_NODE_RECEIVE_WINDOW_MS);
+                ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " receive window open for %us", iotdata_node_station(&s_nodes[idx]), (unsigned)IOTDATA_NODE_RECEIVE_WINDOW_S);
             }
             hw_delay_ms_yieldable(TRANSMIT_DELAY_MS);
         }
@@ -466,7 +466,7 @@ bool app_init(void) {
     for (int i = 0; i < SIM_SENSORS; i++) {
         const iotsim_sensor_t *s = iotsim_sensor(&g_sim, i);
         iotdata_node_init(&s_nodes[i], s->station_id, &s_state, SIM_STATE_TAG(s->station_id));
-        s_nodes[i].elapsed_ms = (uint32_t)((uint64_t)IOTDATA_NODE_RECEIVE_EVERY_MS * (uint32_t)i / (uint32_t)SIM_SENSORS);
+        s_nodes[i].elapsed_ms = (uint32_t)((uint64_t)IOTDATA_NODE_RECEIVE_EVERY_S * 1000 * (uint32_t)i / (uint32_t)SIM_SENSORS);
         s_confs[i] = s_conf_template;
         s_confs[i].settings = &s_settings[i];
         iotdata_node_attach(&s_nodes[i], &s_confs[i]);
@@ -483,14 +483,14 @@ bool app_init(void) {
     const bool restored = iotdata_node_state_load(&s_state);
     for (int i = 0; i < SIM_SENSORS; i++) {
         iotsim_sensor_sequence_set(&g_sim, i, iotdata_node_sequence(&s_nodes[i]));
-        if (iotdata_node_restore_station(&s_nodes[i], &s_settings[i]))
+        if (iotdata_node_station_restore(&s_nodes[i], &s_settings[i]))
             ESP_LOGI(__tag_app, "  [%2d] station=%03" PRIX16 " restored from settings", i, iotdata_node_station(&s_nodes[i]));
     }
     ESP_LOGI(__tag_app, "state: %u block(s), %s", (unsigned)s_state.count, restored ? "restored" : "defaulted");
     if (s_conf_template.receive_always)
         ESP_LOGI(__tag_app, "node: receiver always on (no advertisement needed), per sensor");
     else
-        ESP_LOGI(__tag_app, "node: receive window %us every %uh, per sensor", (unsigned)(IOTDATA_NODE_RECEIVE_WINDOW_MS / 1000), (unsigned)(IOTDATA_NODE_RECEIVE_EVERY_MS / 3600000u));
+        ESP_LOGI(__tag_app, "node: receive window %us every %uh, per sensor", (unsigned)IOTDATA_NODE_RECEIVE_WINDOW_S, (unsigned)(IOTDATA_NODE_RECEIVE_EVERY_S / 3600u));
     return true;
 }
 

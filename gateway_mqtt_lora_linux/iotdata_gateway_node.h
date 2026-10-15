@@ -29,7 +29,7 @@ typedef struct {
     iotdata_node_t *inode;
 
     /* CONFIG: reporting cadence, indexed by TLV type. 0 = do not send periodically. */
-    uint16_t period[IOTDATA_NODE_TLV_SYSTEM_COUNT];
+    uint16_t period_s[IOTDATA_NODE_TLV_SYSTEM_COUNT];
     uint32_t period_last_ms[IOTDATA_NODE_TLV_SYSTEM_COUNT]; /* ticks, as relay_node.h keeps them */
     bool period_primed[IOTDATA_NODE_TLV_SYSTEM_COUNT];      /* a tick of 0 is a real time, so the sentinel is its own flag */
     uint16_t startup;                                       /* bit N = emit type N once when we come up */
@@ -89,13 +89,13 @@ typedef struct {
    (The relay says exactly this in relay_node.h. The two nodes are separate modules by history, and
    the point of stating it identically is that the cadence cannot differ by accident.) */
 static inline bool node_at_startup(const node_state_t *const st, const uint8_t type) {
-    return (st->settings) ? iotdata_node_settings_at_startup(st->settings, type) : ((st->startup >> type) & 1u) != 0u;
+    return st->settings ? iotdata_node_settings_at_startup(st->settings, type) : ((st->startup >> type) & 1u) != 0u;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static inline uint16_t node_period_s(const node_state_t *const st, const uint8_t type) {
-    return (st->settings) ? iotdata_node_settings_period_s(st->settings, type) : st->period[type];
+    return st->settings ? iotdata_node_settings_period_s(st->settings, type) : st->period_s[type];
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -657,7 +657,7 @@ static bool node_on_packet(node_state_t *const st, const uint8_t *buf, const siz
                             (void)iotdata_node_settings_commit(st->settings, st->state);
                             /* a written station takes effect NOW, so the reply goes out as who we
                             have become rather than as who we were */
-                            (void)iotdata_node_adopt_station(st->inode, iotdata_node_settings_station(st->settings));
+                            (void)iotdata_node_station_adopt(st->inode, iotdata_node_settings_station(st->settings));
                         }
                         (void)node_report(st, IOTDATA_NODE_TLV_SETTINGS);
                         ok = true;
@@ -725,7 +725,7 @@ static void node_tick(node_state_t *const st, const uint32_t now_ms) {
             if (iotdata_node_tlv_is_reportable(t) && node_at_startup(st, t))
                 (void)node_report(st, t);
     }
-    for (uint8_t type = 1; type < (uint8_t)(sizeof(st->period) / sizeof(st->period[0])); type++) {
+    for (uint8_t type = 1; type < (uint8_t)(sizeof(st->period_s) / sizeof(st->period_s[0])); type++) {
         const uint16_t period_s = node_period_s(st, type);
         if (period_s != 0) {
             if (!st->period_primed[type]) {
@@ -768,8 +768,8 @@ static bool node_begin(node_state_t *st, iotdata_node_t *const inode, const iotd
     iotdata_node_down_init(&st->down, pool);
     if (st->startup == 0)
         st->startup = IOTDATA_NODE_SETTINGS_DEFAULT_STARTUP;
-    if (st->period[IOTDATA_NODE_TLV_STATUS] == 0)
-        st->period[IOTDATA_NODE_TLV_STATUS] = (uint16_t)IOTDATA_NODE_SETTINGS_DEFAULT_PERIOD_STATUS_S;
+    if (st->period_s[IOTDATA_NODE_TLV_STATUS] == 0)
+        st->period_s[IOTDATA_NODE_TLV_STATUS] = (uint16_t)IOTDATA_NODE_SETTINGS_DEFAULT_PERIOD_STATUS_S;
     snprintf(st->topic_from, sizeof(st->topic_from), "%s" IOTDATA_NODE_MQTT_MANAGE_TOPIC_FROM, topic_prefix);
     PRINTF_INFO("node: station=%03" PRIX16 ", responses on %s/<station>\n", iotdata_node_station(st->inode), st->topic_from);
     return true;

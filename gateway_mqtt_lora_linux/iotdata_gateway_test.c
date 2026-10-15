@@ -2940,7 +2940,7 @@ static bool test_gateway_settings_fused_and_pinned(void) {
 
     FILE *f = fopen(cfg, "w");
     ASSERT(f != NULL);
-    fputs("node-station = 7\nnode-interval = 90\nnode-report-status-period = 1800\n", f);
+    fputs("node-station = 7\nnode-interval-m = 90\nnode-report-status-period-s = 1800\n", f);
     fclose(f);
 
     iotdata_node_config_defaults();
@@ -2955,25 +2955,25 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     /* the station is a SETTING and nothing else: no config row seeds it any more, so a file that
        says nothing leaves this node answering as whatever its hardware derived */
     ASSERT_EQ_INT(iotdata_node_settings_station(&gateway_settings), 7);
-    ASSERT_EQ_INT(iotdata_node_settings_interval_ms(&gateway_settings) / 60000u, 90); /* the interval is MINUTES */
+    ASSERT_EQ_INT(iotdata_node_settings_interval_s(&gateway_settings) / 60u, 90); /* the interval is MINUTES */
     ASSERT_EQ_INT(iotdata_node_settings_period_s(&gateway_settings, IOTDATA_NODE_TLV_STATUS), 1800);
     /* and one nobody mentioned is at the seeded default, not at zero */
-    ASSERT_EQ_INT(iotdata_node_settings_window_ms(&gateway_settings), IOTDATA_NODE_SETTINGS_DEFAULT_WINDOW_MS);
+    ASSERT_EQ_INT(iotdata_node_settings_window_s(&gateway_settings), IOTDATA_NODE_SETTINGS_DEFAULT_WINDOW_S);
 
     /* A RUNTIME CHANGE goes back to the same file -- and only what moved. */
     gateway_config_overlay_path = ovl;
     iotdata_node_settings_saver_attach(gateway_settings_save);
     iotdata_node_config_saver_attach(gateway_config_save);
-    gateway_settings.window_ms = 2500;
+    gateway_settings.window_s = 25;
     ASSERT(iotdata_node_settings_commit(&gateway_settings, NULL));
     {
         f = fopen(ovl, "r");
         ASSERT(f != NULL);
         bool wrote_window = false, leaked_theirs = false;
         while (fgets(line, sizeof(line), f) != NULL) {
-            if (strstr(line, "node-window") != NULL && strstr(line, "2500") != NULL)
+            if (strstr(line, "node-window-s") != NULL && strstr(line, "25") != NULL)
                 wrote_window = true;
-            if (strstr(line, "node-interval") != NULL || strstr(line, "node-report-status-period") != NULL)
+            if (strstr(line, "node-interval-m") != NULL || strstr(line, "node-report-status-period-s") != NULL)
                 leaked_theirs = true; /* those came from the operator's file and are still theirs */
         }
         fclose(f);
@@ -2989,8 +2989,8 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     memset(gateway_config_owned, 0, sizeof(gateway_config_owned));
     memset(gateway_settings_owned, 0, sizeof(gateway_settings_owned));
     ASSERT(gateway_config_load(5, argv));
-    ASSERT_EQ_INT(iotdata_node_settings_window_ms(&gateway_settings), 2500);
-    ASSERT_EQ_INT(iotdata_node_settings_interval_ms(&gateway_settings) / 60000u, 90);
+    ASSERT_EQ_INT(iotdata_node_settings_window_s(&gateway_settings), 25);
+    ASSERT_EQ_INT(iotdata_node_settings_interval_s(&gateway_settings) / 60u, 90);
 
     /* AND WITH NO LINE AT ALL it derives, rather than falling back to some number a config row
        used to hold: the station is the hardware's answer until somebody states otherwise. */
@@ -3022,12 +3022,12 @@ static bool test_gateway_settings_fused_and_pinned(void) {
     _iotdata_node_settings_pin = 0;
     _iotdata_node_settings_pin_report = 0;
     {
-        char *pargv[] = { (char *)(uintptr_t)"gw",  (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl, (char *)(uintptr_t)"--mesh-beacon-interval-s", (char *)(uintptr_t)"45", (char *)(uintptr_t)"--node-window",
-                          (char *)(uintptr_t)"7000" };
+        char *pargv[] = { (char *)(uintptr_t)"gw", (char *)(uintptr_t)"--config", cfg, (char *)(uintptr_t)"--overlay", ovl, (char *)(uintptr_t)"--mesh-beacon-interval-s", (char *)(uintptr_t)"45", (char *)(uintptr_t)"--node-window-s",
+                          (char *)(uintptr_t)"70" };
         ASSERT(gateway_config_load(9, pargv));
     }
     ASSERT_EQ_INT(iotdata_node_config_u16(MESH_BEACON_INTERVAL_S), 45);
-    ASSERT_EQ_INT(iotdata_node_settings_window_ms(&gateway_settings), 7000); /* the argument beat the overlay */
+    ASSERT_EQ_INT(iotdata_node_settings_window_s(&gateway_settings), 70); /* the argument beat the overlay */
     ASSERT(iotdata_node_config_is_pinned(IOTDATA_NODE_CFG_MESH_BEACON_INTERVAL_S));
     ASSERT(iotdata_node_settings_is_pinned(IOTDATA_NODE_SETTINGS_PIN_WINDOW));
     ASSERT(!iotdata_node_settings_is_pinned(IOTDATA_NODE_SETTINGS_PIN_INTERVAL)); /* that one came from the file */
@@ -3054,14 +3054,14 @@ static bool test_gateway_settings_fused_and_pinned(void) {
         iotdata_kvr_t kv;
         iotdata_kvr_init(&kv, kvbuf, sizeof(kvbuf));
         uint8_t r[IOTDATA_NODE_SETTINGS_RECEIVE_SIZE];
-        iotdata_node_settings_put_u16(r, 0, 1234); /* window: pinned */
-        iotdata_node_settings_put_u16(r, 2, 30);   /* interval: not */
+        iotdata_node_settings_put_u16(r, 0, 12); /* window: pinned */
+        iotdata_node_settings_put_u16(r, 2, 30); /* interval: not */
         iotdata_node_settings_put_u16(r, 4, 0);
         iotdata_kvr_add(&kv, IOTDATA_NODE_SETTINGS_RECEIVE, r, (uint8_t)sizeof(r));
         ASSERT(iotdata_node_settings_apply(&gateway_settings, kvbuf, kv.len));
     }
-    ASSERT_EQ_INT(iotdata_node_settings_window_ms(&gateway_settings), 7000);          /* held */
-    ASSERT_EQ_INT(iotdata_node_settings_interval_ms(&gateway_settings) / 60000u, 30); /* took */
+    ASSERT_EQ_INT(iotdata_node_settings_window_s(&gateway_settings), 70);         /* held */
+    ASSERT_EQ_INT(iotdata_node_settings_interval_s(&gateway_settings) / 60u, 30); /* took */
 
     _iotdata_node_settings_pin = 0;
     _iotdata_node_settings_pin_report = 0;

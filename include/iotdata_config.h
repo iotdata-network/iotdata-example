@@ -55,12 +55,6 @@
 #define IOTDATA_NODE_CONFIG_LORA_TX_POWER 22 /* dBm */
 #endif
 
-// --- the receive window ----------------------------------------------------------------------------------------------------
-
-#ifndef IOTDATA_NODE_CONFIG_RECEIVE_WINDOW_MS
-#define IOTDATA_NODE_CONFIG_RECEIVE_WINDOW_MS 5000
-#endif
-
 // --- simulator (simulator_lora_esp32) --------------------------------------------------------------------------------------
 
 #ifndef IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX
@@ -91,13 +85,13 @@
 #define IOTDATA_NODE_CONFIG_SENSOR_ENABLED true
 #endif
 #ifndef IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_S
-#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_S     (5 * 60)
+#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_S (5 * 60)
 #endif
 #ifndef IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MIN_S
 #define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MIN_S (30)
 #endif
 #ifndef IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MAX_S
-#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MAX_S (12*60*60)
+#define IOTDATA_NODE_CONFIG_SENSOR_TRANSMIT_PERIOD_MAX_S (12 * 60 * 60)
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------------------
