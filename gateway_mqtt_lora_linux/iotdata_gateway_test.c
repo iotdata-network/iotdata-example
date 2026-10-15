@@ -1877,17 +1877,19 @@ static void ctrl_test_state(ctrl_state_t *const st) {
 /* These tests look at the head of the staging queue rather than draining it with ctrl_tick(), so
    each one hands the buffers back itself -- the pool leak check at the end of main is watching.
    peek() is the right tool here precisely because this queue has one thread in the test: the
-   handle cannot go stale under us the way it could on a queue another thread takes from. */
-static bool ctrl_staged(const ctrl_state_t *const st) {
+   handle cannot go stale under us the way it could on a queue another thread takes from. It takes
+   a NON-const queue -- it locks, and a read that acquires a lock is not a const read -- which is
+   why these four take a non-const state and should not be tidied back. */
+static bool ctrl_staged(ctrl_state_t *const st) {
     return buffer_queue_peek(&st->queue, hw_time_ms(), NULL, NULL) != BUFFER_NONE;
 }
 
-static uint16_t ctrl_staged_target(const ctrl_state_t *const st) {
+static uint16_t ctrl_staged_target(ctrl_state_t *const st) {
     uint32_t key = 0;
     return buffer_queue_peek(&st->queue, hw_time_ms(), NULL, &key) != BUFFER_NONE ? (uint16_t)key : 0;
 }
 
-static uint16_t ctrl_staged_len(const ctrl_state_t *const st) {
+static uint16_t ctrl_staged_len(ctrl_state_t *const st) {
     const buffer_handle_t h = buffer_queue_peek(&st->queue, hw_time_ms(), NULL, NULL);
     return h != BUFFER_NONE ? buffer_len(st->pool, h) : 0;
 }
@@ -1910,7 +1912,7 @@ static bool ctrl_test_take(ctrl_state_t *const st, uint8_t *const key0, uint16_t
     return true;
 }
 
-static const uint8_t *ctrl_staged_bytes(const ctrl_state_t *const st) {
+static const uint8_t *ctrl_staged_bytes(ctrl_state_t *const st) {
     static const uint8_t none[8] = { 0 }; /* so a FAIL print on an empty queue is not a crash */
     const buffer_handle_t h = buffer_queue_peek(&st->queue, hw_time_ms(), NULL, NULL);
     const uint8_t *const p = h != BUFFER_NONE ? buffer_data(st->pool, h) : NULL;
