@@ -128,6 +128,22 @@ const RESTORE = !argv.includes('--no-restore');
 // A sequence jump larger than this is a station restart or a counter wrap, not lost packets.
 // Counting it as loss would put the loss figure permanently at ~100% after a single reboot.
 const SEQ_MAX_GAP = parseInt(cfg['stats-max-gap'] ?? '1000', 10);
+// A sequence number seen again from the same station within this many seconds is a duplicate:
+// the same packet delivered twice (two gateways, or direct and via a relay, that ddup failed to
+// collapse). Bounded in time because a station that restarts reuses low sequence numbers, and
+// those are new packets, not repeats.
+const DUP_WINDOW_MS = 1000 * parseInt(cfg['stats-dup-window'] ?? '300', 10);
+// Battery is not in every packet, so the table shows the latest reading with its age, and calls
+// it stale past this many hours: a level from yesterday says nothing about the battery today.
+const BATTERY_STALE_S = 3600 * parseFloat(cfg['stats-battery-stale'] ?? '24');
+
+// The node's version TLV (type 1), which it sends on boot and then periodically. Found by format
+// rather than position, since a packet may carry several TLVs in any order.
+function versionOf(body) {
+    for (const t of Array.isArray(body && body.data) ? body.data : [])
+        if (t && (t.format === 'version' || t.type === 1) && t.data && typeof t.data === 'object') return t.data;
+    return null;
+}
 
 // The gateway's own surveyed position. Distances are measured from here.
 const REF =
@@ -141,6 +157,9 @@ const REF =
 
 // station-<ID>-name / -latitude / -longitude / -altitude
 const STATIONS = {};
+// Topics carry station ids in hex, payloads in decimal; the table, the config and the page all
+// use the topic form, three digits upper-case.
+const hexId = (v) => (typeof v === 'number' ? v.toString(16) : String(v)).toUpperCase().padStart(3, '0');
 for (const key of Object.keys(cfg)) {
     const m = /^station-([0-9A-Fa-f]{1,8})-(name|latitude|longitude|altitude|decoder)$/.exec(key);
     if (!m) continue;
@@ -329,6 +348,16 @@ const history = []; // newest last; the page reverses it
 const clients = new Set();
 const stats = new Map();
 const gnss = []; // newest last; tracker positions, independent of the packet history
+// Gateways and relays, from the gateway's own publications rather than from station packets:
+// stats/gateway (its links and counters), stats/network (its view of the mesh -- relays, their
+// cost, who hears whom) and ddup (where it can be reached). Keyed by the gateway's hex id, and
+// only the latest of each is kept: these are status reports, superseded by the next one, not
+// history -- so they go to neither the packet list nor the packet log.
+const gateways = new Map();
+// Each node's latest version report, keyed by hex id. Nodes send these as management messages
+// (manage/from/<id>, tlv "version") on boot and then periodically -- not inside their data
+// packets -- and relays send them too, so this is shared by the station table and the relay rows.
+const versions = new Map();
 let counter = 0;
 
 function send(event, payload, to) {
@@ -348,6 +377,8 @@ function statFor(id) {
             id,
             count: 0,
             lost: 0,
+            dups: 0,
+            recent: [], // [sequence, t] within DUP_WINDOW_MS, for duplicate detection
             prevSeq: undefined,
             times: [],
             rssis: [],
@@ -355,10 +386,29 @@ function statFor(id) {
     return stats.get(id);
 }
 
+// Returns true when rec is a duplicate. A duplicate is counted and otherwise ignored: it is not
+// a packet the station sent, so it must not inflate pkts or the interval, refresh last-seen, or
+// move the sequence baseline -- the old code took a repeated sequence for a restart, which reset
+// that baseline and could hide real loss behind it.
 function observe(rec) {
     const s = statFor(rec.station);
+    if (rec.sequence !== undefined) {
+        s.recent = s.recent.filter(([, t]) => rec.t - t <= DUP_WINDOW_MS);
+        if (s.recent.some(([q]) => q === rec.sequence)) {
+            s.dups++;
+            return true;
+        }
+        s.recent.push([rec.sequence, rec.t]);
+        if (s.recent.length > 64) s.recent.shift();
+    }
     s.count++;
     s.last = rec.t;
+    // Latest battery and version, each with when it arrived: neither is in every packet, and the
+    // age is what makes an old reading recognisable as one.
+    const bat = rec.body && rec.body.battery;
+    if (bat && bat.level != null) s.battery = { level: bat.level, charging: !!bat.state, t: rec.t };
+    const ver = versionOf(rec.body);
+    if (ver) versions.set(hexId(rec.station), { data: ver, t: rec.t });
     s.times.push(rec.t);
     if (s.times.length > WINDOW) s.times.shift();
     if (rec.rssi !== undefined && rec.rssi !== null) {
@@ -374,6 +424,7 @@ function observe(rec) {
         }
         s.prevSeq = rec.sequence;
     }
+    return false;
 }
 
 // Counts are for the whole session; interval and average RSSI are over the last WINDOW packets, so
@@ -395,6 +446,13 @@ function snapshot() {
                 distance: meta.distance ?? null,
                 count: s.count,
                 lost: s.lost,
+                dups: s.dups,
+                battery: s.battery ? s.battery.level : null,
+                charging: s.battery ? s.battery.charging : null,
+                batteryAge: s.battery ? Math.round((now - s.battery.t) / 1000) : null,
+                batteryStale: s.battery ? (now - s.battery.t) / 1000 > BATTERY_STALE_S : false,
+                version: versions.has(s.id) ? versions.get(s.id).data : null,
+                versionAge: versions.has(s.id) ? Math.round((now - versions.get(s.id).t) / 1000) : null,
                 lossPct: expected > 0 ? (s.lost * 100) / expected : 0,
                 // Mean seconds between packets: "one every 2m30s" reads better than "0.4/m".
                 interval: span > 0 ? span / (n - 1) : null,
@@ -406,9 +464,9 @@ function snapshot() {
 }
 
 function record(rec) {
+    if (observe(rec)) rec.dup = true; // before log and push, so both carry the flag
     history.push(rec);
     while (history.length > KEEP) history.shift();
-    observe(rec);
     logAppend(rec);
     send('packet', rec);
     send('stats', snapshot());
@@ -481,6 +539,80 @@ function handleTrackerMessage(topic, text) {
     if (pos) recordPosition(pos);
 }
 
+// Which topic kinds feed the gateways-and-relays section, and where each one is filed. They are
+// taken whatever mqtt-accept says: that setting decides what counts as a station packet, and
+// none of these is one.
+const GATEWAY_KINDS = { gateway: 'gw', network: 'net', ddup: 'ddup' };
+
+function handleGatewayMessage(kind, topic, body) {
+    const id = hexId(topic.split('/').pop());
+    const g = gateways.get(id) || { id };
+    g[GATEWAY_KINDS[kind]] = { t: Date.now(), body };
+    gateways.set(id, g);
+    send('gateways', gatewayView());
+}
+
+// One row per gateway, followed by the relays it reports. Ages are counted from when each report
+// ARRIVED plus whatever age it carried, so a gateway that stops reporting shows its relays going
+// stale too, rather than frozen at the last values it sent.
+function gatewayView() {
+    const now = Date.now();
+    const since = (part) => (part ? Math.round((now - part.t) / 1000) : null);
+    const name = (id) => (STATIONS[id] || {}).name || null;
+    const rows = [];
+    for (const g of [...gateways.values()].sort((a, b) => a.id.localeCompare(b.id))) {
+        const gw = (g.gw && g.gw.body) || {};
+        const net = (g.net && g.net.body) || {};
+        const ddup = (g.ddup && g.ddup.body) || null;
+        const ages = [since(g.gw), since(g.net)].filter((a) => a != null);
+        rows.push({
+            role: 'gateway',
+            id: g.id,
+            name: name(g.id),
+            version: gw.version ?? null,
+            uptime: gw.uptime_secs != null ? gw.uptime_secs + since(g.gw) : null,
+            age: ages.length ? Math.min(...ages) : since(g.ddup),
+            addr: ddup && ddup.ip ? `${ddup.ip}${ddup.port ? `:${ddup.port}` : ''}` : null,
+            stations: Array.isArray(gw.stations) ? gw.stations.length : null,
+            links: (Array.isArray(gw.links) ? gw.links : []).map((l) => {
+                const c = l.config || {}, rx = l.rx || {}, tx = l.tx || {};
+                return {
+                    name: l.name || l.type || 'link',
+                    channel: c.channel ?? null,
+                    mhz: c.frequency_khz != null ? c.frequency_khz / 1000 : null,
+                    dbm: c.transmit_power_dbm ?? null,
+                    bps: c.packet_rate_bps ?? null,
+                    rssi: (l.rssi || {}).packet_dbm ?? null,
+                    rx: rx.packets ?? null,
+                    rxBad: (rx.errors || 0) + (rx.drops || 0),
+                    tx: tx.packets ?? null,
+                    txBad: tx.errors || 0,
+                };
+            }),
+        });
+        const netAge = since(g.net) || 0;
+        for (const r of (Array.isArray(net.network) ? net.network : []).filter((n) => n && n.kind === 'relay')) {
+            const id = hexId(r.station);
+            rows.push({
+                role: 'relay',
+                id,
+                name: name(id),
+                gateway: g.id,
+                age: r.age_secs != null ? r.age_secs + netAge : null,
+                packets: r.packets ?? null,
+                rssi: r.rssi ?? null,
+                cost: r.cost ?? null,
+                accepting: r.accepting ?? null,
+                beacons: r.beacons ?? null,
+                forwards: r.forwards ?? null,
+                hears: Array.isArray(r.hears) ? r.hears.length : null,
+                software: versions.has(id) ? versions.get(id).data.software || null : null,
+            });
+        }
+    }
+    return rows;
+}
+
 // A topic's kind from its shape. Level 1 after the prefix is always a CATEGORY, and station
 // telemetry lives in exactly one of them: <prefix>/variant/<name>/<station-hex> is 'station'.
 // Anything else is named by its second-to-last segment, so iotdata/manage/from/<station> is
@@ -508,8 +640,21 @@ function handleMessage(topic, text) {
     } catch {
         return; // not JSON: the gateway's own status publications, retained junk
     }
-    if (!body || typeof body !== 'object' || body.station === undefined) return;
-    if (!ACCEPT.has(topicKind(topic))) return;
+    if (!body || typeof body !== 'object') return;
+    // A node's report about itself: <prefix>/manage/from/<id>. Only the version TLV is used for now.
+    const tp = topic.split('/');
+    if (tp.length >= 3 && tp[tp.length - 3] === 'manage' && tp[tp.length - 2] === 'from') {
+        if (body.tlv === 'version' && body.data && typeof body.data === 'object') {
+            versions.set(hexId(tp[tp.length - 1]), { data: body.data, t: Date.now() });
+            send('stats', snapshot());
+            send('gateways', gatewayView());
+        }
+        return;
+    }
+    const kind = topicKind(topic);
+    if (GATEWAY_KINDS[kind]) return handleGatewayMessage(kind, topic, body);
+    if (body.station === undefined) return;
+    if (!ACCEPT.has(kind)) return;
 
     // Topic is <prefix>/variant/<variant-name>/<station-hex>; the variant NAME lives only here
     // (the payload carries the numeric id), so it is worth taking rather than maintaining a table.
@@ -634,6 +779,8 @@ function snapshotSave() {
         stats: [...stats.values()],
         history,
         gnss,
+        gateways: [...gateways.values()],
+        versions: [...versions.entries()],
     };
     // Written to a sibling and renamed rather than in place: rename is atomic, so a restart
     // landing mid-write finds either the previous snapshot or the new one, never a half-written
@@ -663,11 +810,16 @@ function snapshotLoad() {
     stats.clear();
     // Defaults first so a snapshot written by an older version, missing a field added since,
     // restores with a sane value rather than an undefined that breaks the stats arithmetic.
-    for (const st of data.stats) if (st && st.id) stats.set(st.id, { count: 0, lost: 0, times: [], rssis: [], ...st });
+    for (const st of data.stats) if (st && st.id) stats.set(st.id, { count: 0, lost: 0, dups: 0, recent: [], times: [], rssis: [], ...st });
     history.length = 0;
     for (const rec of Array.isArray(data.history) ? data.history.slice(-KEEP) : []) history.push(rec);
     gnss.length = 0;
     for (const g of Array.isArray(data.gnss) ? data.gnss.slice(-TRACKER_KEEP) : []) gnss.push(g);
+    // Absent from a snapshot written before the section existed, which simply restores none.
+    gateways.clear();
+    for (const g of Array.isArray(data.gateways) ? data.gateways : []) if (g && g.id) gateways.set(g.id, g);
+    versions.clear();
+    for (const e of Array.isArray(data.versions) ? data.versions : []) if (Array.isArray(e) && e[0] && e[1]) versions.set(e[0], e[1]);
     counter = data.counter || history.length;
     return {
         savedAt: data.savedAt,
@@ -839,7 +991,10 @@ function subscribe() {
 
 // Re-push stats on a timer as well as per packet, so "age" counts up on screen while a station
 // is silent. Without this a station that stopped transmitting would sit there looking healthy.
-setInterval(() => send('stats', snapshot()), 5000);
+setInterval(() => {
+    send('stats', snapshot());
+    send('gateways', gatewayView());
+}, 5000);
 
 // The gateway's own position in the title bar, linked the same way the station distances
 // are. Empty when no reference is configured, which also disables distances.
@@ -969,6 +1124,13 @@ ${FAVICON}
             text-underline-offset:2px; }
   #gnss .rx { color:var(--dim); font-size:11px; margin-left:3px; }
   #gnss .good { color:var(--good); } #gnss .ok { color:var(--ok); } #gnss .weak { color:var(--weak); }
+  td.fw { font-size:11.5px; color:var(--dim); white-space:nowrap; max-width:22ch; overflow:hidden; text-overflow:ellipsis; }
+  #gw { border-bottom:1px solid var(--line); padding:2px 0 4px; }
+  #gw .lbl { padding:5px 8px 1px; font-size:10.5px; color:var(--dim);
+             text-transform:uppercase; letter-spacing:.04em; }
+  #gw td.role { font-family:inherit; text-align:left; color:var(--dim); }
+  #gw tr.relay td.who { padding-left:20px; }
+  #gw .good { color:var(--good); } #gw .ok { color:var(--ok); } #gw .weak { color:var(--weak); }
   .empty { color:var(--dim); padding:24px 12px; text-align:center; }
   .note { color:var(--dim); font-size:10.5px; padding:3px 8px 6px; }
 </style>
@@ -977,6 +1139,7 @@ ${FAVICON}
 <header>
   <div class="bar"><b>iotdata gateway</b>${MAP_LINK}<button id="gbtn" class="gbtn" hidden aria-expanded="false"></button><span id="stat"><span id="dot"></span><span id="msg">connecting</span></span></div>
   <div id="gnss" hidden><div class="lbl" id="glbl">tracker</div><table><tbody></tbody></table></div>
+  <div id="gw" hidden><div class="lbl">gateways and relays</div><table><tbody></tbody></table></div>
   <table id="sum"><tbody></tbody></table>
   <div class="note">counts are cumulative; interval and avg rssi over the last ${WINDOW} packets</div>
 </header>
@@ -1087,9 +1250,13 @@ function row(r) {
 
   // A skipped sequence number means packets that were sent were not heard — the measurement
   // that actually matters when siting, and one a signal strength reading alone will not show.
-  var prev = lastSeq[r.station];
-  if (prev !== undefined && r.sequence > prev + 1) top.appendChild(el('span', 'gap', '-' + (r.sequence - prev - 1)));
-  if (r.sequence !== undefined) lastSeq[r.station] = r.sequence;
+  // A duplicate is badged and leaves the gap tracking alone, as it does the table's counts.
+  if (r.dup) top.appendChild(el('span', 'gap', 'dup'));
+  else {
+    var prev = lastSeq[r.station];
+    if (prev !== undefined && r.sequence > prev + 1) top.appendChild(el('span', 'gap', '-' + (r.sequence - prev - 1)));
+    if (r.sequence !== undefined) lastSeq[r.station] = r.sequence;
+  }
 
   if (r.rssi !== undefined && r.rssi !== null) top.appendChild(el('span', 'rssi ' + rssiClass(r.rssi), r.rssi + ' dBm'));
   e.appendChild(top);
@@ -1124,7 +1291,16 @@ function row(r) {
   return e;
 }
 
-var HEAD = ['station', 'pkts', 'every', 'lost', 'avg rssi', 'last'];
+var HEAD = ['station', 'pkts', 'every', 'lost', 'dups', 'avg rssi', 'batt', 'software', 'last'];
+// The version report as one short cell: the software string, which is what changes between
+// builds and says what the node is running ("relay/0.9.10/202610130940"). Firmware is the
+// platform underneath (idf/6.1) and only stands in when a node sends no software field. The
+// whole block -- hardware, serial, capabilities -- is in the tooltip.
+function versionText(v) {
+  if (!v) return '\\u2013';
+  return v.software || v.firmware || v.FW || v.fw || '\\u2713';
+}
+
 function renderStats(rows) {
   var tb = document.querySelector('#sum tbody');
   tb.innerHTML = '';
@@ -1160,7 +1336,20 @@ function renderStats(rows) {
     tr.appendChild(el('td', null, String(s.count)));
     tr.appendChild(el('td', null, s.interval == null ? '\\u2013' : every(s.interval)));
     tr.appendChild(el('td', null, s.lost + (s.lost ? ' (' + s.lossPct.toFixed(1) + '%)' : '')));
+    // ddup should keep this at zero; anything else is the same packet delivered twice.
+    var dups = el('td', null, String(s.dups || 0));
+    if (s.dups) dups.className = 'stale';
+    tr.appendChild(dups);
     tr.appendChild(el('td', null, s.rssiAvg == null ? '\\u2013' : Math.round(s.rssiAvg) + ' dBm'));
+    // Latest battery reading; red once it is older than the configured staleness, since a level
+    // that has stopped being reported is itself the warning.
+    var bt = el('td', null, s.battery == null ? '\\u2013' : s.battery + '%' + (s.charging ? ' \\u26a1' : ''));
+    if (s.battery != null) bt.title = 'reported ' + every(s.batteryAge) + ' ago';
+    if (s.batteryStale) bt.className = 'stale';
+    tr.appendChild(bt);
+    var fw = el('td', 'fw', versionText(s.version));
+    if (s.version) fw.title = JSON.stringify(s.version) + ' -- reported ' + every(s.versionAge) + ' ago';
+    tr.appendChild(fw);
     // Age is the honest answer to "is it still there" — a gap only shows when a LATER packet
     // arrives to reveal it, so a station that goes silent shows up here and nowhere else.
     var age = el('td', null, s.age == null ? '\\u2013' : s.age < 90 ? s.age + 's' : Math.round(s.age / 60) + 'm');
@@ -1237,6 +1426,84 @@ function renderGnss(view) {
   }
 }
 
+// Gateways and relays, from the gateways' own stats rather than from station packets. Hidden
+// until a gateway has reported, so a site with none loses no screen. Relays sit under the gateway
+// that reported them, indented; one the gateway says is not accepting is called out, since that
+// is the relay that will quietly stop carrying traffic.
+var gwp = document.getElementById('gw');
+var WHEAD = ['node', 'role', 'rssi', 'rx', 'tx/fwd', 'up', 'last'];
+
+function dur(t) {
+  if (t == null) return '\u2013';
+  t = Math.round(t);
+  return t < 90 ? t + 's' : t < 5400 ? Math.round(t / 60) + 'm' : t < 172800 ? Math.round(t / 3600) + 'h' : Math.round(t / 86400) + 'd';
+}
+
+function linkText(l) {
+  var p = [];
+  if (l.channel != null) p.push('ch' + l.channel);
+  if (l.mhz != null) p.push(l.mhz.toFixed(3) + ' MHz');
+  if (l.dbm != null) p.push(l.dbm + ' dBm');
+  if (l.bps != null) p.push(l.bps + ' bps');
+  return p.length ? p.join(' ') : l.name;
+}
+
+function renderGateways(rows) {
+  gwp.hidden = !rows.length;
+  var tb = gwp.querySelector('tbody');
+  tb.innerHTML = '';
+  var hr = document.createElement('tr');
+  for (var i = 0; i < WHEAD.length; i++) hr.appendChild(el('th', null, WHEAD[i]));
+  tb.appendChild(hr);
+
+  for (var n = 0; n < rows.length; n++) {
+    var r = rows[n], tr = document.createElement('tr'), sub = [], rssi, rx, tx;
+    tr.className = r.role;
+    if (r.name) sub.push(r.name);
+    if (r.role === 'gateway') {
+      var links = r.links || [], rxn = 0, txn = 0, bad = 0;
+      if (r.version) sub.push('v' + r.version);
+      for (var k = 0; k < links.length; k++) {
+        sub.push(linkText(links[k]));
+        rxn += links[k].rx || 0; txn += links[k].tx || 0; bad += links[k].rxBad + links[k].txBad;
+      }
+      if (r.addr) sub.push(r.addr);
+      rssi = links.length ? links[0].rssi : null;
+      rx = el('td', null, links.length ? String(rxn) : '\u2013');
+      if (bad) { rx.appendChild(document.createTextNode(' \u00b7 ' + bad + ' err')); rx.className = 'weak'; }
+      tx = el('td', null, links.length ? String(txn) : '\u2013');
+    } else {
+      if (r.cost != null) sub.push('cost ' + r.cost);
+      if (r.hears != null) sub.push('hears ' + r.hears);
+      if (r.beacons != null) sub.push(r.beacons + ' beacons');
+      if (r.software) sub.push(r.software);
+      rssi = r.rssi;
+      rx = el('td', null, r.packets == null ? '\u2013' : String(r.packets));
+      tx = el('td', null, r.forwards == null ? '\u2013' : String(r.forwards));
+    }
+
+    var who = el('td', 'who');
+    who.appendChild(el('b', null, r.id));
+    if (sub.length) who.appendChild(el('span', null, sub.join(' \u00b7 ')));
+    tr.appendChild(who);
+
+    var role = el('td', 'role', r.role);
+    if (r.role === 'relay' && r.accepting === false) { role.textContent = 'relay \u00b7 not accepting'; role.className = 'role weak'; }
+    tr.appendChild(role);
+
+    var sig = el('td', null, rssi == null ? '\u2013' : rssi + ' dBm');
+    if (rssi != null) sig.className = rssiClass(rssi);
+    tr.appendChild(sig);
+    tr.appendChild(rx);
+    tr.appendChild(tx);
+    tr.appendChild(el('td', null, r.role === 'gateway' ? dur(r.uptime) : '\u2013'));
+    var age = el('td', null, dur(r.age));
+    if (r.age != null && r.age > 300) age.className = 'stale';
+    tr.appendChild(age);
+    tb.appendChild(tr);
+  }
+}
+
 var list = document.getElementById('list');
 var dot = document.getElementById('dot'), msg = document.getElementById('msg');
 var count = 0;
@@ -1255,6 +1522,7 @@ es.onerror = function () { dot.className = ''; msg.textContent = 'reconnecting';
 es.addEventListener('packet', function (ev) { add(JSON.parse(ev.data)); });
 es.addEventListener('stats', function (ev) { renderStats(JSON.parse(ev.data)); });
 es.addEventListener('gnss', function (ev) { renderGnss(JSON.parse(ev.data)); });
+es.addEventListener('gateways', function (ev) { renderGateways(JSON.parse(ev.data)); });
 </script>
 </body>
 </html>`;
@@ -1543,6 +1811,7 @@ const server = http.createServer((req, res) => {
         if (q.get('view') !== 'map') for (const rec of history) send('packet', rec, res);
         send('stats', snapshot(), res);
         send('gnss', gnssView(), res);
+        send('gateways', gatewayView(), res);
         clients.add(res);
         // Phones aggressively idle-close background connections; a periodic comment keeps the
         // stream from being reaped during the quiet gaps between packets.
