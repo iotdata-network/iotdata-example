@@ -573,6 +573,7 @@ function gatewayView() {
             uptime: gw.uptime_secs != null ? gw.uptime_secs + since(g.gw) : null,
             age: ages.length ? Math.min(...ages) : since(g.ddup),
             addr: ddup && ddup.ip ? `${ddup.ip}${ddup.port ? `:${ddup.port}` : ''}` : null,
+            software: versions.has(g.id) ? versions.get(g.id).data.software || null : null,
             stations: Array.isArray(gw.stations) ? gw.stations.length : null,
             links: (Array.isArray(gw.links) ? gw.links : []).map((l) => {
                 const c = l.config || {}, rx = l.rx || {}, tx = l.tx || {};
@@ -607,6 +608,7 @@ function gatewayView() {
                 forwards: r.forwards ?? null,
                 hears: Array.isArray(r.hears) ? r.hears.length : null,
                 software: versions.has(id) ? versions.get(id).data.software || null : null,
+                versionAge: versions.has(id) ? Math.round((now - versions.get(id).t) / 1000) : null,
             });
         }
     }
@@ -1078,7 +1080,8 @@ ${FAVICON}
        font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
   td.who { font-family:inherit; }
   td.who b { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:650; }
-  td.who span { color:var(--dim); display:block; font-size:11.5px; }
+  td.who span { color:var(--dim); }
+  td.who .nm { margin-left:6px; }
   td.who a { color:inherit; text-decoration:underline; text-decoration-thickness:1px;
              text-underline-offset:2px; }
   .stale { color:var(--weak); font-weight:600; }
@@ -1124,7 +1127,10 @@ ${FAVICON}
             text-underline-offset:2px; }
   #gnss .rx { color:var(--dim); font-size:11px; margin-left:3px; }
   #gnss .good { color:var(--good); } #gnss .ok { color:var(--ok); } #gnss .weak { color:var(--weak); }
-  td.fw { font-size:11.5px; color:var(--dim); white-space:nowrap; max-width:22ch; overflow:hidden; text-overflow:ellipsis; }
+  td.fw { font-size:11.5px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* software | up | last close both tables, and get the same widths in each so the two line up */
+  #gw th:nth-last-child(3), #gw td:nth-last-child(3), #sum th:nth-last-child(3), #sum td:nth-last-child(3) { width:210px; min-width:210px; max-width:210px; }
+  #gw th:nth-last-child(-n+2), #gw td:nth-last-child(-n+2), #sum th:nth-last-child(-n+2), #sum td:nth-last-child(-n+2) { width:52px; min-width:52px; max-width:52px; }
   #gw { border-bottom:1px solid var(--line); padding:2px 0 4px; }
   #gw .lbl { padding:5px 8px 1px; font-size:10.5px; color:var(--dim);
              text-transform:uppercase; letter-spacing:.04em; }
@@ -1139,7 +1145,7 @@ ${FAVICON}
 <header>
   <div class="bar"><b>iotdata gateway</b>${MAP_LINK}<button id="gbtn" class="gbtn" hidden aria-expanded="false"></button><span id="stat"><span id="dot"></span><span id="msg">connecting</span></span></div>
   <div id="gnss" hidden><div class="lbl" id="glbl">tracker</div><table><tbody></tbody></table></div>
-  <div id="gw" hidden><div class="lbl">gateways and relays</div><table><tbody></tbody></table></div>
+  <div id="gw" hidden><table><tbody></tbody></table></div>
   <table id="sum"><tbody></tbody></table>
   <div class="note">counts are cumulative; interval and avg rssi over the last ${WINDOW} packets</div>
 </header>
@@ -1291,7 +1297,7 @@ function row(r) {
   return e;
 }
 
-var HEAD = ['station', 'pkts', 'every', 'lost', 'dups', 'avg rssi', 'batt', 'software', 'last'];
+var HEAD = ['station', 'pkts', 'every', 'lost', 'dups', 'avg rssi', 'batt', 'software', 'up', 'last'];
 // The version report as one short cell: the software string, which is what changes between
 // builds and says what the node is running ("relay/0.9.10/202610130940"). Firmware is the
 // platform underneath (idf/6.1) and only stands in when a node sends no software field. The
@@ -1299,6 +1305,14 @@ var HEAD = ['station', 'pkts', 'every', 'lost', 'dups', 'avg rssi', 'batt', 'sof
 function versionText(v) {
   if (!v) return '\\u2013';
   return v.software || v.firmware || v.FW || v.fw || '\\u2713';
+}
+
+// id, then name, then whatever else, on ONE line: the id stands out, the text after it is all dim.
+function whoCell(id, name) {
+  var who = el('td', 'who');
+  who.appendChild(el('b', null, id));
+  if (name) who.appendChild(el('span', 'nm', name));
+  return who;
 }
 
 function renderStats(rows) {
@@ -1310,13 +1324,10 @@ function renderStats(rows) {
 
   for (var n = 0; n < rows.length; n++) {
     var s = rows[n], tr = document.createElement('tr');
-    var who = el('td', 'who');
-    who.appendChild(el('b', null, s.id));
-    if (s.name || s.distance != null) {
-      var sub = el('span');
-      if (s.name) sub.appendChild(document.createTextNode(s.name));
-      if (s.distance != null) {
-        if (s.name) sub.appendChild(document.createTextNode(' \\u00b7 '));
+    var who = whoCell(s.id, s.name);
+    if (s.distance != null) {
+      var sub = el('span', null, ' \\u00b7 ');
+      {
         // The distance doubles as the way to go look at the spot. ?api=1&query= is the
         // documented form that hands off to the Maps app on a phone rather than the web
         // page; rel=noopener because target=_blank otherwise gives the opened page a
@@ -1350,6 +1361,9 @@ function renderStats(rows) {
     var fw = el('td', 'fw', versionText(s.version));
     if (s.version) fw.title = JSON.stringify(s.version) + ' -- reported ' + every(s.versionAge) + ' ago';
     tr.appendChild(fw);
+    // Time since its version report, which a sensor sends only on a cold boot: so, time since boot.
+    // Not the status TLV's uptime, which on a sleeping node is just the seconds awake this cycle.
+    tr.appendChild(el('td', null, dur(s.versionAge)));
     // Age is the honest answer to "is it still there" — a gap only shows when a LATER packet
     // arrives to reveal it, so a station that goes silent shows up here and nowhere else.
     var age = el('td', null, s.age == null ? '\\u2013' : s.age < 90 ? s.age + 's' : Math.round(s.age / 60) + 'm');
@@ -1431,7 +1445,7 @@ function renderGnss(view) {
 // that reported them, indented; one the gateway says is not accepting is called out, since that
 // is the relay that will quietly stop carrying traffic.
 var gwp = document.getElementById('gw');
-var WHEAD = ['node', 'role', 'rssi', 'rx', 'tx/fwd', 'up', 'last'];
+var WHEAD = ['gateways and relays', 'role', 'rssi', 'rx', 'tx/fwd', 'software', 'up', 'last'];
 
 function dur(t) {
   if (t == null) return '\u2013';
@@ -1459,10 +1473,8 @@ function renderGateways(rows) {
   for (var n = 0; n < rows.length; n++) {
     var r = rows[n], tr = document.createElement('tr'), sub = [], rssi, rx, tx;
     tr.className = r.role;
-    if (r.name) sub.push(r.name);
     if (r.role === 'gateway') {
       var links = r.links || [], rxn = 0, txn = 0, bad = 0;
-      if (r.version) sub.push('v' + r.version);
       for (var k = 0; k < links.length; k++) {
         sub.push(linkText(links[k]));
         rxn += links[k].rx || 0; txn += links[k].tx || 0; bad += links[k].rxBad + links[k].txBad;
@@ -1476,15 +1488,13 @@ function renderGateways(rows) {
       if (r.cost != null) sub.push('cost ' + r.cost);
       if (r.hears != null) sub.push('hears ' + r.hears);
       if (r.beacons != null) sub.push(r.beacons + ' beacons');
-      if (r.software) sub.push(r.software);
       rssi = r.rssi;
       rx = el('td', null, r.packets == null ? '\u2013' : String(r.packets));
       tx = el('td', null, r.forwards == null ? '\u2013' : String(r.forwards));
     }
 
-    var who = el('td', 'who');
-    who.appendChild(el('b', null, r.id));
-    if (sub.length) who.appendChild(el('span', null, sub.join(' \u00b7 ')));
+    var who = whoCell(r.id, r.name);
+    if (sub.length) who.appendChild(el('span', null, ' \u00b7 ' + sub.join(' \u00b7 ')));
     tr.appendChild(who);
 
     var role = el('td', 'role', r.role);
@@ -1496,7 +1506,9 @@ function renderGateways(rows) {
     tr.appendChild(sig);
     tr.appendChild(rx);
     tr.appendChild(tx);
-    tr.appendChild(el('td', null, r.role === 'gateway' ? dur(r.uptime) : '\u2013'));
+    tr.appendChild(el('td', 'fw', r.software || (r.version ? 'v' + r.version : '\u2013')));
+    // a gateway states its uptime; for a relay, time since its version report, which it sends on boot
+    tr.appendChild(el('td', null, r.role === 'gateway' ? dur(r.uptime) : dur(r.versionAge)));
     var age = el('td', null, dur(r.age));
     if (r.age != null && r.age > 300) age.className = 'stale';
     tr.appendChild(age);
