@@ -268,7 +268,7 @@ static void sim_sequence_resync(int idx);
 
 static void sim_node_status(const uint16_t station, iotdata_node_status_t *const out) {
     out->uptime_s = (uint32_t)(hw_time_ms() / 1000);
-    out->reason = IOTDATA_NODE_REASON_UNKNOWN;
+    out->reason = iotdata_node_reason_reset();
     out->has_heap = true;
     out->heap_free_bytes = (uint32_t)esp_get_free_heap_size();
     out->heap_min_bytes = (uint32_t)esp_get_minimum_free_heap_size();

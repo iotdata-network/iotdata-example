@@ -358,6 +358,10 @@ const gateways = new Map();
 // (manage/from/<id>, tlv "version") on boot and then periodically -- not inside their data
 // packets -- and relays send them too, so this is shared by the station table and the relay rows.
 const versions = new Map();
+// Survey instruments, from the reports they send: the gateway publishes each observation in one
+// with the instrument as `observer`. Keyed by that observer's hex id: when last heard, how many
+// observations, and where it was standing.
+const surveys = new Map();
 let counter = 0;
 
 function send(event, payload, to) {
@@ -612,6 +616,35 @@ function gatewayView() {
             });
         }
     }
+    // Survey instruments: a node announcing itself as one ("survey/..." software), or seen as the
+    // observer in survey reports -- unless it is already a gateway or relay above, which is what an
+    // observer in a gateway-directed survey is.
+    const listed = new Set(rows.map((r) => r.id));
+    const ids = new Set(surveys.keys());
+    for (const [id, v] of versions) if (String(v.data.software || '').startsWith('survey/')) ids.add(id);
+    for (const id of [...ids].sort()) {
+        if (listed.has(id)) continue;
+        const sv = surveys.get(id) || null, ver = versions.get(id) || null;
+        const ages = [since(sv), since(ver)].filter((a) => a != null);
+        rows.push({
+            role: 'survey',
+            id,
+            name: name(id),
+            age: ages.length ? Math.min(...ages) : null,
+            software: ver ? ver.data.software || null : null,
+            versionAge: since(ver),
+            observations: sv ? sv.n : null,
+            lat: sv && sv.lat != null ? sv.lat : null,
+            lon: sv && sv.lon != null ? sv.lon : null,
+            alt: sv && sv.alt != null ? sv.alt : null,
+            // what the latest report heard, strongest first
+            heard: sv
+                ? Object.entries(sv.heard || {})
+                      .map(([sid, h]) => ({ id: sid, name: name(sid), rssi: h.rssi }))
+                      .sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999))
+                : [],
+        });
+    }
     return rows;
 }
 
@@ -649,6 +682,30 @@ function handleMessage(topic, text) {
         if (body.tlv === 'version' && body.data && typeof body.data === 'object') {
             versions.set(hexId(tp[tp.length - 1]), { data: body.data, t: Date.now() });
             send('stats', snapshot());
+            send('gateways', gatewayView());
+        } else if (body.type === 'survey' && body.cmd === 'survey' && body.observer != null && body.station != null) {
+            const id = hexId(body.observer);
+            const sv = surveys.get(id) || { n: 0, recent: [], heard: {} };
+            // Every gateway that hears the instrument's report publishes it, so each observation can
+            // arrive once per path. Its (station, seq) identifies it: count it once.
+            const key = `${body.station}:${body.seq}`;
+            if (sv.recent.includes(key)) return;
+            sv.recent.push(key);
+            if (sv.recent.length > 256) sv.recent.shift();
+            // One report is a run of observations sharing the instrument's position and timestamp;
+            // a new one replaces what the last one heard, so the map shows the latest stand.
+            const report = `${body.time}:${body.obs_lat}:${body.obs_lon}`;
+            if (report !== sv.report) {
+                sv.report = report;
+                sv.heard = {};
+                sv.lat = body.obs_lat ?? null;
+                sv.lon = body.obs_lon ?? null;
+                sv.alt = body.obs_alt ?? null;
+            }
+            sv.heard[hexId(body.station)] = { rssi: body.rssi ?? null, seq: body.seq };
+            sv.t = Date.now();
+            sv.n++;
+            surveys.set(id, sv);
             send('gateways', gatewayView());
         }
         return;
@@ -783,6 +840,7 @@ function snapshotSave() {
         gnss,
         gateways: [...gateways.values()],
         versions: [...versions.entries()],
+        surveys: [...surveys.entries()],
     };
     // Written to a sibling and renamed rather than in place: rename is atomic, so a restart
     // landing mid-write finds either the previous snapshot or the new one, never a half-written
@@ -822,6 +880,8 @@ function snapshotLoad() {
     for (const g of Array.isArray(data.gateways) ? data.gateways : []) if (g && g.id) gateways.set(g.id, g);
     versions.clear();
     for (const e of Array.isArray(data.versions) ? data.versions : []) if (Array.isArray(e) && e[0] && e[1]) versions.set(e[0], e[1]);
+    surveys.clear();
+    for (const e of Array.isArray(data.surveys) ? data.surveys : []) if (Array.isArray(e) && e[0] && e[1]) surveys.set(e[0], { recent: [], heard: {}, ...e[1] });
     counter = data.counter || history.length;
     return {
         savedAt: data.savedAt,
@@ -1445,7 +1505,7 @@ function renderGnss(view) {
 // that reported them, indented; one the gateway says is not accepting is called out, since that
 // is the relay that will quietly stop carrying traffic.
 var gwp = document.getElementById('gw');
-var WHEAD = ['gateways and relays', 'role', 'rssi', 'rx', 'tx/fwd', 'software', 'up', 'last'];
+var WHEAD = ['network', 'role', 'rssi', 'rx', 'tx/fwd', 'software', 'up', 'last'];
 
 function dur(t) {
   if (t == null) return '\u2013';
@@ -1484,6 +1544,11 @@ function renderGateways(rows) {
       rx = el('td', null, links.length ? String(rxn) : '\u2013');
       if (bad) { rx.appendChild(document.createTextNode(' \u00b7 ' + bad + ' err')); rx.className = 'weak'; }
       tx = el('td', null, links.length ? String(txn) : '\u2013');
+    } else if (r.role === 'survey') {
+      if (r.lat != null) sub.push(r.lat.toFixed(5) + ', ' + r.lon.toFixed(5));
+      rssi = null;
+      rx = el('td', null, r.observations == null ? '–' : String(r.observations));
+      tx = el('td', null, '–');
     } else {
       if (r.cost != null) sub.push('cost ' + r.cost);
       if (r.hears != null) sub.push('hears ' + r.hears);
@@ -1591,8 +1656,8 @@ var MAPTYPE = '${MAP_TYPE}';
 var ZOOM = ${MAP_ZOOM};
 
 var map = null, live = false, info = null, pinned = false, fitted = false;
-var gwm = null, sm = {}, tk = [], trail = null;
-var data = { stats: [], gnss: { n: 0, rows: [] } };
+var gwm = null, sm = {}, tk = [], svm = [];
+var data = { stats: [], gnss: { n: 0, rows: [] }, net: [] };
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1673,6 +1738,28 @@ function fixInfo(g) {
   return h + '</div>';
 }
 
+function surveyInfo(r) {
+  var h = '<div class="iw"><b>' + esc(r.id) + '</b>' + (r.name ? ' &middot; ' + esc(r.name) : '') + ' &middot; survey';
+  h += '<br>' + r.lat.toFixed(6) + ', ' + r.lon.toFixed(6) + (r.alt != null ? ' &middot; ' + r.alt + ' m' : '');
+  h += '<br>last report ' + ago(r.age) + ' ago';
+  var heard = r.heard || [];
+  if (heard.length) {
+    h += '<br>heard ' + heard.length + ':';
+    for (var i = 0; i < heard.length; i++)
+      h += '<br>&nbsp;&nbsp;<b>' + esc(heard[i].id) + '</b> ' + (heard[i].rssi != null ? heard[i].rssi + ' dBm' : '') +
+           (heard[i].name ? ' &middot; ' + esc(heard[i].name) : '');
+  }
+  return h + '</div>';
+}
+
+// The latest of each, keyed by whatever names the sender: a fix per tracker device, a stand per
+// survey instrument. The trail of every fix is gone -- what matters is where each one is now.
+function latestPer(rows, key) {
+  var out = {}, i;
+  for (i = 0; i < rows.length; i++) if (rows[i].lat != null && rows[i].lon != null) out[rows[i][key]] = rows[i];
+  return out;
+}
+
 function draw() {
   if (!live) return;
   var site = [], i, s;
@@ -1707,30 +1794,29 @@ function draw() {
   }
   for (var id in sm) if (sm.hasOwnProperty(id) && !seen[id]) { sm[id].setMap(null); delete sm[id]; }
 
-  // The track is redrawn wholesale: it is capped at tracker-show entries, so there is nothing
-  // to gain from reconciling it the way the stations are.
+  // Trackers and survey instruments, one marker each at its latest position. Redrawn wholesale:
+  // there are only ever a handful.
   for (i = 0; i < tk.length; i++) tk[i].setMap(null);
-  tk = [];
-  var path = [], rows = data.gnss.rows || [];
-  for (i = 0; i < rows.length; i++) {
-    var g = rows[i];
-    if (g.lat == null || g.lon == null) continue;
-    var q = { lat: g.lat, lng: g.lon }, newest = i === rows.length - 1;
+  for (i = 0; i < svm.length; i++) svm[i].setMap(null);
+  tk = []; svm = [];
+  var path = [], fixes = latestPer(data.gnss.rows || [], 'device'), dev;
+  for (dev in fixes) if (fixes.hasOwnProperty(dev)) {
+    var g = fixes[dev], q = { lat: g.lat, lng: g.lon };
     path.push(q);
-    var t = new google.maps.Marker({ position: q, map: map, zIndex: newest ? 35 : 10,
-                                     title: g.device,
-                                     icon: { path: google.maps.SymbolPath.CIRCLE,
-                                             scale: newest ? 6 : 4, fillColor: '#0d9488',
-                                             fillOpacity: newest ? 1 : 0.7, strokeColor: '#fff',
-                                             strokeWeight: newest ? 2 : 1 } });
+    var t = new google.maps.Marker({ position: q, map: map, zIndex: 35, title: g.device,
+                                     icon: sym('#0d9488', 6, 2), label: tag(g.device || 'tracker') });
     bind(t, (function (gg) { return function () { return fixInfo(gg); }; })(g));
     tk.push(t);
   }
-  if (path.length > 1) {
-    if (trail) trail.setPath(path);
-    else trail = new google.maps.Polyline({ path: path, map: map, zIndex: 5, strokeColor: '#0d9488',
-                                            strokeOpacity: 0.85, strokeWeight: 2 });
-  } else if (trail) { trail.setMap(null); trail = null; }
+  var stands = latestPer((data.net || []).filter(function (r) { return r.role === 'survey'; }), 'id'), sid;
+  for (sid in stands) if (stands.hasOwnProperty(sid)) {
+    var r = stands[sid], sp = { lat: r.lat, lng: r.lon };
+    path.push(sp);
+    var v = new google.maps.Marker({ position: sp, map: map, zIndex: 36, title: r.id,
+                                     icon: sym('#7c3aed', 7, 2), label: tag(r.name || r.id) });
+    bind(v, (function (rr) { return function () { return surveyInfo(rr); }; })(r));
+    svm.push(v);
+  }
 
   // Fitted to the gateway and the stations, not to the track. The tracker can legitimately be a
   // long way from the site — it is in the lab while the gateway is on site — and letting it into
@@ -1758,12 +1844,19 @@ function panel() {
     html += '<div class="k"><i style="background:' + colour(s.age) + '"></i><b>' + esc(s.id) +
             '</b> <span>' + (s.name ? esc(s.name) + ' &middot; ' : '') + ago(s.age) + '</span></div>';
   }
+
+  var surveys = (data.net || []).filter(function (r) { return r.role === 'survey' && r.lat != null; });
+  for (i = 0; i < surveys.length; i++)
+    html += '<div class="k"><i style="background:#7c3aed"></i><b>' + esc(surveys[i].id) + '</b> <span>' +
+            (surveys[i].name ? esc(surveys[i].name) + ' &middot; ' : '') + 'survey &middot; ' + ago(surveys[i].age) + '</span></div>';
+  var trackers = Object.keys(latestPer(data.gnss.rows || [], 'device'));
+  for (i = 0; i < trackers.length; i++)
+    html += '<div class="k"><i style="background:#0d9488"></i><b>' + esc(trackers[i]) + '</b> <span>tracker &middot; latest fix</span></div>';
   document.getElementById('legend').innerHTML = html;
 
-  var shown = (data.gnss.rows || []).length, total = data.gnss.n || 0, txt;
-  txt = mapped + ' station' + (mapped === 1 ? '' : 's') + ' mapped';
-  if (total) txt += ', ' + (shown < total ? 'latest ' + shown + ' of ' + total : total) +
-                    ' tracker fix' + (total === 1 ? '' : 'es');
+  var txt = mapped + ' station' + (mapped === 1 ? '' : 's') + ' mapped';
+  if (trackers.length) txt += ', ' + trackers.length + ' tracker' + (trackers.length === 1 ? '' : 's');
+  if (surveys.length) txt += ', ' + surveys.length + ' survey instrument' + (surveys.length === 1 ? '' : 's');
   if (missing.length) txt += '. No position configured for ' + esc(missing.join(', ')) + '.';
   document.getElementById('note').textContent = txt;
 }
@@ -1791,6 +1884,7 @@ setTimeout(function () {
 var es = new EventSource('/events?view=map');
 es.addEventListener('stats', function (ev) { data.stats = JSON.parse(ev.data); panel(); draw(); });
 es.addEventListener('gnss', function (ev) { data.gnss = JSON.parse(ev.data); panel(); draw(); });
+es.addEventListener('gateways', function (ev) { data.net = JSON.parse(ev.data); panel(); draw(); });
 </script>
 <script async src="https://maps.googleapis.com/maps/api/js?key=${MAP_KEY}&loading=async&callback=start"></script>
 </body>
