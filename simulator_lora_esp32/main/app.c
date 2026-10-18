@@ -251,6 +251,9 @@ static iotdata_node_state_t s_state;
 static iotdata_node_settings_t s_settings[IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX];
 static iotdata_node_settings_t s_settings_default[IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX]; /* one restore-to image each */
 static iotdata_node_params_t s_confs[IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX];
+static uint16_t s_startup_owed[IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX]; /* bit N = system TLV N still to report */
+static uint8_t s_startup_tries[IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS_MAX];
+static void sim_sequence_resync(int idx);
 #define SIM_SETTINGS_TAG(station) (0x53530000UL | (uint32_t)(station)) /* "SS" + station */
 
 /*
@@ -340,6 +343,7 @@ static void receive_packets(__attribute__((unused)) iotsim_t *const sim) {
                 bool reboot = false;
                 if (iotdata_node_on_frame(&s_nodes[i], buf, (size_t)len, &reboot))
                     ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " acted on a downstream command", iotdata_node_station(&s_nodes[i]));
+                sim_sequence_resync(i); /* a reply to the command is a frame from the node */
                 if (reboot) {
                     ESP_LOGW(__tag_app, "node: station=%03" PRIX16 " REBOOT commanded -- restarting", iotdata_node_station(&s_nodes[i]));
                     iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_STOP, 0);
@@ -373,6 +377,34 @@ static void transmit_packet(const iotsim_packet_t *pkt) {
     }
 }
 
+// The engine numbers its own packets, so any frame the NODE sends between them -- a receive
+// advertisement, a startup report -- has to be handed back to it, or the next data packet reuses
+// that frame's sequence and a receiver drops it as a duplicate.
+static void sim_sequence_resync(int idx) {
+    (void)iotsim_sensor_sequence_set(&g_sim, idx, iotdata_node_sequence(&s_nodes[idx]));
+}
+
+// A virtual sensor's startup reports, after its first data packet: always on, so every boot is a
+// cold boot and they are owed from init. Cleared only once on the air; given up after three tries.
+static void sim_startup_reports(const int idx) {
+    if (s_startup_owed[idx] == 0u)
+        return;
+    for (uint8_t t = 0; t < IOTDATA_NODE_TLV_SYSTEM_COUNT && s_startup_owed[idx] != 0u; t++) {
+        if ((s_startup_owed[idx] & (uint16_t)(1u << t)) == 0u)
+            continue;
+        hw_delay_ms_yieldable(TRANSMIT_DELAY_MS);
+        if (iotdata_node_report(&s_nodes[idx], t)) {
+            s_startup_owed[idx] &= (uint16_t)~(1u << t);
+            ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " startup reported %s", iotdata_node_station(&s_nodes[idx]), iotdata_node_tlv_name(t));
+        }
+    }
+    sim_sequence_resync(idx);
+    if (s_startup_owed[idx] != 0u && ++s_startup_tries[idx] >= 3u) {
+        ESP_LOGW(__tag_app, "node: station=%03" PRIX16 " giving up on startup reports 0x%04" PRIX16, iotdata_node_station(&s_nodes[idx]), s_startup_owed[idx]);
+        s_startup_owed[idx] = 0u;
+    }
+}
+
 static void transmit_packets(iotsim_t *const sim) {
     iotsim_packet_t pkt;
     while (iotsim_poll(sim, hw_time_ms(), &pkt)) {
@@ -387,8 +419,12 @@ static void transmit_packets(iotsim_t *const sim) {
                 iotdata_node_window_begin(&s_nodes[idx], hw_time_ms());
                 ESP_LOGI(__tag_app, "node: station=%03" PRIX16 " receive window open for %us", iotdata_node_station(&s_nodes[idx]), (unsigned)IOTDATA_NODE_RECEIVE_WINDOW_S);
             }
+            sim_sequence_resync(idx); /* the advertisement used a sequence too */
             hw_delay_ms_yieldable(TRANSMIT_DELAY_MS);
         }
+        /* after the advertisement, which rewinds the node's sequence to the packet's */
+        if (idx >= 0 && idx < SIM_SENSORS)
+            sim_startup_reports(idx);
     }
 }
 
@@ -487,6 +523,12 @@ bool app_init(void) {
         iotsim_sensor_sequence_set(&g_sim, i, iotdata_node_sequence(&s_nodes[i]));
         if (iotdata_node_station_restore(&s_nodes[i], &s_settings[i]))
             ESP_LOGI(__tag_app, "  [%2d] station=%03" PRIX16 " restored from settings", i, iotdata_node_station(&s_nodes[i]));
+        /* after the load, so a persisted "not at startup" is honoured */
+        s_startup_owed[i] = 0u;
+        s_startup_tries[i] = 0u;
+        for (uint8_t t = 0; t < IOTDATA_NODE_TLV_SYSTEM_COUNT; t++)
+            if (iotdata_node_tlv_is_reportable(t) && iotdata_node_settings_at_startup(&s_settings[i], t))
+                s_startup_owed[i] |= (uint16_t)(1u << t);
     }
     ESP_LOGI(__tag_app, "state: %u block(s), %s", (unsigned)s_state.count, restored ? "restored" : "defaulted");
     if (s_conf_template.receive_always)
