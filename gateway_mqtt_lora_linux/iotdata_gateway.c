@@ -382,6 +382,8 @@ static bool gateway_config_changed(__attribute__((unused)) const iotdata_node_co
     state->mesh_state.enabled = iotdata_node_config_bool(MESH_ENABLE);
     state->mesh_state.debug = iotdata_node_config_bool(MESH_DEBUG);
     state->mesh_state.beacon_interval_s = iotdata_node_config_u16(MESH_BEACON_INTERVAL_S);
+    state->mesh_state.ack_direct = iotdata_node_config_bool(MESH_ACK_DIRECT);
+    state->mesh_state.ack_direct_slot = iotdata_node_config_u8(MESH_ACK_DIRECT_SLOT);
     state->ddup_state.hold_ms = iotdata_node_config_u32(DDUP_HOLD_MS);
     if (state->ddup_state.enabled && state->ddup_state.running)
         ddup_reconfigure(&state->ddup_state, iotdata_node_config_string(DDUP_PEERS), iotdata_node_config_u16(DDUP_DELAY_MS), iotdata_node_config_bool(DDUP_DEBUG), (unsigned)iotdata_node_config_u32(DDUP_DEBUG_INJECT_LATENCY_MS));
@@ -525,6 +527,7 @@ int main(int argc, char *argv[]) {
         goto end_mqtt;
     node_settings_attach(&state->node_state, &gateway_settings, &state->store_state.node);
     mesh_begin(&state->mesh_state, &state->inode, &s_pool, lora_packet_write, ddup_insert_handler, (void *)&state->process_state);
+    state->mesh_state.claimed_handler = ddup_claimed_handler; /* a held direct ACK stands down for a lower-id peer's claim */
     survey_begin(&state->survey_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->mesh_state, &s_pool);
     trace_begin(&state->trace_state, iotdata_node_config_string(MQTT_TOPIC_PREFIX), &state->inode, &state->mesh_state, &s_pool);
     if (!ddup_begin(&state->ddup_state, iotdata_node_station(&state->inode), &state->mesh_state.dedup_ring, &state->running))

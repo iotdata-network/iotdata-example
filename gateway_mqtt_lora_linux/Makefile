@@ -12,7 +12,7 @@ IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_
 
 PLATFORM = linux
 NAME     = gateway
-VERSION  = 0.9.9
+VERSION  = 0.9.11
 
 ##
 

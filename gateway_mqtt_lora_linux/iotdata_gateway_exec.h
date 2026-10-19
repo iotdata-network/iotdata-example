@@ -13,6 +13,10 @@ bool ddup_insert_handler(void *ctx, uint16_t station, uint16_t sequence) {
     return ddup_check_and_add(((process_state_t *)ctx)->state_ddup, station, sequence);
 }
 
+bool ddup_claimed_handler(void *ctx, uint16_t station, uint16_t sequence) {
+    return ddup_claimed(((process_state_t *)ctx)->state_ddup, station, sequence);
+}
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 /* defined below; the admit point above it is what every caller actually uses */
@@ -360,7 +364,9 @@ void process_packet(process_state_t *st, const uint32_t now_ms) {
         (void)buffer_reset(st->buffer_pool, st->buffer_rx);
         int packet_rssi_dbm = LORA_RSSI_NONE, packet_length;
         uint8_t *rxbuf = buffer_data(st->buffer_pool, st->buffer_rx);
-        if (lora_read(rxbuf, buffer_room(st->buffer_pool, st->buffer_rx), &packet_length, &packet_rssi_dbm, LORA_READ_TIMEOUT_MS) == ESP_OK && packet_length > 0) {
+        /* no longer than the next held direct ACK can wait: see mesh_ack_direct */
+        const int read_ms = (int)mesh_ack_direct_wait_ms(st->state_mesh, hw_time_ms(), LORA_READ_TIMEOUT_MS);
+        if (lora_read(rxbuf, buffer_room(st->buffer_pool, st->buffer_rx), &packet_length, &packet_rssi_dbm, read_ms) == ESP_OK && packet_length > 0) {
             buffer_set_len(st->buffer_pool, st->buffer_rx, (uint16_t)packet_length);
             stat_on_link_rx_packet(st->state_stat, (uint16_t)packet_length);
             if (st->debug_data)
@@ -402,6 +408,12 @@ void process_packet(process_state_t *st, const uint32_t now_ms) {
                        here, whether or not this gateway ends up being the one to publish it. */
                     const ddup_verdict_t verdict = ddup_admit(st->state_ddup, station, sequence);
                     const bool is_new = (verdict != DDUP_REJECT);
+                    /* FIRST, before the publish: a relay that heard this too is counting down to
+                       forwarding it, and the ACK is what stops it. A frame already seen here was
+                       already answered -- as a forward, or as this same frame direct -- and a DOWN
+                       frame is a command on its way out, which nothing forwards up. */
+                    if (is_new && !iotdata_node_is_down(sequence))
+                        mesh_ack_direct(st->state_mesh, station, sequence, hw_time_ms());
                     netw_note_receive(&st->network, station, variant, sequence, NETW_PATH_DIRECT, is_new, (packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0, 0, now_ms);
                     if (verdict == DDUP_PUBLISH)
                         process_sensor_packet(st, rxbuf, packet_length, variant, station, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm);

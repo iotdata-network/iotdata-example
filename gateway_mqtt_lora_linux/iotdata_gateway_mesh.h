@@ -7,6 +7,30 @@
 
 typedef bool (*mesh_packet_handler_t)(const uint8_t *packet, const int length);
 typedef bool (*mesh_dedup_handler_t)(void *ctx, uint16_t station, uint16_t sequence);
+typedef bool (*mesh_claimed_handler_t)(void *ctx, uint16_t station, uint16_t sequence);
+
+/* DIRECT ACKS. A sensor frame heard here is acknowledged on the air, so that a relay which heard it
+   too drops the forward it has queued -- it would only be carrying in what has already arrived. A
+   relay matches an ACK on {origin, sequence} alone and from whoever sent it, so the ACK needs no
+   destination: one answers every relay in earshot.
+ *
+ * Two gateways hear the same frame at the same instant, and two ACKs sent together collide -- at the
+ * relay that matters, neither arrives. So each gateway has a SLOT: the first answers at once, each
+ * later one a slot-width after. One waiting on its slot stands down when a lower-id peer has the
+ * frame -- ddup's claim, over IP, ~30ms after the frame -- or when it hears another's ACK for it. The
+ * claim is what does it: at 2.4k an ACK takes ~250ms from write to listener, and lands after the next
+ * slot falls due. The first slot's reaches a relay ~370ms after the frame, inside its backoff (500ms
+ * up); a later slot still beats some of them, and matters only when the first gateway did not hear
+ * the frame at all. */
+#define MESH_ACK_DIRECT_SLOT_MS 200u
+#define MESH_ACK_DIRECT_SLOTS   4u /* the MESH_ACK_DIRECT_SLOT row's 1-4; from a station id, (station - 1) mod this */
+#define MESH_ACK_DIRECT_PENDING 8  /* frames waiting on a slot at once */
+
+typedef struct {
+    bool used;
+    uint16_t origin_station, origin_sequence;
+    uint32_t due_ms;
+} mesh_ack_pending_t;
 
 typedef struct {
     uint32_t rx;    /* arrived as this type and unpacked */
@@ -22,6 +46,9 @@ typedef struct {
     bool enabled;
     bool debug;
     uint16_t beacon_interval_s; /* the root's cadence -- ours, and stated in every beacon we send */
+    bool ack_direct;            /* acknowledge sensor frames heard directly (see MESH_ACK_DIRECT_*) */
+    uint8_t ack_direct_slot;    /* as configured: 1-4, or 0 = from the station id, resolved when used */
+    mesh_ack_pending_t ack_pending[MESH_ACK_DIRECT_PENDING];
 
     uint16_t beacon_generation;           /* increments each beacon round */
     uint32_t beacon_last_ms;              /* the beacon cadence, on the tick (0 = not yet primed) */
@@ -32,6 +59,7 @@ typedef struct {
     iotdata_node_t *inode;
     mesh_dedup_handler_t dedup_handler;
     void *dedup_handler_ctx;
+    mesh_claimed_handler_t claimed_handler; /* direct ACKs: does a lower-id gateway have this frame? (ddup, with dedup_handler_ctx) */
     /* statistics: see mesh_ctrl_stat_t above for the per-frame-type table */
 /* iotdata_mesh_peek_ctrl_type() returns the 4-bit type (0x0..0xF), or 0xFF when the frame is too
    short to have one. 0x0..0x7 are assigned (iotdata_mesh.h); 0x8..0xF are not, and are counted
@@ -44,6 +72,9 @@ typedef struct {
     /* tx side */
     uint32_t stat_beacons_tx;
     uint32_t stat_acks_tx;
+    uint32_t stat_acks_direct;         /* direct ACKs sent (a subset of stat_acks_tx) */
+    uint32_t stat_acks_direct_yielded; /* held for our slot, then stood down: a lower-id peer had it, or its ACK came first */
+    uint32_t stat_acks_direct_dropped; /* the pending table was full: not sent, the relays forward as before */
     uint32_t stat_errors_tx;
     uint64_t stat_bytes_tx;
 } mesh_state_t;
@@ -112,6 +143,16 @@ bool mesh_transmit_beacon(mesh_state_t *st) {
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+static bool mesh_ack_pending_take(mesh_state_t *const st, const uint16_t origin_station, const uint16_t origin_sequence) {
+    bool taken = false;
+    for (int i = 0; i < MESH_ACK_DIRECT_PENDING; i++)
+        if (st->ack_pending[i].used && st->ack_pending[i].origin_station == origin_station && st->ack_pending[i].origin_sequence == origin_sequence) {
+            st->ack_pending[i].used = false;
+            taken = true;
+        }
+    return taken;
+}
+
 bool mesh_transmit_ack(mesh_state_t *st, uint16_t origin_station, uint16_t origin_sequence) {
     bool ok = false;
     const buffer_handle_t h = buffer_acquire(st->pool);
@@ -128,6 +169,7 @@ bool mesh_transmit_ack(mesh_state_t *st, uint16_t origin_station, uint16_t origi
             PRINTF_INFO("mesh: tx ACK for origin={station=%03" PRIX16 ", sequence=%" PRIu16 "}\n", origin_station, origin_sequence);
         if ((ok = len > 0 && st->packet_handler(buf, len))) {
             iotdata_node_sequence_used(st->inode);
+            (void)mesh_ack_pending_take(st, origin_station, origin_sequence); /* a forward's ACK answers a held direct one */
             st->stat_acks_tx++;
             st->stat_bytes_tx += (uint64_t)len;
         } else {
@@ -177,12 +219,74 @@ bool mesh_receive_beacon_r(mesh_state_t *st, const uint8_t *buf, int len, iotdat
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+static inline uint32_t mesh_ack_direct_delay_ms(const mesh_state_t *const st) {
+    const uint8_t slot = (st->ack_direct_slot != 0u) ? (uint8_t)(st->ack_direct_slot - 1u) : (uint8_t)((uint16_t)(iotdata_node_station(st->inode) - 1u) % MESH_ACK_DIRECT_SLOTS);
+    return (uint32_t)slot * MESH_ACK_DIRECT_SLOT_MS;
+}
+
+/* A sensor frame was heard directly: acknowledge it now, or hold it for this gateway's slot. */
+void mesh_ack_direct(mesh_state_t *st, uint16_t origin_station, uint16_t origin_sequence, uint32_t now_ms) {
+    if (!st->enabled || !st->ack_direct)
+        return;
+    const uint32_t delay_ms = mesh_ack_direct_delay_ms(st);
+    if (delay_ms == 0u) {
+        if (mesh_transmit_ack(st, origin_station, origin_sequence))
+            st->stat_acks_direct++;
+        return;
+    }
+    for (int i = 0; i < MESH_ACK_DIRECT_PENDING; i++)
+        if (!st->ack_pending[i].used) {
+            st->ack_pending[i] = (mesh_ack_pending_t){ .used = true, .origin_station = origin_station, .origin_sequence = origin_sequence, .due_ms = now_ms + delay_ms };
+            return;
+        }
+    /* Full. Sending now would land in slot 0's ACK, so it is not sent at all: the relays forward,
+       which is only what happened before there were direct ACKs. */
+    st->stat_acks_direct_dropped++;
+}
+
+/* How long the receive loop may block before a held ACK falls due -- capped by what it would
+   have waited anyway. The loop blocks in the radio read for seconds when the air is quiet, and a
+   slot is a fraction of one. */
+uint32_t mesh_ack_direct_wait_ms(const mesh_state_t *st, uint32_t now_ms, uint32_t wait_ms) {
+    if (!st->enabled) /* mesh_tick would never drain them: don't spin on them either */
+        return wait_ms;
+    for (int i = 0; i < MESH_ACK_DIRECT_PENDING; i++)
+        if (st->ack_pending[i].used) {
+            const int32_t left = (int32_t)(st->ack_pending[i].due_ms - now_ms);
+            const uint32_t w = (left <= 0) ? 1u : (uint32_t)left;
+            if (w < wait_ms)
+                wait_ms = w;
+        }
+    return wait_ms;
+}
+
+static void mesh_ack_direct_due(mesh_state_t *const st, const uint32_t now_ms) {
+    for (int i = 0; i < MESH_ACK_DIRECT_PENDING; i++)
+        if (st->ack_pending[i].used && (int32_t)(now_ms - st->ack_pending[i].due_ms) >= 0) {
+            const mesh_ack_pending_t p = st->ack_pending[i];
+            st->ack_pending[i].used = false;
+            if (st->claimed_handler && st->claimed_handler(st->dedup_handler_ctx, p.origin_station, p.origin_sequence)) {
+                st->stat_acks_direct_yielded++;
+                if (st->debug)
+                    PRINTF_INFO("mesh: direct ACK for origin={station=%03" PRIX16 ", sequence=%" PRIu16 "} not needed -- a lower-id gateway has it\n", p.origin_station, p.origin_sequence);
+            } else if (mesh_transmit_ack(st, p.origin_station, p.origin_sequence))
+                st->stat_acks_direct++;
+        }
+}
+
 /* A gateway does not expect ACKs (it does not forward), but one on air is still a frame of a known
-   type, so it is validated and counted like the rest rather than tallied blind by the caller. */
+   type, so it is validated and counted like the rest rather than tallied blind by the caller. One
+   is also how a gateway in a later slot learns that the frame it was holding an ACK for has been
+   answered already -- and stands down. */
 bool mesh_receive_ack(mesh_state_t *st, const uint8_t *buf, int len) {
     iotdata_mesh_ack_t a;
     if (iotdata_mesh_unpack_ack(buf, len, &a)) {
         mesh_stat_frame(st, IOTDATA_MESH_CTRL_ACK, len, true);
+        if (mesh_ack_pending_take(st, a.origin_station, a.origin_sequence)) {
+            st->stat_acks_direct_yielded++;
+            if (st->debug)
+                PRINTF_INFO("mesh: direct ACK for origin={station=%03" PRIX16 ", sequence=%" PRIu16 "} not needed -- station=%03" PRIX16 " answered first\n", a.origin_station, a.origin_sequence, a.sender_station);
+        }
         if (st->debug)
             PRINTF_INFO("mesh: rx ACK from station=%03" PRIX16 " for origin={station=%03" PRIX16 ", sequence=%" PRIu16 "}\n", a.sender_station, a.origin_station, a.origin_sequence);
         return true;
@@ -237,6 +341,7 @@ bool mesh_receive_neighbour_report_r(mesh_state_t *st, const uint8_t *buf, int l
 void mesh_tick(mesh_state_t *st, const uint32_t now_ms) {
     if (!st->enabled)
         return;
+    mesh_ack_direct_due(st, now_ms);
     if (intervalable_and_initial(st->beacon_interval_s, &st->beacon_last_ms, now_ms))
         mesh_transmit_beacon(st);
 }
@@ -251,7 +356,8 @@ void mesh_begin(mesh_state_t *st, iotdata_node_t *inode, buffer_pool_t *pool, me
     st->dedup_handler = dedup_handler;
     st->dedup_handler_ctx = dedup_handler_ctx;
     iotdata_mesh_dedup_init(&st->dedup_ring);
-    PRINTF_INFO("mesh: %s, station=%03" PRIX16 ", beacon-interval=%" PRIu16 "s\n", st->enabled ? "enabled" : "disabled", iotdata_node_station(st->inode), st->beacon_interval_s);
+    PRINTF_INFO("mesh: %s, station=%03" PRIX16 ", beacon-interval=%" PRIu16 "s, direct-ack=%s (after %" PRIu32 "ms)\n", st->enabled ? "enabled" : "disabled", iotdata_node_station(st->inode), st->beacon_interval_s,
+                st->ack_direct ? "on" : "off", mesh_ack_direct_delay_ms(st));
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

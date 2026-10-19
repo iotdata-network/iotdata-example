@@ -360,7 +360,52 @@ static bool node_json_value_is_text(const uint8_t *const val, const uint8_t vlen
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
+/* A CONFIG payload is config records, [id<<4|type][value], not key/length/value. Each names its row
+   and its type, so another node's are read without its table, and come out in conf-set's own shape,
+   {id,type,value}: a reply reads as the write it answers, and can be sent back as one. */
+static void node_json_config(cJSON *const obj, const uint8_t *const buf, const size_t len) {
+    cJSON *const rows = cJSON_AddArrayToObject(obj, "rows");
+    size_t at = 0;
+    while (rows != NULL && at < len) {
+        uint16_t id = 0;
+        uint8_t type = 0;
+        iotdata_node_config_value_t v;
+        const size_t n = iotdata_node_config_record_peek(buf + at, len - at, &id, &type, &v);
+        cJSON *const row = (n > 0) ? cJSON_CreateObject() : NULL;
+        if (row == NULL)
+            break; /* truncated, or a type with no width: stop rather than misread the rest */
+        cJSON_AddNumberToObject(row, "id", id);
+        cJSON_AddNumberToObject(row, "type", type);
+        if (type == IOTDATA_NODE_CONFIG_TYPE_BOOL)
+            cJSON_AddBoolToObject(row, "value", v.b);
+        else if (type == IOTDATA_NODE_CONFIG_TYPE_FLOAT)
+            cJSON_AddNumberToObject(row, "value", (double)v.f);
+        else if (type == IOTDATA_NODE_CONFIG_TYPE_STRING) {
+            char s[2 * 255 + 1]; /* the length byte's ceiling, as hex if it is not text */
+            const uint8_t *const p = (const uint8_t *)v.s.p;
+            size_t h = 0;
+            if (node_json_value_is_text(p, (uint8_t)v.s.len)) {
+                memcpy(s, p, v.s.len);
+                h = v.s.len;
+            } else
+                for (uint16_t i = 0; i < v.s.len; i++)
+                    h += (size_t)snprintf(s + h, sizeof(s) - h, "%02X", p[i]);
+            s[h] = '\0';
+            cJSON_AddStringToObject(row, "value", s);
+        } else if (iotdata_node_config_type_is_signed(type))
+            cJSON_AddNumberToObject(row, "value", (double)v.i);
+        else
+            cJSON_AddNumberToObject(row, "value", (double)v.u);
+        cJSON_AddItemToArray(rows, row);
+        at += n;
+    }
+}
+
 static void node_json_kvr(node_state_t *st, cJSON *obj, const uint8_t type, const uint8_t *kvbuf, const size_t kvlen) {
+    if (type == IOTDATA_NODE_TLV_CONFIG) {
+        node_json_config(obj, kvbuf, kvlen);
+        return;
+    }
     size_t cur = 0;
     uint8_t key, vlen;
     const uint8_t *val;

@@ -42,6 +42,11 @@
 #define DDUP_HOLD_PKT_MAX            256  /* bytes copied per held reading (>= e22 max packet) */
 #define DDUP_HOLD_MS_DEFAULT         1000 /* ddup-hold-ms: the SAFETY CEILING — the dynamic hold never exceeds it */
 
+// The same election decides which gateway sends a direct ACK (iotdata_gateway_mesh.h): one waiting on
+// its slot asks ddup_claimed() first, and stands down if a lower-id peer has the frame. A slot is a
+// fraction of a second, so a short ring of the latest claims covers it many times over.
+#define DDUP_CLAIMS_MAX              16
+
 // DYNAMIC HOLD: instead of always waiting the full ceiling, tune the hold DOWN toward the measured
 // peer-claim latency (max + margin), bounded by [floor, ceiling]. Leak-safe: never below an observed
 // claim latency, never above the configured ceiling. Lowest-gateway publishes immediately (no hold).
@@ -119,6 +124,8 @@ typedef struct {
     uint32_t claim_latency_count;         /* number of claim-latency samples */
     uint32_t claim_latency_decay_last_ms; /* tick we last bled the max down on (0 = never) */
     ddup_hold_entry_t hold[DDUP_HOLD_MAX];
+    iotdata_mesh_dedup_entry_t claims[DDUP_CLAIMS_MAX]; /* lower-id peers' latest claims, for ddup_claimed() */
+    int claims_count, claims_next;
     /* statistics */
     uint32_t stat_held;          /* readings entered into the hold queue */
     uint32_t stat_released;      /* held readings that won the election and published */
@@ -412,6 +419,7 @@ int ddup_recv_setup(ddup_state_t *state) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 void ddup_hold_mark_dropped(ddup_state_t *state, uint16_t station, uint16_t sequence); /* defined below; used by the election hook here */
+void ddup_claim_note(ddup_state_t *state, uint16_t station, uint16_t sequence);        /* likewise */
 
 void ddup_recv_from_peers(ddup_state_t *state, int recv_fd) {
     struct pollfd pfd = { .fd = recv_fd, .events = POLLIN, .revents = 0 };
@@ -470,8 +478,10 @@ void ddup_recv_from_peers(ddup_state_t *state, int recv_fd) {
             for (int entry_index = 0; entry_index < entry_count; entry_index++) {
                 const uint16_t st = ddup_packet_get_entry_station(pkt, entry_index), sq = ddup_packet_get_entry_sequence(pkt, entry_index);
                 iotdata_mesh_dedup_insert(state->dedup_ring, st, sq); /* decided-set: suppress my later receive */
-                if (sender < state->gateway_id)                       /* election: lower-id peer claims it -> drop my hold */
+                if (sender < state->gateway_id) {                     /* election: lower-id peer claims it -> drop my hold, and my direct ACK */
                     ddup_hold_mark_dropped(state, st, sq);
+                    ddup_claim_note(state, st, sq);
+                }
                 state->stat_injected++;
             }
         }
@@ -815,6 +825,26 @@ void ddup_hold_mark_dropped(ddup_state_t *state, uint16_t station, uint16_t sequ
             found = 1;
         }
     }
+}
+
+/* Lock held (recv path), as for ddup_hold_mark_dropped. */
+void ddup_claim_note(ddup_state_t *state, uint16_t station, uint16_t sequence) {
+    state->claims[state->claims_next] = (iotdata_mesh_dedup_entry_t){ .station = station, .sequence = sequence };
+    state->claims_next = (state->claims_next + 1) % DDUP_CLAIMS_MAX;
+    if (state->claims_count < DDUP_CLAIMS_MAX)
+        state->claims_count++;
+}
+
+/* From the main loop, so it takes the lock; with ddup off there is no lock, and no peer to claim. */
+bool ddup_claimed(ddup_state_t *state, uint16_t station, uint16_t sequence) {
+    if (!state->enabled)
+        return false;
+    bool claimed = false;
+    pthread_mutex_lock(&state->mutex);
+    for (int i = 0; i < state->claims_count && !claimed; i++)
+        claimed = state->claims[i].station == station && state->claims[i].sequence == sequence;
+    pthread_mutex_unlock(&state->mutex);
+    return claimed;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------

@@ -426,6 +426,9 @@ void stat_build_stations_json(cJSON *const dest, const stat_state_t *const s, co
         cJSON_AddNumberToObject(m, "duplicates", (double)mesh->stat_duplicates);
         cJSON_AddNumberToObject(m, "beacons_tx", (double)mesh->stat_beacons_tx);
         cJSON_AddNumberToObject(m, "acks_tx", (double)mesh->stat_acks_tx);
+        cJSON_AddNumberToObject(m, "acks_direct", (double)mesh->stat_acks_direct);
+        cJSON_AddNumberToObject(m, "acks_direct_yielded", (double)mesh->stat_acks_direct_yielded);
+        cJSON_AddNumberToObject(m, "acks_direct_dropped", (double)mesh->stat_acks_direct_dropped);
         cJSON_AddNumberToObject(m, "tx_errors", (double)mesh->stat_errors_tx);
         cJSON_AddNumberToObject(m, "tx_bytes", (double)mesh->stat_bytes_tx);
         cJSON *peers = cJSON_AddArrayToObject(m, "peers");

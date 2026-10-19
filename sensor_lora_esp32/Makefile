@@ -12,7 +12,7 @@ IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_
 
 PLATFORM = esp32c3
 NAME     = sensor
-VERSION  = 0.9.10
+VERSION  = 0.9.11
 
 ##
 

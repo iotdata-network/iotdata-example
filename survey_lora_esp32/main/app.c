@@ -202,6 +202,7 @@ static bool on_lora_changed(const iotdata_node_config_row_t *row, const iotdata_
 static void _app_node_status(const uint16_t station, iotdata_node_status_t *const out);
 static bool _app_node_transmit(const uint8_t *const packet, const size_t len);
 static int _app_config_build(uint8_t *buf, size_t size, iotdata_node_partial_t *partial);
+static int _app_config_build_written(uint8_t *buf, size_t size);
 static bool _app_config_apply(const uint8_t *buf, size_t len, bool *reboot_out);
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -302,6 +303,7 @@ static state_running_t _state_running = { .iotdata_node_cfg = {
                                               .settings = &_state_running.settings,
                                               .state = &_state_running.node,
                                               .config_build = _app_config_build,
+                                              .config_build_written = _app_config_build_written,
                                               .config_apply = _app_config_apply,
                                               .packet_max = LORA_PACKET_SIZE_MAX,
                                               .receive_always = true, /* it listens continuously, so any command finds it */
@@ -316,6 +318,10 @@ static const struct {
 
 static int _app_config_build(uint8_t *const buf, const size_t size, iotdata_node_partial_t *const partial) {
     return iotdata_node_config_pack(buf, size, partial);
+}
+/* the reply to a write: the rows it named, not the whole table */
+static int _app_config_build_written(uint8_t *const buf, const size_t size) {
+    return iotdata_node_config_pack_written(buf, size);
 }
 
 static bool _app_config_apply(const uint8_t *const buf, const size_t len, bool *const reboot_out) {

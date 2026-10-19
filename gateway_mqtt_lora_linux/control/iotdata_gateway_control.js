@@ -428,6 +428,14 @@ function makeRecordConverter(defsPath) {
 
 // ------------------------------------------------------------------------------------------------------------------------
 
+/* When every address of a name fails, Node raises an AggregateError whose message is EMPTY, with the
+   reasons in .errors -- so say what failed, and what each address said. */
+function mqttError(e) {
+    const what = e.message || e.code || String(e);
+    const each = Array.isArray(e.errors) ? e.errors.map((x) => `${x.address}${x.port ? ':' + x.port : ''} ${x.code || x.message}`) : [];
+    return each.length ? `${what} (${each.join(', ')})` : what;
+}
+
 async function main() {
     let rest;
     try {
@@ -467,11 +475,27 @@ async function main() {
         process.exit(1);
     }
 
-    display.verbose(`connecting to ${opts.broker}`);
-    const client = mqtt.connect(opts.broker);
+    /* THE BROKER BY ITS IPv4 ADDRESS, when it has one: the fleet's broker listens on IPv4 only, and an
+       mDNS lookup for either family can come back with the IPv6 addresses alone -- every one refused.
+       TLS keeps the name, which its certificate is checked against. */
+    let broker = opts.broker;
+    try {
+        const u = new URL(opts.broker);
+        if (u.protocol === 'mqtt:' || u.protocol === 'tcp:') {
+            const { address } = await require('dns').promises.lookup(u.hostname, { family: 4 });
+            if (address !== u.hostname) {
+                u.hostname = address;
+                broker = u.toString();
+            }
+        }
+    } catch {
+        /* no IPv4 address for it: connect by name, as given */
+    }
+    display.verbose(`connecting to ${opts.broker}${broker !== opts.broker ? ` (${broker})` : ''}`);
+    const client = mqtt.connect(broker);
 
     client.on('error', (e) => {
-        display.err(`error: mqtt: ${e.message}`);
+        display.err(`error: mqtt: ${mqttError(e)}`);
         process.exit(1);
     });
 

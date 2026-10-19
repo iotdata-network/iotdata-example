@@ -59,14 +59,17 @@
 #define RECEIVE_ALWAYS 1 /* whether to always be open for receiving */
 #endif
 
+#undef IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS
+#define IOTDATA_NODE_CONFIG_SIMULATOR_SENSORS 4
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-#define PIN_DEVICE_UART_TX  PIN_E22_RXD
-#define PIN_DEVICE_UART_RX  PIN_E22_TXD
-#define PIN_DEVICE_LORA_AUX PIN_E22_AUX
-#define PIN_DEVICE_LORA_M0  PIN_E22_M0
-#define PIN_DEVICE_LORA_M1  PIN_E22_M1
+#define PIN_DEVICE_UART_TX                    PIN_E22_RXD
+#define PIN_DEVICE_UART_RX                    PIN_E22_TXD
+#define PIN_DEVICE_LORA_AUX                   PIN_E22_AUX
+#define PIN_DEVICE_LORA_M0                    PIN_E22_M0
+#define PIN_DEVICE_LORA_M1                    PIN_E22_M1
 
 #include "d_platform_esp32.h"
 #include "d_common.h"
@@ -301,6 +304,10 @@ static iotdata_node_version_caps_t s_caps;
 static int sim_config_build(uint8_t *const buf, const size_t size, iotdata_node_partial_t *const partial) {
     return iotdata_node_config_pack(buf, size, partial);
 }
+/* the reply to a write: the rows it named, not the whole table */
+static int sim_config_build_written(uint8_t *const buf, const size_t size) {
+    return iotdata_node_config_pack_written(buf, size);
+}
 static bool sim_config_apply(const uint8_t *const buf, const size_t len, bool *const reboot_out) {
     return iotdata_node_config_apply(buf, len, &s_datastore, reboot_out);
 }
@@ -319,6 +326,7 @@ static const iotdata_node_params_t s_conf_template = {
     .settings = NULL, /* per node: filled in from this template at startup */
     .state = &s_state,
     .config_build = sim_config_build,
+    .config_build_written = sim_config_build_written,
     .config_apply = sim_config_apply,
     .packet_max = LORA_PACKET_SIZE_MAX, /* what OUR radio carries; the framework sizes for the protocol */
 };
@@ -468,19 +476,20 @@ bool app_init(void) {
     ESP_LOGI(__tag_app, "device: e22 configured, transfer mode active");
     iotdata_node_diagnostics_event(IOTDATA_NODE_BB_LC_START, 0);
 
-    /* --- Simulator init --- Identity comes from the factory MAC so each board is
-       unique AND stable across reboots: a per-board station_base (disjoint ID band)
-       and a fixed seed (so each board's station->variant map never changes). Flash
-       the same firmware to every board; they self-separate on air. */
+    /* --- Simulator init --- The stations start at THIS BOARD's own station, the one a sensor on
+       it would have (the same node function), and count up from there: predictable from the MAC,
+       the same across restarts, and unchanged by the SENSORS row except in how far they count
+       (iotsim wraps the count within the assignable range, so it never reaches the broadcast id).
+       A fixed seed keeps each board's station->variant map the same too. */
     uint8_t mac[6] = { 0 };
     (void)esp_efuse_mac_get_default(mac);
     const uint32_t mac32 = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];
     const uint32_t seed = mac32 ? mac32 : 0xDEADBEEFU;
-    const uint16_t nbands = (uint16_t)(IOTDATA_STATION_ASSIGNABLE_MAX / SIM_SENSORS); /* 4094/8 = 511 */
-    const uint16_t station_base = (uint16_t)((mac32 % nbands) * (uint32_t)SIM_SENSORS);
-    iotsim_init(&g_sim, seed, hw_time_ms(), station_base);
+    iotdata_node_identity_t identity;
+    const uint16_t station_first = iotdata_node_station_from_mac(&identity);
+    iotsim_init(&g_sim, seed, hw_time_ms(), station_first);
     ESP_LOGI(__tag_app, "board: mac=%02X:%02X:%02X:%02X:%02X:%02X seed=%08" PRIX32 " stations=%03" PRIX16 "-%03" PRIX16, (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2], (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], seed,
-             (uint16_t)(station_base + 1), (uint16_t)(station_base + SIM_SENSORS));
+             g_sim.sensors[0].station_id, g_sim.sensors[SIM_SENSORS - 1].station_id);
     ESP_LOGI(__tag_app, "simulator: sensors=%d, types/board=%d, tx_interval=%u-%us", SIM_SENSORS, SIM_VARIANTS, SIM_TRANSMIT_MIN_MS, SIM_TRANSMIT_MAX_MS);
     if (datastore_open(&s_datastore, "iotdata")) {
         iotdata_node_state_init(&s_state, &s_datastore, "state");

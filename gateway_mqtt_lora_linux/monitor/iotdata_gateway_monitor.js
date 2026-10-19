@@ -136,6 +136,9 @@ const DUP_WINDOW_MS = 1000 * parseInt(cfg['stats-dup-window'] ?? '300', 10);
 // Battery is not in every packet, so the table shows the latest reading with its age, and calls
 // it stale past this many hours: a level from yesterday says nothing about the battery today.
 const BATTERY_STALE_S = 3600 * parseFloat(cfg['stats-battery-stale'] ?? '24');
+// A relay is heard at least once a beacon round, when it rebroadcasts, and is stale after three
+// missed: the rule a relay applies to its own parent, at the gateway's default 150s cadence.
+const RELAY_STALE_S = parseFloat(cfg['stats-relay-stale'] ?? '450');
 
 // The node's version TLV (type 1), which it sends on boot and then periodically. Found by format
 // rather than position, since a packet may carry several TLVs in any order.
@@ -161,15 +164,31 @@ const STATIONS = {};
 // use the topic form, three digits upper-case.
 const hexId = (v) => (typeof v === 'number' ? v.toString(16) : String(v)).toUpperCase().padStart(3, '0');
 for (const key of Object.keys(cfg)) {
-    const m = /^station-([0-9A-Fa-f]{1,8})-(name|latitude|longitude|altitude|decoder)$/.exec(key);
+    const m = /^station-([0-9A-Fa-f]{1,8})-(name|latitude|longitude|altitude|decoder|state)$/.exec(key);
     if (!m) continue;
-    const id = m[1].toUpperCase();
+    const id = hexId(m[1]);
     STATIONS[id] = STATIONS[id] || {};
-    STATIONS[id][m[2]] = m[2] === 'name' || m[2] === 'decoder' ? cfg[key] : num(cfg[key], null);
+    STATIONS[id][m[2]] = m[2] === 'name' || m[2] === 'decoder' || m[2] === 'state' ? cfg[key] : num(cfg[key], null);
+}
+
+// ignore-unspecified: only the stations named above are kept, live and on restore, so one that
+// does not belong -- an old simulator id, a phantom from a corrupted frame -- is gone at the next
+// restart without editing the snapshot. Each one is logged once, the first time it is dropped.
+const IGNORE_UNSPECIFIED = /^true$/i.test(cfg['ignore-unspecified'] || '');
+const ignoredLogged = new Set();
+function specified(id) {
+    const hex = hexId(id);
+    if (!IGNORE_UNSPECIFIED || STATIONS[hex] !== undefined) return true;
+    if (!ignoredLogged.has(hex)) {
+        ignoredLogged.add(hex);
+        console.log(`ignore-unspecified: ignoring station ${hex} (not in the config)`);
+    }
+    return false;
 }
 
 // Decoder plugins: decoder-<name>=<path to module>. A plugin exports decodeMonitor(body)
-// and returns display fields, or null when the packet is not its own.
+// and returns display fields, or null when the packet is not its own. A summary, if it
+// gives one, is a few words for the station table's reading column.
 //
 // Loaded by path from config and never referenced by this repo, so a device-specific wire
 // format can be decoded here without the monitor depending on that device's code. A plugin
@@ -390,6 +409,26 @@ function statFor(id) {
     return stats.get(id);
 }
 
+// A packet's measurements as [name, value] pairs, for the station table's reading column.
+// Containers flatten one level ("temperature", not "environment.temperature"), and what is not a
+// measurement stays out: framing, the battery (it has its own column), the station's link report,
+// position, clock, flags and raw TLVs. A decoder plugin's summary stands in for the TLV it decoded.
+const READING_SKIP = new Set(['variant', 'station', 'sequence', 'rssi_packet', 'packed_bits', 'packed_bytes', 'battery', 'link', 'position', 'datetime', 'flags', 'data']);
+function readingOf(rec) {
+    const out = [];
+    for (const [k, v] of Object.entries(rec.body || {})) {
+        if (READING_SKIP.has(k) || v == null) continue;
+        if (typeof v === 'number') out.push([k, v]);
+        else if (typeof v === 'object' && !Array.isArray(v)) for (const [c, n] of Object.entries(v)) if (typeof n === 'number') out.push([c, n]);
+    }
+    const d = rec.decoded;
+    if (d && !(d.fields && d.fields.error)) {
+        const text = d.summary || Object.entries(d.fields || {}).map(([k, v]) => `${v} ${k}`).join(', ');
+        if (text) out.push([d.name, text]);
+    }
+    return out;
+}
+
 // Returns true when rec is a duplicate. A duplicate is counted and otherwise ignored: it is not
 // a packet the station sent, so it must not inflate pkts or the interval, refresh last-seen, or
 // move the sequence baseline -- the old code took a repeated sequence for a restart, which reset
@@ -407,10 +446,12 @@ function observe(rec) {
     }
     s.count++;
     s.last = rec.t;
-    // Latest battery and version, each with when it arrived: neither is in every packet, and the
-    // age is what makes an old reading recognisable as one.
+    // Latest battery, reading and version, each with when it arrived: none is in every packet, and
+    // the age is what makes an old reading recognisable as one.
     const bat = rec.body && rec.body.battery;
     if (bat && bat.level != null) s.battery = { level: bat.level, charging: !!bat.state, t: rec.t };
+    const reading = readingOf(rec);
+    if (reading.length) s.reading = { values: reading, t: rec.t };
     const ver = versionOf(rec.body);
     if (ver) versions.set(hexId(rec.station), { data: ver, t: rec.t });
     s.times.push(rec.t);
@@ -448,6 +489,7 @@ function snapshot() {
                 lat: meta.latitude ?? null,
                 lon: meta.longitude ?? null,
                 distance: meta.distance ?? null,
+                state: meta.state || null, /* free text from station-<ID>-state: deployed, broken, ... */
                 count: s.count,
                 lost: s.lost,
                 dups: s.dups,
@@ -455,6 +497,8 @@ function snapshot() {
                 charging: s.battery ? s.battery.charging : null,
                 batteryAge: s.battery ? Math.round((now - s.battery.t) / 1000) : null,
                 batteryStale: s.battery ? (now - s.battery.t) / 1000 > BATTERY_STALE_S : false,
+                reading: s.reading ? s.reading.values : null,
+                readingAge: s.reading ? Math.round((now - s.reading.t) / 1000) : null,
                 version: versions.has(s.id) ? versions.get(s.id).data : null,
                 versionAge: versions.has(s.id) ? Math.round((now - versions.get(s.id).t) / 1000) : null,
                 lossPct: expected > 0 ? (s.lost * 100) / expected : 0,
@@ -550,6 +594,7 @@ const GATEWAY_KINDS = { gateway: 'gw', network: 'net', ddup: 'ddup' };
 
 function handleGatewayMessage(kind, topic, body) {
     const id = hexId(topic.split('/').pop());
+    if (!specified(id)) return;
     const g = gateways.get(id) || { id };
     g[GATEWAY_KINDS[kind]] = { t: Date.now(), body };
     gateways.set(id, g);
@@ -596,7 +641,7 @@ function gatewayView() {
             }),
         });
         const netAge = since(g.net) || 0;
-        for (const r of (Array.isArray(net.network) ? net.network : []).filter((n) => n && n.kind === 'relay')) {
+        for (const r of (Array.isArray(net.network) ? net.network : []).filter((n) => n && n.kind === 'relay' && specified(n.station))) {
             const id = hexId(r.station);
             rows.push({
                 role: 'relay',
@@ -604,6 +649,7 @@ function gatewayView() {
                 name: name(id),
                 gateway: g.id,
                 age: r.age_secs != null ? r.age_secs + netAge : null,
+                staleAfter: RELAY_STALE_S,
                 packets: r.packets ?? null,
                 rssi: r.rssi ?? null,
                 cost: r.cost ?? null,
@@ -680,10 +726,12 @@ function handleMessage(topic, text) {
     const tp = topic.split('/');
     if (tp.length >= 3 && tp[tp.length - 3] === 'manage' && tp[tp.length - 2] === 'from') {
         if (body.tlv === 'version' && body.data && typeof body.data === 'object') {
+            if (!specified(tp[tp.length - 1])) return;
             versions.set(hexId(tp[tp.length - 1]), { data: body.data, t: Date.now() });
             send('stats', snapshot());
             send('gateways', gatewayView());
         } else if (body.type === 'survey' && body.cmd === 'survey' && body.observer != null && body.station != null) {
+            if (!specified(body.observer) || !specified(body.station)) return;
             const id = hexId(body.observer);
             const sv = surveys.get(id) || { n: 0, recent: [], heard: {} };
             // Every gateway that hears the instrument's report publishes it, so each observation can
@@ -719,7 +767,8 @@ function handleMessage(topic, text) {
     // (the payload carries the numeric id), so it is worth taking rather than maintaining a table.
     const parts = topic.split('/');
     const station = parts.length >= 1 ? parts[parts.length - 1] : '?';
-    const meta = STATIONS[station.toUpperCase()] || null;
+    if (!specified(station)) return;
+    const meta = STATIONS[hexId(station)] || null;
 
     record({
         id: ++counter,
@@ -870,18 +919,23 @@ function snapshotLoad() {
     stats.clear();
     // Defaults first so a snapshot written by an older version, missing a field added since,
     // restores with a sane value rather than an undefined that breaks the stats arithmetic.
-    for (const st of data.stats) if (st && st.id) stats.set(st.id, { count: 0, lost: 0, dups: 0, recent: [], times: [], rssis: [], ...st });
+    for (const st of data.stats) if (st && st.id && specified(st.id)) stats.set(st.id, { count: 0, lost: 0, dups: 0, recent: [], times: [], rssis: [], ...st });
     history.length = 0;
-    for (const rec of Array.isArray(data.history) ? data.history.slice(-KEEP) : []) history.push(rec);
+    for (const rec of Array.isArray(data.history) ? data.history.slice(-KEEP) : []) if (rec && specified(rec.station)) history.push(rec);
     gnss.length = 0;
     for (const g of Array.isArray(data.gnss) ? data.gnss.slice(-TRACKER_KEEP) : []) gnss.push(g);
     // Absent from a snapshot written before the section existed, which simply restores none.
     gateways.clear();
-    for (const g of Array.isArray(data.gateways) ? data.gateways : []) if (g && g.id) gateways.set(g.id, g);
+    for (const g of Array.isArray(data.gateways) ? data.gateways : []) if (g && g.id && specified(g.id)) gateways.set(g.id, g);
     versions.clear();
-    for (const e of Array.isArray(data.versions) ? data.versions : []) if (Array.isArray(e) && e[0] && e[1]) versions.set(e[0], e[1]);
+    for (const e of Array.isArray(data.versions) ? data.versions : []) if (Array.isArray(e) && e[0] && e[1] && specified(e[0])) versions.set(e[0], e[1]);
     surveys.clear();
-    for (const e of Array.isArray(data.surveys) ? data.surveys : []) if (Array.isArray(e) && e[0] && e[1]) surveys.set(e[0], { recent: [], heard: {}, ...e[1] });
+    for (const e of Array.isArray(data.surveys) ? data.surveys : [])
+        if (Array.isArray(e) && e[0] && e[1] && specified(e[0])) {
+            const sv = { recent: [], heard: {}, ...e[1] };
+            for (const sid of Object.keys(sv.heard || {})) if (!specified(sid)) delete sv.heard[sid];
+            surveys.set(e[0], sv);
+        }
     counter = data.counter || history.length;
     return {
         savedAt: data.savedAt,
@@ -936,6 +990,7 @@ function snapshotMake(done) {
             if (!rec || rec.station === undefined) return;
             // The log may predate the filter, or a narrower mqtt-accept, so it applies here too.
             if (rec.topic !== undefined && !ACCEPT.has(topicKind(rec.topic))) return;
+            if (!specified(rec.station)) return;
             // observe() and not record(): the log is the SOURCE here, so appending it back to
             // itself, or pushing to browsers that have not connected yet, would both be wrong.
             observe(rec);
@@ -1188,6 +1243,20 @@ ${FAVICON}
   #gnss .rx { color:var(--dim); font-size:11px; margin-left:3px; }
   #gnss .good { color:var(--good); } #gnss .ok { color:var(--ok); } #gnss .weak { color:var(--weak); }
   td.fw { font-size:11.5px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  td.state { font-size:11.5px; color:var(--dim); white-space:nowrap; }
+  /* The station table's reading takes the width the rest can spare: the numbers shrink to fit,
+     and a long name is cut short (its tooltip has all of it). Every heading sorts its column. */
+  #sum th { white-space:nowrap; cursor:pointer; user-select:none; }
+  #sum th .u { text-transform:none; }
+  #sum th.nm, #sum td.nm, #sum th.state, #sum td.state, #sum th.rd, #sum td.rd { text-align:left; }
+  #sum td.id { font-weight:650; }
+  #sum td.nm { font-family:inherit; color:var(--dim); }
+  #sum td.rd span { color:var(--dim); }
+  #sum td.id, #sum td.nm, #sum td.state, #sum td.n { width:1%; white-space:nowrap; }
+  #sum td.nm span { display:inline-block; max-width:190px; overflow:hidden; text-overflow:ellipsis;
+                    white-space:nowrap; vertical-align:bottom; }
+  #sum td.n a { color:inherit; text-decoration:underline; text-decoration-thickness:1px;
+                text-underline-offset:2px; }
   /* software | up | last close both tables, and get the same widths in each so the two line up */
   #gw th:nth-last-child(3), #gw td:nth-last-child(3), #sum th:nth-last-child(3), #sum td:nth-last-child(3) { width:210px; min-width:210px; max-width:210px; }
   #gw th:nth-last-child(-n+2), #gw td:nth-last-child(-n+2), #sum th:nth-last-child(-n+2), #sum td:nth-last-child(-n+2) { width:52px; min-width:52px; max-width:52px; }
@@ -1357,7 +1426,52 @@ function row(r) {
   return e;
 }
 
-var HEAD = ['station', 'pkts', 'every', 'lost', 'dups', 'avg rssi', 'batt', 'software', 'up', 'last'];
+// The reading column: value and unit run together, the way you would jot them down ("4.8°C,
+// 1025hPa, 91%"), in the packet's own field order. Units come from UNITS where these do not say
+// otherwise; a name with neither shows as "name value", and a plugin's summary, which arrives as
+// text, shows as it is.
+var COMPACT = {
+  temperature: function (v) { return v.toFixed(1) + '\\u00b0C'; },
+  humidity: function (v) { return Math.round(v) + '%'; },
+  pressure: function (v) { return Math.round(v) + 'hPa'; },
+  irradiance: function (v) { return Math.round(v) + 'W/m\\u00b2'; },
+  ultraviolet: function (v) { return 'UV' + v; },
+  direction: function (v) { return Math.round(v) + '\\u00b0'; },
+  gust: function (v) { return 'gust ' + v + 'm/s'; },
+  // DEPTH is centimetres in the protocol, whatever a variant calls it
+  depth: function (v) { return v + 'cm'; },
+  snow_depth: function (v) { return 'snow ' + v + 'cm'; },
+  level: function (v) { return 'level ' + v + 'cm'; }
+};
+COMPACT.temp = COMPACT.water_temp = COMPACT.temperature;
+COMPACT.humid = COMPACT.humidity;
+COMPACT.pres = COMPACT.pressure;
+COMPACT.wdir = COMPACT.direction;
+COMPACT.wgust = COMPACT.gust;
+
+function readingText(values) {
+  var out = [];
+  for (var i = 0; i < values.length; i++) {
+    var k = values[i][0], v = values[i][1];
+    if (typeof v !== 'number') out.push(String(v));
+    else if (COMPACT[k]) out.push(COMPACT[k](v));
+    else if (UNITS[k]) out.push(v + UNITS[k]);
+    else out.push(k + ' ' + v);
+  }
+  return out.join(', ');
+}
+
+// What the reading column sorts on: temperature, the one thing nearly every station reports --
+// the first temperature in it, or a plugin summary that leads with one ("22.1°C (...)").
+function readingTemp(values) {
+  for (var i = 0; values && i < values.length; i++) {
+    var k = values[i][0], v = values[i][1];
+    if (typeof v === 'number' && (k === 'temperature' || k === 'temp' || k === 'water_temp')) return v;
+    if (typeof v === 'string' && /^-?[0-9.]+\\u00b0C/.test(v)) return parseFloat(v);
+  }
+  return null;
+}
+
 // The version report as one short cell: the software string, which is what changes between
 // builds and says what the node is running ("relay/0.9.10/202610130940"). Firmware is the
 // platform underneath (idf/6.1) and only stands in when a node sends no software field. The
@@ -1375,60 +1489,126 @@ function whoCell(id, name) {
   return who;
 }
 
+// The station table, a column at a time: its heading, what it sorts on, and its cell. A sort key of
+// null -- nothing to sort on -- goes last whichever way the column runs, and ties fall back to
+// station order.
+var COLS = [
+  { h: 'station', cls: 'id', key: function (s) { return parseInt(s.id, 16); },
+    cell: function (s) { return el('td', 'id', s.id); } },
+  { h: 'name', cls: 'nm', key: function (s) { return s.name ? s.name.toLowerCase() : null; },
+    cell: function (s) {
+      var td = el('td', 'nm');
+      if (s.name) {
+        var nm = el('span', null, s.name);
+        nm.title = s.name; // a long one is cut short
+        td.appendChild(nm);
+      }
+      return td;
+    } },
+  // The distance doubles as the way to go look at the spot. ?api=1&query= is the documented form
+  // that hands off to the Maps app on a phone rather than the web page; rel=noopener because
+  // target=_blank otherwise gives the opened page a handle back to this one.
+  { h: 'dist', unit: 'm', cls: 'n', key: function (s) { return s.distance; },
+    cell: function (s) {
+      var td = el('td', 'n');
+      if (s.distance == null) td.textContent = '\\u2013';
+      else if (s.lat != null && s.lon != null) {
+        var a = document.createElement('a');
+        a.href = 'https://www.google.com/maps/search/?api=1&query=' + s.lat + ',' + s.lon;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = String(Math.round(s.distance));
+        td.appendChild(a);
+      } else td.textContent = String(Math.round(s.distance));
+      return td;
+    } },
+  { h: 'state', cls: 'state', key: function (s) { return s.state ? s.state.toLowerCase() : null; },
+    cell: function (s) { return el('td', 'state', s.state || ''); } },
+  // The last measurement and its age: a station whose recent packets carried only status keeps
+  // showing what it last measured, and the age says how long ago that was.
+  { h: 'reading', cls: 'rd', key: function (s) { return readingTemp(s.reading); },
+    cell: function (s) {
+      var td = el('td', 'rd', s.reading ? readingText(s.reading) : '\\u2013');
+      if (s.reading) td.appendChild(el('span', null, ' (' + dur(s.readingAge) + ')'));
+      return td;
+    } },
+  { h: 'pkts', cls: 'n', key: function (s) { return s.count; },
+    cell: function (s) { return el('td', 'n', String(s.count)); } },
+  { h: 'every', cls: 'n', key: function (s) { return s.interval; },
+    cell: function (s) { return el('td', 'n', s.interval == null ? '\\u2013' : every(s.interval)); } },
+  { h: 'lost', cls: 'n', key: function (s) { return s.lossPct; },
+    cell: function (s) { return el('td', 'n', s.lost + (s.lost ? ' (' + s.lossPct.toFixed(1) + '%)' : '')); } },
+  // ddup should keep this at zero; anything else is the same packet delivered twice.
+  { h: 'dups', cls: 'n', key: function (s) { return s.dups || 0; },
+    cell: function (s) { return el('td', s.dups ? 'n stale' : 'n', String(s.dups || 0)); } },
+  { h: 'avg rssi', cls: 'n', key: function (s) { return s.rssiAvg; },
+    cell: function (s) { return el('td', 'n', s.rssiAvg == null ? '\\u2013' : Math.round(s.rssiAvg) + ' dBm'); } },
+  // Latest battery reading; red once it is older than the configured staleness, since a level
+  // that has stopped being reported is itself the warning.
+  { h: 'batt', cls: 'n', key: function (s) { return s.battery; },
+    cell: function (s) {
+      var td = el('td', s.batteryStale ? 'n stale' : 'n', s.battery == null ? '\\u2013' : s.battery + '%' + (s.charging ? ' \\u26a1' : ''));
+      if (s.battery != null) td.title = 'reported ' + every(s.batteryAge) + ' ago';
+      return td;
+    } },
+  { h: 'software', cls: 'fw', key: function (s) { return s.version ? versionText(s.version) : null; },
+    cell: function (s) {
+      var td = el('td', 'fw', versionText(s.version));
+      if (s.version) td.title = JSON.stringify(s.version) + ' -- reported ' + every(s.versionAge) + ' ago';
+      return td;
+    } },
+  // Time since its version report, which a sensor sends only on a cold boot: so, time since boot.
+  // Not the status TLV's uptime, which on a sleeping node is just the seconds awake this cycle.
+  { h: 'up', key: function (s) { return s.versionAge; },
+    cell: function (s) { return el('td', null, dur(s.versionAge)); } },
+  // Age is the honest answer to "is it still there" — a gap only shows when a LATER packet
+  // arrives to reveal it, so a station that goes silent shows up here and nowhere else.
+  { h: 'last', key: function (s) { return s.age; },
+    cell: function (s) {
+      return el('td', s.age != null && s.age > 300 ? 'stale' : null, s.age == null ? '\\u2013' : s.age < 90 ? s.age + 's' : Math.round(s.age / 60) + 'm');
+    } }
+];
+
+// Click a heading to sort on it, again to reverse it; station order until then.
+var sortCol = 0, sortDir = 1, lastRows = [];
+
+function sortKey(col, s) {
+  var k = col.key(s);
+  return k == null || k !== k ? null : k; // NaN is nothing to sort on, too
+}
+
 function renderStats(rows) {
+  lastRows = rows;
+  var col = COLS[sortCol];
+  var byId = function (a, b) { return parseInt(a.id, 16) - parseInt(b.id, 16); };
+  rows = rows.slice().sort(function (a, b) {
+    var x = sortKey(col, a), y = sortKey(col, b);
+    if (x === null || y === null) return x === y ? byId(a, b) : x === null ? 1 : -1;
+    var c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
+    return c ? c * sortDir : byId(a, b);
+  });
+
   var tb = document.querySelector('#sum tbody');
   tb.innerHTML = '';
   var hr = document.createElement('tr');
-  for (var i = 0; i < HEAD.length; i++) hr.appendChild(el('th', null, HEAD[i]));
+  for (var i = 0; i < COLS.length; i++) {
+    var th = el('th', COLS[i].cls || null, COLS[i].h);
+    if (COLS[i].unit) th.appendChild(el('span', 'u', ' (' + COLS[i].unit + ')'));
+    if (i === sortCol) th.appendChild(document.createTextNode(sortDir > 0 ? ' \\u25b2' : ' \\u25bc'));
+    th.onclick = (function (n) {
+      return function () {
+        sortDir = n === sortCol ? -sortDir : 1;
+        sortCol = n;
+        renderStats(lastRows);
+      };
+    })(i);
+    hr.appendChild(th);
+  }
   tb.appendChild(hr);
 
   for (var n = 0; n < rows.length; n++) {
-    var s = rows[n], tr = document.createElement('tr');
-    var who = whoCell(s.id, s.name);
-    if (s.distance != null) {
-      var sub = el('span', null, ' \\u00b7 ');
-      {
-        // The distance doubles as the way to go look at the spot. ?api=1&query= is the
-        // documented form that hands off to the Maps app on a phone rather than the web
-        // page; rel=noopener because target=_blank otherwise gives the opened page a
-        // handle back to this one.
-        if (s.lat != null && s.lon != null) {
-          var a = document.createElement('a');
-          a.href = 'https://www.google.com/maps/search/?api=1&query=' + s.lat + ',' + s.lon;
-          a.target = '_blank';
-          a.rel = 'noopener noreferrer';
-          a.textContent = metres(s.distance);
-          sub.appendChild(a);
-        } else sub.appendChild(document.createTextNode(metres(s.distance)));
-      }
-      who.appendChild(sub);
-    }
-    tr.appendChild(who);
-    tr.appendChild(el('td', null, String(s.count)));
-    tr.appendChild(el('td', null, s.interval == null ? '\\u2013' : every(s.interval)));
-    tr.appendChild(el('td', null, s.lost + (s.lost ? ' (' + s.lossPct.toFixed(1) + '%)' : '')));
-    // ddup should keep this at zero; anything else is the same packet delivered twice.
-    var dups = el('td', null, String(s.dups || 0));
-    if (s.dups) dups.className = 'stale';
-    tr.appendChild(dups);
-    tr.appendChild(el('td', null, s.rssiAvg == null ? '\\u2013' : Math.round(s.rssiAvg) + ' dBm'));
-    // Latest battery reading; red once it is older than the configured staleness, since a level
-    // that has stopped being reported is itself the warning.
-    var bt = el('td', null, s.battery == null ? '\\u2013' : s.battery + '%' + (s.charging ? ' \\u26a1' : ''));
-    if (s.battery != null) bt.title = 'reported ' + every(s.batteryAge) + ' ago';
-    if (s.batteryStale) bt.className = 'stale';
-    tr.appendChild(bt);
-    var fw = el('td', 'fw', versionText(s.version));
-    if (s.version) fw.title = JSON.stringify(s.version) + ' -- reported ' + every(s.versionAge) + ' ago';
-    tr.appendChild(fw);
-    // Time since its version report, which a sensor sends only on a cold boot: so, time since boot.
-    // Not the status TLV's uptime, which on a sleeping node is just the seconds awake this cycle.
-    tr.appendChild(el('td', null, dur(s.versionAge)));
-    // Age is the honest answer to "is it still there" — a gap only shows when a LATER packet
-    // arrives to reveal it, so a station that goes silent shows up here and nowhere else.
-    var age = el('td', null, s.age == null ? '\\u2013' : s.age < 90 ? s.age + 's' : Math.round(s.age / 60) + 'm');
-    if (s.age != null && s.age > 300) age.className = 'stale';
-    tr.appendChild(age);
+    var tr = document.createElement('tr');
+    for (var c = 0; c < COLS.length; c++) tr.appendChild(COLS[c].cell(rows[n]));
     tb.appendChild(tr);
   }
 }
@@ -1575,7 +1755,7 @@ function renderGateways(rows) {
     // a gateway states its uptime; for a relay, time since its version report, which it sends on boot
     tr.appendChild(el('td', null, r.role === 'gateway' ? dur(r.uptime) : dur(r.versionAge)));
     var age = el('td', null, dur(r.age));
-    if (r.age != null && r.age > 300) age.className = 'stale';
+    if (r.age != null && r.age > (r.staleAfter || 300)) age.className = 'stale';
     tr.appendChild(age);
     tb.appendChild(tr);
   }
@@ -1966,7 +2146,7 @@ server.listen(PORT, BIND, () => {
     );
     for (const id of known) {
         const s = STATIONS[id];
-        console.log(`  station ${id}  ${s.name || '(unnamed)'}${s.distance != null ? `  ${Math.round(s.distance)} m` : ''}`);
+        console.log(`  station ${id}  ${s.name || '(unnamed)'}${s.distance != null ? `  ${Math.round(s.distance)} m` : ''}${s.state ? `  (${s.state})` : ''}`);
     }
     if (!known.length) console.log('  station (none configured: packets still shown, without names or distances)');
     for (const d of Object.values(DECODERS)) console.log(`  decoder ${d.name}  ${d.file}`);

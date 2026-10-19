@@ -13,7 +13,7 @@ IOTDATA_CONFIG := $(firstword $(wildcard $(IOTDATA_SRC_EXAMPLE)/include/iotdata_
 
 PLATFORM = esp32c3
 NAME     = simulator
-VERSION  = 0.9.9
+VERSION  = 0.9.11
 
 ##
 

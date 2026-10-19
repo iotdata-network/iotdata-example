@@ -95,7 +95,8 @@ static ctrl_state_t *g_ctrl = NULL;
  *
  * "type" is the KIND of message -- not whether anyone asked for it, which the gateway does not
  * always know (see the topic note in iotdata_node_control.h):
- *   node   a node TLV report          (+ "tlv", "data")   -- see node_publish_from
+ *   node   a node TLV report          (+ "tlv", "data")   -- see node_publish_from; a CONFIG's
+ *          "data" is {"rows":[{"id","type","value"}]}, the shape conf-set takes
  *   diag   diagnostic output          (+ "source", and "text" or "index"/"record")
  *   error  the request was not usable (+ "text")
  * and "station" is always the node the message is from, which for these is this gateway.

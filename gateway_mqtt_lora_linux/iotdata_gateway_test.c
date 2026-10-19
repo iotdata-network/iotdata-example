@@ -396,6 +396,104 @@ static bool test_mesh_tick_beacon_cadence(void) {
     return true;
 }
 
+/* THE STAND-DOWN THAT DOES NOT DEPEND ON THE RADIO: a lower-id gateway's ddup claim, which arrives
+   over IP well inside the slot -- where its ACK, on air, lands just after it. */
+static uint16_t t_claimed_station, t_claimed_sequence;
+static bool test_claimed_handler(void *ctx, uint16_t station, uint16_t sequence) {
+    (void)ctx;
+    return station == t_claimed_station && sequence == t_claimed_sequence;
+}
+
+static bool test_mesh_ack_direct_peer_claim(void) {
+    reset_test_helpers();
+    mesh_state_t ms;
+    memset(&ms, 0, sizeof(ms));
+    ms.pool = &t_pool;
+    ms.packet_handler = test_packet_handler;
+    ms.claimed_handler = test_claimed_handler;
+    ms.enabled = true;
+    ms.ack_direct = true;
+    ms.beacon_interval_s = 3600; /* a beacon primed long ago, so none lands in the counts */
+    ms.beacon_last_ms = 1u;
+    iotdata_node_init(&t_inode, 0x0002, NULL, 0u); /* station 002: slot 1, so it holds */
+    ms.inode = &t_inode;
+
+    t_claimed_station = 0x0DD;
+    t_claimed_sequence = 20;
+    mesh_ack_direct(&ms, 0x0DD, 20, 1000u);
+    mesh_ack_direct(&ms, 0x0DD, 21, 1000u);
+    mesh_tick(&ms, 1200u);
+    ASSERT_EQ_INT(packet_handler_calls, 1); /* 20 was claimed by a lower-id peer: only 21 goes */
+    iotdata_mesh_ack_t a;
+    ASSERT(iotdata_mesh_unpack_ack(captured_packets[0], captured_lengths[0], &a));
+    ASSERT_EQ_INT(a.origin_sequence, 21);
+    ASSERT_EQ_INT(ms.stat_acks_direct_yielded, 1u);
+    ASSERT_EQ_INT(ms.stat_acks_direct, 1u);
+    return true;
+}
+
+/* DIRECT ACKS: slot 0 answers at once; a later slot holds the ACK, wakes the read loop for it, sends
+   when due -- and stands down when another gateway's ACK for the same frame arrives first. */
+static bool test_mesh_ack_direct_slots(void) {
+    reset_test_helpers();
+    mesh_state_t ms;
+    memset(&ms, 0, sizeof(ms));
+    ms.pool = &t_pool;
+    ms.packet_handler = test_packet_handler;
+    ms.enabled = true;
+    ms.ack_direct = true;
+    ms.ack_direct_slot = 0;      /* from the station id */
+    ms.beacon_interval_s = 3600; /* and a beacon primed long ago, so none lands in the counts */
+    ms.beacon_last_ms = 1u;
+
+    iotdata_node_init(&t_inode, 0x0001, NULL, 0u); /* station 001: slot 0 */
+    ms.inode = &t_inode;
+    mesh_ack_direct(&ms, 0x0DD, 7, 1000u);
+    ASSERT_EQ_INT(packet_handler_calls, 1); /* answered at once */
+    iotdata_mesh_ack_t a;
+    ASSERT(iotdata_mesh_unpack_ack(captured_packets[0], captured_lengths[0], &a));
+    ASSERT_EQ_INT(a.origin_station, 0x0DD);
+    ASSERT_EQ_INT(a.origin_sequence, 7);
+    ASSERT_EQ_INT(ms.stat_acks_direct, 1u);
+
+    iotdata_node_init(&t_inode, 0x0002, NULL, 0u); /* station 002: slot 1, 200ms */
+    mesh_ack_direct(&ms, 0x0DD, 8, 2000u);
+    ASSERT_EQ_INT(packet_handler_calls, 1);                          /* held, not sent */
+    ASSERT_EQ_INT(mesh_ack_direct_wait_ms(&ms, 2000u, 5000u), 200u); /* the read loop wakes for it */
+    ASSERT_EQ_INT(mesh_ack_direct_wait_ms(&ms, 2150u, 5000u), 50u);
+    mesh_tick(&ms, 2150u);
+    ASSERT_EQ_INT(packet_handler_calls, 1); /* not yet */
+    mesh_tick(&ms, 2200u);
+    ASSERT_EQ_INT(packet_handler_calls, 2); /* its slot */
+    ASSERT(iotdata_mesh_unpack_ack(captured_packets[1], captured_lengths[1], &a));
+    ASSERT_EQ_INT(a.origin_sequence, 8);
+    ASSERT_EQ_INT(mesh_ack_direct_wait_ms(&ms, 2200u, 5000u), 5000u); /* nothing held: the usual wait */
+
+    mesh_ack_direct(&ms, 0x0DD, 9, 3000u); /* held again -- and gateway 001's ACK for it arrives first */
+    uint8_t other[IOTDATA_MESH_ACK_SIZE];
+    const int olen = iotdata_mesh_pack_ack(other, (int)sizeof(other), &(const iotdata_mesh_ack_t){ .sender_station = 0x001, .sender_seq = 5, .origin_station = 0x0DD, .origin_sequence = 9 });
+    ASSERT(mesh_receive_ack(&ms, other, olen));
+    ASSERT_EQ_INT(ms.stat_acks_direct_yielded, 1u);
+    mesh_tick(&ms, 3300u);
+    ASSERT_EQ_INT(packet_handler_calls, 2); /* stood down: never sent */
+
+    mesh_ack_direct(&ms, 0x0DD, 12, 3500u); /* held -- and then a relay's FORWARD of it arrives, and is ACKed */
+    ASSERT(mesh_transmit_ack(&ms, 0x0DD, 12));
+    ASSERT_EQ_INT(packet_handler_calls, 3);
+    mesh_tick(&ms, 3800u);
+    ASSERT_EQ_INT(packet_handler_calls, 3); /* that ACK was the one owed: not sent twice */
+
+    ms.ack_direct_slot = 1; /* an explicit slot beats the station id: 1 is at once */
+    mesh_ack_direct(&ms, 0x0DD, 10, 4000u);
+    ASSERT_EQ_INT(packet_handler_calls, 4);
+
+    ms.ack_direct = false; /* and switched off, nothing */
+    mesh_ack_direct(&ms, 0x0DD, 11, 5000u);
+    mesh_tick(&ms, 6000u);
+    ASSERT_EQ_INT(packet_handler_calls, 4);
+    return true;
+}
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // mesh_transmit_ack
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -1093,6 +1191,31 @@ static bool test_ddup_hold_ms_effective(void) {
     ds.claim_latency_max_ms = 5000; /* huge -> clamped to the ceiling */
     ASSERT_EQ_INT(ddup_hold_ms_effective(&ds, now_ms), 1000u);
     pthread_mutex_destroy(&ds.mutex);
+    return true;
+}
+
+/* THE CLAIMS THE MESH ASKS ABOUT: noted on the recv path (under the lock, as the election's drop is),
+   found by ddup_claimed() from the main loop, and forgotten once the ring has moved on. A disabled
+   ddup has no lock to take, and no peer: nothing is ever claimed. */
+static bool test_ddup_claims(void) {
+    ddup_state_t ds;
+    iotdata_mesh_dedup_ring_t ring;
+    td_ddup_init(&ds, &ring, 0x002);
+    ASSERT(!ddup_claimed(&ds, 0x0042, 7));
+    pthread_mutex_lock(&ds.mutex);
+    ddup_claim_note(&ds, 0x0042, 7);
+    pthread_mutex_unlock(&ds.mutex);
+    ASSERT(ddup_claimed(&ds, 0x0042, 7));
+    ASSERT(!ddup_claimed(&ds, 0x0042, 8)); /* the frame, not the station */
+    pthread_mutex_lock(&ds.mutex);
+    for (int s = 100; s < 100 + DDUP_CLAIMS_MAX; s++)
+        ddup_claim_note(&ds, 0x0042, (uint16_t)s);
+    pthread_mutex_unlock(&ds.mutex);
+    ASSERT(!ddup_claimed(&ds, 0x0042, 7)); /* moved on: its slot is long past by now */
+    ASSERT(ddup_claimed(&ds, 0x0042, (uint16_t)(100 + DDUP_CLAIMS_MAX - 1)));
+    pthread_mutex_destroy(&ds.mutex);
+    ds.enabled = false;
+    ASSERT(!ddup_claimed(&ds, 0x0042, (uint16_t)(100 + DDUP_CLAIMS_MAX - 1)));
     return true;
 }
 
@@ -2138,6 +2261,30 @@ static bool test_mesh_node_table_walks_peers_densely(void) {
     ASSERT(exec_node_table_row(IOTDATA_NODE_STATUS_STATIONS_ENTRY, 1, row));
     ASSERT_EQ_INT(iotdata_node_entry_get_u16(row, 0), 0x0502);
     g_exec = NULL;
+    return true;
+}
+
+/* A CONFIG report is config records, and renders as conf-set's own {id,type,value} rows -- the
+   key/length/value walk misread a whole table as nonsense, and a written reply as nothing at all.
+   Built the way a relay encodes it: [id<<4|type], then the value big-endian. */
+static bool test_config_report_json(void) {
+    const uint8_t cfg[] = {
+        0x05, 0x85, 0x00, 0x00, 0x01, 0xF4, /* 0x058 u32 = 500: 5BF's reply, as it arrived */
+        0x04, 0x00, 0x01,                   /* 0x040 bool = true */
+        0x0A, 0x14, 0xFF, 0xFB,             /* 0x0A1 i16 = -5 */
+        0x01, 0x2A, 0x03, 'a',  'b',  'c',  /* 0x012 string = "abc" */
+        0x05, 0x95, 0x00, 0x00,             /* 0x059 u32, truncated: dropped, not misread */
+    };
+    cJSON *const root = cJSON_CreateObject();
+    ASSERT(root != NULL);
+    cJSON *const data = cJSON_AddObjectToObject(root, "data");
+    node_json_kvr(NULL, data, IOTDATA_NODE_TLV_CONFIG, cfg, sizeof(cfg));
+    char *const out = cJSON_PrintUnformatted(root);
+    ASSERT(out != NULL);
+    ASSERT(strcmp(out, "{\"data\":{\"rows\":[{\"id\":88,\"type\":5,\"value\":500},{\"id\":64,\"type\":0,\"value\":true},"
+                       "{\"id\":161,\"type\":4,\"value\":-5},{\"id\":18,\"type\":10,\"value\":\"abc\"}]}}") == 0);
+    free(out);
+    cJSON_Delete(root);
     return true;
 }
 
@@ -3440,6 +3587,8 @@ int main(void) {
     RUN_TEST(mesh_transmit_beacon_fail);
     RUN_TEST(mesh_beacon_generation_wraps);
     RUN_TEST(mesh_tick_beacon_cadence);
+    RUN_TEST(mesh_ack_direct_slots);
+    RUN_TEST(mesh_ack_direct_peer_claim);
     RUN_TEST(mesh_transmit_ack_ok);
     RUN_TEST(mesh_receive_forward_new);
     RUN_TEST(mesh_receive_forward_too_short);
@@ -3475,6 +3624,7 @@ int main(void) {
     RUN_TEST(ddup_admit_not_lowest_holds);
     RUN_TEST(ddup_admit_static_peer_holds);
     RUN_TEST(ddup_hold_ms_effective);
+    RUN_TEST(ddup_claims);
     RUN_TEST(ddup_hold_early_drop);
     RUN_TEST(ddup_hold_release_at_deadline);
     RUN_TEST(dedup_ring_overflow);
@@ -3528,6 +3678,7 @@ int main(void) {
     printf("\n=== Gateway-as-mesh-node Tests ===\n\n");
 
     RUN_TEST(mesh_node_gateway_status_is_root);
+    RUN_TEST(config_report_json);
     RUN_TEST(table_report_json);
     RUN_TEST(text_values_still_render_as_strings);
     RUN_TEST(version_report_as_the_monitor_sees_it);

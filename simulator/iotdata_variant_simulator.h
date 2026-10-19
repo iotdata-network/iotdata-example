@@ -98,8 +98,8 @@ typedef struct {
 
 /* Initialise simulator with RNG seed.  Randomises sensor allocation
  * and initial readings.  time_now_ms is the starting wallclock.
- * station_base offsets the station IDs (station_id = station_base + index + 1),
- * so multiple boards/instances can occupy disjoint ID ranges; pass 0 for 1-based. */
+ * station_base offsets the station IDs (station_id = station_base + index, wrapping within the assignable range),
+ * so multiple boards/instances can occupy disjoint ID ranges; pass 1 for 1-based (0 wraps to the top). */
 void iotsim_init(iotsim_t *sim, uint32_t seed, uint32_t time_now_ms, uint16_t station_base);
 
 /* Poll for next ready packet.  Returns true if a packet was generated.

@@ -9,3 +9,6 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# 80MHz, not 160: a cycle is spent waiting -- on I2C conversions, the battery settle, the radio --
+# and nothing in it needs the faster clock, which draws roughly a quarter more while awake.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
