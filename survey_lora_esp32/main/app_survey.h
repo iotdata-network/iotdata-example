@@ -257,6 +257,9 @@ static void survey_begin(survey_t *const s) {
     if (survey_directive_send(s, true)) {
         s->active = true;
         ESP_LOGI(__tag_survey, "STARTED directive=%03" PRIX16 " watching station=%03" PRIX16 " (%um lifetime, %us batches)", s->directive_id, iotdata_node_station(_survey_cfg->node), (unsigned)SURVEY_DURATION_M, (unsigned)SURVEY_BATCH_S);
+        /* the first point is where the walk starts, and the report cadence runs from here */
+        s->auto_last_ms = s->trace_last_ms = hw_time_ms();
+        survey_report(s, "survey start");
     } else
         ESP_LOGW(__tag_survey, "could not air the directive -- not started");
 }
@@ -310,7 +313,7 @@ static void survey_poll(survey_t *const s) {
         } else if (ev.type == BUTTON_EVENT_LONG_PRESS) {
             s->auto_report = !s->auto_report;
             s->auto_last_ms = hw_time_ms();
-            ESP_LOGI(__tag_survey, "automatic reporting and trace %s", s->auto_report ? "ON" : "OFF -- relays now have nothing of ours to hear");
+            ESP_LOGI(__tag_survey, "automatic reporting and trace %s", s->auto_report ? "ON" : s->active ? "OFF -- the survey keeps reporting until it stops" : "OFF -- relays now have nothing of ours to hear");
             s->trace_last_ms = hw_time_ms();
             if (s->auto_report)
                 survey_report(s, "auto start");
@@ -328,11 +331,15 @@ static void survey_poll(survey_t *const s) {
     }
     survey_led_tick(s);
 
-    if (s->auto_report && (hw_time_ms() - s->auto_last_ms) >= SURVEY_AUTO_MS) {
+    /* A SURVEY REPORTS TOO. The directive only asks the relays to listen; without our packets to hear
+       they batch up nothing, so a running survey keeps the reports going whether or not the long press
+       turned them on. Each report is also the position the relays' observations are joined to. */
+    const bool reporting = s->auto_report || s->active;
+    if (reporting && (hw_time_ms() - s->auto_last_ms) >= SURVEY_AUTO_MS) {
         s->auto_last_ms = hw_time_ms();
-        survey_report(s, "auto");
+        survey_report(s, s->active ? "survey" : "auto");
     }
-    if (s->auto_report && (hw_time_ms() - s->trace_last_ms) >= SURVEY_TRACE_MS) {
+    if (reporting && (hw_time_ms() - s->trace_last_ms) >= SURVEY_TRACE_MS) {
         s->trace_last_ms = hw_time_ms();
         survey_trace(s, "periodic");
     }

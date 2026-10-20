@@ -690,6 +690,88 @@ static bool test_process_forward_disabled_no_ack(void) {
     return true;
 }
 
+/* A real reading inside the FORWARD this time, with the dedup wired as production wires it: the mesh
+   handler is the ddup ring (ddup_insert_handler). That pairing is what the fixtures above could not
+   see -- the handler put the reading in the ring, ddup_admit() then found it there and rejected it,
+   and a reading that reached the gateway only through a relay was ACKed and never published. A
+   publish attempt shows in the station's packet_count, which is counted before the MQTT send. */
+static int fwd_test_reading(uint8_t *buf, int size, uint16_t station, uint16_t sequence) {
+    const uint8_t blob[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02 };
+    uint8_t inner[TEST_FRAME_MAX];
+    iotdata_encoder_t enc;
+    size_t len = 0;
+    if (iotdata_encode_begin(&enc, inner, sizeof(inner), 0 /* weather_station, as TSA uses */, station, sequence) != IOTDATA_OK || iotdata_encode_tlv(&enc, 0x20u, blob, (uint8_t)sizeof(blob)) != IOTDATA_OK ||
+        iotdata_encode_end(&enc, &len) != IOTDATA_OK)
+        return -1;
+    return iotdata_mesh_pack_forward(buf, size, 0x031B /* the relay */, 33465, 7, inner, (int)len);
+}
+
+static void fwd_test_state_real(process_state_t *ps, mesh_state_t *ms, stat_state_t *ss) {
+    fwd_test_state(ps, ms, ss, true, true);
+    ms->dedup_handler = ddup_insert_handler;
+    ms->dedup_handler_ctx = ps;
+}
+
+static uint32_t fwd_test_published(stat_state_t *ss, uint16_t station) {
+    return stat_station_find_or_create(ss, station, hw_clock())->packet_count;
+}
+
+static bool test_process_forward_relayed_reading_published(void) {
+    reset_test_helpers();
+    static process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss; /* ~300KB: never on the stack */
+    fwd_test_state_real(&ps, &ms, &ss);
+    uint8_t fwd[TEST_FRAME_MAX];
+    const int n = fwd_test_reading(fwd, (int)sizeof(fwd), 0x0973, 30067);
+    ASSERT(n > 0);
+
+    process_mesh_packet(&ps, fwd, n, 15, 0x031B, 33465, "test", 0, hw_time_ms());
+    ASSERT_EQ_INT(fwd_test_published(&ss, 0x0973), 1u); /* the only copy there is: it goes out */
+    ASSERT_EQ_INT(ms.stat_forwards_unwrapped, 1u);
+    ASSERT_EQ_INT(ms.stat_duplicates, 0u);
+    ASSERT_EQ_INT(ms.stat_acks_tx, 1u);
+    return true;
+}
+
+static bool test_process_forward_relayed_reading_once(void) {
+    reset_test_helpers();
+    static process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss; /* ~300KB: never on the stack */
+    fwd_test_state_real(&ps, &ms, &ss);
+    uint8_t fwd[TEST_FRAME_MAX];
+    const int n = fwd_test_reading(fwd, (int)sizeof(fwd), 0x0973, 30068);
+    ASSERT(n > 0);
+
+    /* the relay retries because our ACK went missing: answered both times, published once */
+    process_mesh_packet(&ps, fwd, n, 15, 0x031B, 33534, "test", 0, hw_time_ms());
+    process_mesh_packet(&ps, fwd, n, 15, 0x031B, 33534, "test", 0, hw_time_ms());
+    ASSERT_EQ_INT(fwd_test_published(&ss, 0x0973), 1u);
+    ASSERT_EQ_INT(ms.stat_duplicates, 1u);
+    ASSERT_EQ_INT(ms.stat_acks_tx, 2u);
+    return true;
+}
+
+static bool test_process_forward_after_direct_not_republished(void) {
+    reset_test_helpers();
+    static process_state_t ps;
+    mesh_state_t ms;
+    static stat_state_t ss; /* ~300KB: never on the stack */
+    fwd_test_state_real(&ps, &ms, &ss);
+    uint8_t fwd[TEST_FRAME_MAX];
+    const int n = fwd_test_reading(fwd, (int)sizeof(fwd), 0x0973, 30069);
+    ASSERT(n > 0);
+
+    /* heard directly first: the direct path's admit is what puts it in the ring, and it published */
+    ASSERT(ddup_admit(&fwd_test_ddup, 0x0973, 30069) == DDUP_PUBLISH);
+    process_mesh_packet(&ps, fwd, n, 15, 0x031B, 33600, "test", 0, hw_time_ms());
+    ASSERT_EQ_INT(fwd_test_published(&ss, 0x0973), 0u); /* not again via the relay */
+    ASSERT_EQ_INT(ms.stat_duplicates, 1u);
+    ASSERT_EQ_INT(ms.stat_acks_tx, 1u); /* but still answered, so the relay stops */
+    return true;
+}
+
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // mesh_receive_beacon / route_error
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -3525,6 +3607,9 @@ static bool test_forwarded_report_duplicate_not_republished(void) {
     uint8_t fwd[IOTDATA_MESH_FORWARD_HDR_SIZE + TEST_FRAME_MAX];
     const int fwd_len = iotdata_mesh_pack_forward(fwd, sizeof(fwd), 0x0F1B, 5, 7, inner, inner_len);
 
+    /* a duplicate the way production has one: already in the ring, which ddup_admit() -- the only
+       dedup a packet inside a FORWARD gets, unless it is a mesh frame -- consults */
+    ASSERT(ddup_admit(&fwd_test_ddup, 0x0F1B, 5) == DDUP_PUBLISH);
     process_mesh_packet(&ps, fwd, fwd_len, 15, 0x05BF, 32, "test", 0, hw_time_ms());
     ASSERT_EQ_INT(ms.stat_duplicates, 1u);
     ASSERT_EQ_INT(fwd_test_node.stat_rx, 0u);
@@ -3596,6 +3681,9 @@ int main(void) {
     RUN_TEST(process_forward_duplicate_still_acks);
     RUN_TEST(process_forward_no_dedup_handler);
     RUN_TEST(process_forward_disabled_no_ack);
+    RUN_TEST(process_forward_relayed_reading_published);
+    RUN_TEST(process_forward_relayed_reading_once);
+    RUN_TEST(process_forward_after_direct_not_republished);
     RUN_TEST(mesh_receive_beacon_rx);
     RUN_TEST(mesh_receive_route_error_rx);
     RUN_TEST(mesh_seq_increments);

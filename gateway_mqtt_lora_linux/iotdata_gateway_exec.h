@@ -23,8 +23,9 @@ bool ddup_claimed_handler(void *ctx, uint16_t station, uint16_t sequence) {
 void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, int packet_length, uint8_t variant, uint16_t station, uint16_t sequence, const char *topic_prefix, const char *via, int packet_rssi_dbm);
 
 /*
- * THE SINGLE ADMIT POINT for every sensor reading, direct or unwrapped from a mesh FORWARD. One
- * function, so the two paths cannot disagree about what has already been published.
+ * THE SINGLE ADMIT POINT for every sensor reading, direct or unwrapped from a mesh FORWARD: the
+ * caller asks ddup_admit() for the verdict and this acts on it. One verdict, one place acting on it,
+ * so the two paths cannot disagree about what has already been published.
  *
  * ddup_admit() returns one of three answers, and the third is the one that is new here:
  *   PUBLISH  nobody is contesting this -- ddup off, no reachable peers, or we are the lowest id and
@@ -44,9 +45,16 @@ void process_sensor_packet(process_state_t *st, const uint8_t *packet_buffer, in
  * went out twice to the same topic, "via direct" then "via mesh": one path recorded the reception
  * and the other looked it up, missed, and published again. They cannot disagree now, because they
  * ask the same function.
+ *
+ * AND THEY ASK IT ONCE. ddup_admit() IS the ring, so nothing may check the ring for the same reading
+ * before it does. The forward path once asked the mesh dedup handler first -- the same ring, under
+ * another name -- and ddup_admit() then found that entry and rejected the reading as a duplicate of
+ * itself: every reading that reached the gateways only through a relay was acknowledged, claimed
+ * to the other gateway (which dropped its own copy for it), and never published.
  */
-static void process_admit_sensor(process_state_t *st, const uint8_t *buf, int len, uint8_t variant, uint16_t station, uint16_t sequence, const char *topic_prefix, const char *via, int packet_rssi_dbm) {
-    switch (ddup_admit(st->state_ddup, station, sequence)) {
+static void process_admit_sensor(process_state_t *st, const ddup_verdict_t verdict, const uint8_t *buf, int len, uint8_t variant, uint16_t station, uint16_t sequence, const char *topic_prefix, const char *via,
+                                 int packet_rssi_dbm) {
+    switch (verdict) {
     case DDUP_PUBLISH:
         process_sensor_packet(st, buf, len, variant, station, sequence, topic_prefix, via, packet_rssi_dbm);
         break;
@@ -151,7 +159,16 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
     case IOTDATA_MESH_CTRL_FORWARD: {
         iotdata_mesh_forward_t fw;
         if (mesh_receive_forward_r(st->state_mesh, packet_buffer, packet_length, &fw)) {
-            const bool is_new = !st->state_mesh->dedup_handler || st->state_mesh->dedup_handler(st->state_mesh->dedup_handler_ctx, fw.origin_station, fw.origin_sequence);
+            uint8_t inner_variant = 0;
+            uint16_t inner_station = 0, inner_sequence = 0;
+            const bool inner_ok = (iotdata_peek(fw.inner_packet, (size_t)fw.inner_len, &inner_variant, &inner_station, &inner_sequence) == IOTDATA_OK);
+            /* A reading inside is admitted exactly as a direct one is, by ddup_admit() and nothing
+               before it (see process_admit_sensor). A mesh frame inside has no dedup but the mesh
+               handler's, so it still asks that. */
+            const bool reading = inner_ok && inner_variant != IOTDATA_MESH_VARIANT;
+            const ddup_verdict_t verdict = reading ? ddup_admit(st->state_ddup, inner_station, inner_sequence) : DDUP_REJECT;
+            const bool is_new = reading ? (verdict != DDUP_REJECT)
+                                        : (!st->state_mesh->dedup_handler || st->state_mesh->dedup_handler(st->state_mesh->dedup_handler_ctx, fw.origin_station, fw.origin_sequence));
             if (is_new)
                 st->state_mesh->stat_forwards_unwrapped++;
             else {
@@ -162,9 +179,6 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
             if (st->state_mesh->enabled)
                 mesh_transmit_ack(st->state_mesh, fw.origin_station, fw.origin_sequence);
             netw_note_forward(&st->network, fw.sender_station, now_ms); /* the relay's forwarding load */
-            uint8_t inner_variant = 0;
-            uint16_t inner_station = 0, inner_sequence = 0;
-            const bool inner_ok = (iotdata_peek(fw.inner_packet, (size_t)fw.inner_len, &inner_variant, &inner_station, &inner_sequence) == IOTDATA_OK);
             if (inner_ok) /* no rssi: that hop is relay->gateway, not sensor->gateway */
                 netw_note_receive(&st->network, fw.origin_station, inner_variant, fw.origin_sequence, NETW_PATH_MESH, is_new, 0, fw.sender_station, now_ms);
             if (is_new) {
@@ -185,7 +199,7 @@ void process_mesh_packet(process_state_t *st, const uint8_t *packet_buffer, int 
                        two hops out can only ever be heard this way, so without this its reports are
                        handed to the telemetry path alone and never reach the node topic. Addressed
                        by the ORIGIN, not the relay that carried it. */
-                    process_admit_sensor(st, fw.inner_packet, fw.inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi_dbm);
+                    process_admit_sensor(st, verdict, fw.inner_packet, fw.inner_len, inner_variant, inner_station, inner_sequence, topic_prefix, "mesh", packet_rssi_dbm);
                     (void)node_on_packet(st->state_node, fw.inner_packet, (size_t)fw.inner_len, fw.origin_station);
                 } else {
                     PRINTF_ERROR("exec: mesh FORWARD inner packet peek failed (len=%d)\n", fw.inner_len);
@@ -415,10 +429,7 @@ void process_packet(process_state_t *st, const uint32_t now_ms) {
                     if (is_new && !iotdata_node_is_down(sequence))
                         mesh_ack_direct(st->state_mesh, station, sequence, hw_time_ms());
                     netw_note_receive(&st->network, station, variant, sequence, NETW_PATH_DIRECT, is_new, (packet_rssi_dbm != LORA_RSSI_NONE) ? packet_rssi_dbm : 0, 0, now_ms);
-                    if (verdict == DDUP_PUBLISH)
-                        process_sensor_packet(st, rxbuf, packet_length, variant, station, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm);
-                    else if (verdict == DDUP_HOLD && !ddup_hold_add(st->state_ddup, rxbuf, packet_length, variant, station, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm))
-                        process_sensor_packet(st, rxbuf, packet_length, variant, station, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm); /* queue full -> publish un-held */
+                    process_admit_sensor(st, verdict, rxbuf, packet_length, variant, station, sequence, iotdata_node_config_string(MQTT_TOPIC_PREFIX), "direct", packet_rssi_dbm);
                 } else {
                     stat_on_link_rx_drop(st->state_stat);
                     PRINTF_ERROR("exec: undecodable frame from station=%03" PRIX16 ", sequence=%" PRIu16 " (%d bytes): %s -- dropped before dedup, so a relayed copy can still be used\n", station, sequence, packet_length,

@@ -158,17 +158,17 @@ const REF =
           }
         : null;
 
-// station-<ID>-name / -latitude / -longitude / -altitude
+// station-<ID>-name / -latitude / -longitude / -altitude / -decoder / -state / -host
 const STATIONS = {};
 // Topics carry station ids in hex, payloads in decimal; the table, the config and the page all
 // use the topic form, three digits upper-case.
 const hexId = (v) => (typeof v === 'number' ? v.toString(16) : String(v)).toUpperCase().padStart(3, '0');
 for (const key of Object.keys(cfg)) {
-    const m = /^station-([0-9A-Fa-f]{1,8})-(name|latitude|longitude|altitude|decoder|state)$/.exec(key);
+    const m = /^station-([0-9A-Fa-f]{1,8})-(name|latitude|longitude|altitude|decoder|state|host)$/.exec(key);
     if (!m) continue;
     const id = hexId(m[1]);
     STATIONS[id] = STATIONS[id] || {};
-    STATIONS[id][m[2]] = m[2] === 'name' || m[2] === 'decoder' || m[2] === 'state' ? cfg[key] : num(cfg[key], null);
+    STATIONS[id][m[2]] = ['name', 'decoder', 'state', 'host'].includes(m[2]) ? cfg[key] : num(cfg[key], null);
 }
 
 // ignore-unspecified: only the stations named above are kept, live and on restore, so one that
@@ -490,6 +490,7 @@ function snapshot() {
                 lon: meta.longitude ?? null,
                 distance: meta.distance ?? null,
                 state: meta.state || null, /* free text from station-<ID>-state: deployed, broken, ... */
+                host: meta.host || null, /* station-<ID>-host: the machine it hangs off, for an ssh:// link */
                 count: s.count,
                 lost: s.lost,
                 dups: s.dups,
@@ -608,6 +609,7 @@ function gatewayView() {
     const now = Date.now();
     const since = (part) => (part ? Math.round((now - part.t) / 1000) : null);
     const name = (id) => (STATIONS[id] || {}).name || null;
+    const host = (id) => (STATIONS[id] || {}).host || null;
     const rows = [];
     for (const g of [...gateways.values()].sort((a, b) => a.id.localeCompare(b.id))) {
         const gw = (g.gw && g.gw.body) || {};
@@ -618,6 +620,7 @@ function gatewayView() {
             role: 'gateway',
             id: g.id,
             name: name(g.id),
+            host: host(g.id),
             version: gw.version ?? null,
             uptime: gw.uptime_secs != null ? gw.uptime_secs + since(g.gw) : null,
             age: ages.length ? Math.min(...ages) : since(g.ddup),
@@ -647,6 +650,7 @@ function gatewayView() {
                 role: 'relay',
                 id,
                 name: name(id),
+                host: host(id),
                 gateway: g.id,
                 age: r.age_secs != null ? r.age_secs + netAge : null,
                 staleAfter: RELAY_STALE_S,
@@ -676,6 +680,7 @@ function gatewayView() {
             role: 'survey',
             id,
             name: name(id),
+            host: host(id),
             age: ages.length ? Math.min(...ages) : null,
             software: ver ? ver.data.software || null : null,
             versionAge: since(ver),
@@ -1196,7 +1201,7 @@ ${FAVICON}
   td.who { font-family:inherit; }
   td.who b { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:650; }
   td.who span { color:var(--dim); }
-  td.who .nm { margin-left:6px; }
+  td.who .nm { margin-left:6px; color:var(--dim); }
   td.who a { color:inherit; text-decoration:underline; text-decoration-thickness:1px;
              text-underline-offset:2px; }
   .stale { color:var(--weak); font-weight:600; }
@@ -1253,10 +1258,10 @@ ${FAVICON}
   #sum td.nm { font-family:inherit; color:var(--dim); }
   #sum td.rd span { color:var(--dim); }
   #sum td.id, #sum td.nm, #sum td.state, #sum td.n { width:1%; white-space:nowrap; }
-  #sum td.nm span { display:inline-block; max-width:190px; overflow:hidden; text-overflow:ellipsis;
-                    white-space:nowrap; vertical-align:bottom; }
-  #sum td.n a { color:inherit; text-decoration:underline; text-decoration-thickness:1px;
-                text-underline-offset:2px; }
+  #sum td.nm span, #sum td.nm a { display:inline-block; max-width:190px; overflow:hidden; text-overflow:ellipsis;
+                                  white-space:nowrap; vertical-align:bottom; }
+  #sum td.n a, #sum td.nm a { color:inherit; text-decoration:underline; text-decoration-thickness:1px;
+                              text-underline-offset:2px; }
   /* software | up | last close both tables, and get the same widths in each so the two line up */
   #gw th:nth-last-child(3), #gw td:nth-last-child(3), #sum th:nth-last-child(3), #sum td:nth-last-child(3) { width:210px; min-width:210px; max-width:210px; }
   #gw th:nth-last-child(-n+2), #gw td:nth-last-child(-n+2), #sum th:nth-last-child(-n+2), #sum td:nth-last-child(-n+2) { width:52px; min-width:52px; max-width:52px; }
@@ -1482,11 +1487,26 @@ function versionText(v) {
 }
 
 // id, then name, then whatever else, on ONE line: the id stands out, the text after it is all dim.
-function whoCell(id, name) {
+function whoCell(id, name, host) {
   var who = el('td', 'who');
   who.appendChild(el('b', null, id));
-  if (name) who.appendChild(el('span', 'nm', name));
+  if (name || host) {
+    var nm = nameEl(name, host);
+    nm.className = 'nm';
+    who.appendChild(nm);
+  }
   return who;
+}
+
+// A name that is also the way in: with station-<ID>-host it is an ssh:// link, for whatever handler
+// the viewing machine has for that (PuTTY, say). Same colour as a plain name, just underlined. Not
+// on a kiosk: nobody there is going to open a terminal.
+function nameEl(name, host) {
+  if (!host || document.documentElement.hasAttribute('data-kiosk')) return el('span', null, name);
+  var a = document.createElement('a');
+  a.href = host.indexOf('ssh://') === 0 ? host : 'ssh://' + host;
+  a.textContent = name || host;
+  return a;
 }
 
 // The station table, a column at a time: its heading, what it sorts on, and its cell. A sort key of
@@ -1498,9 +1518,9 @@ var COLS = [
   { h: 'name', cls: 'nm', key: function (s) { return s.name ? s.name.toLowerCase() : null; },
     cell: function (s) {
       var td = el('td', 'nm');
-      if (s.name) {
-        var nm = el('span', null, s.name);
-        nm.title = s.name; // a long one is cut short
+      if (s.name || s.host) {
+        var nm = nameEl(s.name, s.host);
+        nm.title = s.name || s.host; // a long one is cut short
         td.appendChild(nm);
       }
       return td;
@@ -1738,7 +1758,7 @@ function renderGateways(rows) {
       tx = el('td', null, r.forwards == null ? '\u2013' : String(r.forwards));
     }
 
-    var who = whoCell(r.id, r.name);
+    var who = whoCell(r.id, r.name, r.host);
     if (sub.length) who.appendChild(el('span', null, ' \u00b7 ' + sub.join(' \u00b7 ')));
     tr.appendChild(who);
 
@@ -2146,7 +2166,7 @@ server.listen(PORT, BIND, () => {
     );
     for (const id of known) {
         const s = STATIONS[id];
-        console.log(`  station ${id}  ${s.name || '(unnamed)'}${s.distance != null ? `  ${Math.round(s.distance)} m` : ''}${s.state ? `  (${s.state})` : ''}`);
+        console.log(`  station ${id}  ${s.name || '(unnamed)'}${s.distance != null ? `  ${Math.round(s.distance)} m` : ''}${s.state ? `  (${s.state})` : ''}${s.host ? `  ssh://${s.host}` : ''}`);
     }
     if (!known.length) console.log('  station (none configured: packets still shown, without names or distances)');
     for (const d of Object.values(DECODERS)) console.log(`  decoder ${d.name}  ${d.file}`);
