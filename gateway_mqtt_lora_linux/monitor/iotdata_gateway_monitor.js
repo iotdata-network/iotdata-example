@@ -115,6 +115,18 @@ const WINDOW = parseInt(flag('window') ?? cfg['stats-window'] ?? '20', 10);
 // out fastest — and because a packet every few seconds does not deserve a syscall each.
 const LOG_FILE = flag('log') ?? cfg['log-file'] ?? null;
 const LOG_FLUSH = parseInt(flag('log-interval') ?? cfg['log-flush-interval'] ?? '300', 10);
+// Unset keeps one file for good; daily, weekly, monthly or yearly starts a new one each period,
+// named by stamping the configured name with the period's first day (logStamp, logName).
+const LOG_ROTATE = cfg['log-rotate-period'] ?? null;
+// Which topic categories are logged (topicCategory). Variant alone by default, as before: packets,
+// in the form the table shows them. Any other is logged as received, { t, topic, body }.
+const LOG_CATEGORIES = new Set(
+    String(cfg['log-categories'] ?? 'variant')
+        .split(',')
+        .map((c) => c.trim().toLowerCase())
+        .filter(Boolean)
+);
+const GATEWAY_CATEGORIES = ['variant', 'stats', 'manage', 'ddup']; // all the gateway publishes
 
 // Where the live state is parked so a restart does not wipe the station table. /dev/shm and not
 // the SD card: this is rewritten every minute for as long as the monitor runs, and the card is
@@ -282,6 +294,7 @@ const TRACKER_KEEP = parseInt(cfg['tracker-keep'] ?? '200', 10);
 const TRACKER_SHOW = parseInt(cfg['tracker-show'] ?? '16', 10);
 const TRACKER_LOG = cfg['tracker-log-file'] ?? null;
 const TRACKER_LOG_FLUSH = parseInt(cfg['tracker-log-flush-interval'] ?? '60', 10);
+const TRACKER_LOG_ROTATE = cfg['tracker-log-rotate-period'] ?? null;
 
 // SenseCAP T1000-B, as The Things Stack renders it: the uplink carries a decoded_payload with a
 // nested messages array, each entry a {measurementId, measurementValue, type} triple. Keying on
@@ -516,7 +529,7 @@ function record(rec) {
     if (observe(rec)) rec.dup = true; // before log and push, so both carry the flag
     history.push(rec);
     while (history.length > KEEP) history.shift();
-    logAppend(rec);
+    if (LOG_CATEGORIES.has('variant')) logAppend(rec);
     send('packet', rec);
     send('stats', snapshot());
 }
@@ -610,6 +623,7 @@ function gatewayView() {
     const since = (part) => (part ? Math.round((now - part.t) / 1000) : null);
     const name = (id) => (STATIONS[id] || {}).name || null;
     const host = (id) => (STATIONS[id] || {}).host || null;
+    const state = (id) => (STATIONS[id] || {}).state || null;
     const rows = [];
     for (const g of [...gateways.values()].sort((a, b) => a.id.localeCompare(b.id))) {
         const gw = (g.gw && g.gw.body) || {};
@@ -621,6 +635,7 @@ function gatewayView() {
             id: g.id,
             name: name(g.id),
             host: host(g.id),
+            state: state(g.id),
             version: gw.version ?? null,
             uptime: gw.uptime_secs != null ? gw.uptime_secs + since(g.gw) : null,
             age: ages.length ? Math.min(...ages) : since(g.ddup),
@@ -651,6 +666,7 @@ function gatewayView() {
                 id,
                 name: name(id),
                 host: host(id),
+                state: state(id),
                 gateway: g.id,
                 age: r.age_secs != null ? r.age_secs + netAge : null,
                 staleAfter: RELAY_STALE_S,
@@ -681,6 +697,7 @@ function gatewayView() {
             id,
             name: name(id),
             host: host(id),
+            state: state(id),
             age: ages.length ? Math.min(...ages) : null,
             software: ver ? ver.data.software || null : null,
             versionAge: since(ver),
@@ -716,6 +733,14 @@ function topicKind(topic) {
     return parts.length >= 2 ? parts[parts.length - 2] : last;
 }
 
+// A topic's CATEGORY, the level after the prefix -- iotdata/stats/gateway/001 is 'stats' -- which
+// is what the log selects by. The prefix is the subscription's less its wildcard, so a deeper one
+// than iotdata still counts from the right place.
+const TOPIC_DEPTH = TOPIC.replace(/\/?#$/, '').split('/').filter(Boolean).length || 1;
+function topicCategory(topic) {
+    return String(topic).split('/')[TOPIC_DEPTH] ?? '';
+}
+
 // A sensor packet is identified by carrying a station id, which is what separates it from the
 // gateway's own stats/status publications on neighbouring topics. Matching on that rather than
 // on a topic pattern means new variants appear here without this script needing to learn them.
@@ -724,8 +749,10 @@ function handleMessage(topic, text) {
     try {
         body = JSON.parse(text);
     } catch {
+        logOther(topic, undefined, text);
         return; // not JSON: the gateway's own status publications, retained junk
     }
+    logOther(topic, body, text);
     if (!body || typeof body !== 'object') return;
     // A node's report about itself: <prefix>/manage/from/<id>. Only the version TLV is used for now.
     const tp = topic.split('/');
@@ -806,13 +833,71 @@ function handleMessage(topic, text) {
 // growing until the process is killed — this box has little to spare.
 const LOG_BUFFER_MAX = 10000;
 
+// Rotation. The stamp is the FIRST DAY of the period, in UTC, whatever the period -- the Monday
+// for weekly, the 1st for monthly, 1 January for yearly -- so one form serves them all: the files
+// sort by name into time order, and changing the period later never interleaves them.
+const LOG_ROTATE_PERIODS = ['daily', 'weekly', 'monthly', 'yearly'];
+
+function logStamp(period, t) {
+    const d = new Date(t);
+    const y = d.getUTCFullYear();
+    const m = d.getUTCMonth();
+    const first = {
+        daily: Date.UTC(y, m, d.getUTCDate()),
+        weekly: Date.UTC(y, m, d.getUTCDate() - ((d.getUTCDay() + 6) % 7)), // back to the Monday
+        monthly: Date.UTC(y, m, 1),
+        yearly: Date.UTC(y, 0, 1),
+    }[period];
+    return new Date(first).toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+// The stamp goes before the extension: branna-logs.json -> branna-logs-20261022.json.
+function logName(file, stamp) {
+    const p = path.parse(file);
+    return path.join(p.dir, `${p.name}-${stamp}${p.ext}`);
+}
+
+// Every file a log has written, oldest first, for the rebuild. Rotated, that is the unstamped
+// file if there is one -- the log from before rotation was turned on -- then the stamped ones in
+// name order, which is time order.
+function logFiles(file, period) {
+    if (!file || !period) return file ? [file] : [];
+    const p = path.parse(file);
+    const quote = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const stamped = new RegExp(`^${quote(p.name)}-\\d{8}${quote(p.ext)}$`);
+    let names = [];
+    try {
+        names = fs
+            .readdirSync(p.dir || '.')
+            .filter((n) => stamped.test(n))
+            .sort();
+    } catch {
+        // an unreadable directory leaves nothing to rebuild from, the same as a missing file
+    }
+    return [...(fs.existsSync(file) ? [file] : []), ...names.map((n) => path.join(p.dir, n))];
+}
+
 // There are two of these now — received packets, and tracker positions — with identical
 // batching, bounding and flush-on-shutdown requirements. The behaviour is written once here and
 // instantiated per file rather than copied, so a fix to one is a fix to both.
-function makeLog(file, flushSecs, label) {
+function makeLog(file, flushSecs, label, rotate) {
     const buffer = [];
     let written = 0;
     let dropped = 0;
+    const period = rotate && LOG_ROTATE_PERIODS.includes(String(rotate).toLowerCase()) ? String(rotate).toLowerCase() : null;
+
+    // The file a record appended now goes to. Kept by stamp, which changes once a period.
+    let stamp = null;
+    let current = file;
+    function pathNow() {
+        if (!file || !period) return file;
+        const s = logStamp(period, Date.now());
+        if (s !== stamp) {
+            stamp = s;
+            current = logName(file, s);
+        }
+        return current;
+    }
 
     function append(rec) {
         if (!file) return;
@@ -820,24 +905,36 @@ function makeLog(file, flushSecs, label) {
             dropped++;
             return;
         }
-        buffer.push(JSON.stringify(rec) + '\n');
+        buffer.push({ to: pathNow(), line: JSON.stringify(rec) + '\n' });
     }
 
-    function flush(sync) {
-        if (!file || !buffer.length) return;
-        const n = buffer.length;
-        const chunk = buffer.splice(0, n).join('');
-        const failed = (e) => console.error(`${label}: append to ${file} failed, ${n} record(s) lost: ${e.message}`);
+    function write(to, chunk, n, sync) {
+        const failed = (e) => console.error(`${label}: append to ${to} failed, ${n} record(s) lost: ${e.message}`);
         try {
-            if (sync) fs.appendFileSync(file, chunk);
+            if (sync) fs.appendFileSync(to, chunk);
             else
-                fs.appendFile(file, chunk, (e) => {
+                fs.appendFile(to, chunk, (e) => {
                     if (e) failed(e);
                     else written += n;
                 });
             if (sync) written += n;
         } catch (e) {
             failed(e);
+        }
+    }
+
+    // A chunk per file, so a flush that straddles a period boundary puts each record in the file
+    // of the period it arrived in, not the one it happened to be flushed in.
+    function flush(sync) {
+        if (!file || !buffer.length) return;
+        const pending = buffer.splice(0, buffer.length);
+        for (let i = 0; i < pending.length; ) {
+            const to = pending[i].to;
+            let j = i;
+            let chunk = '';
+            while (j < pending.length && pending[j].to === to) chunk += pending[j++].line;
+            write(to, chunk, j - i, sync);
+            i = j;
         }
     }
 
@@ -850,18 +947,32 @@ function makeLog(file, flushSecs, label) {
 
     return {
         file,
+        period,
+        rotateBad: rotate && !period ? rotate : null,
+        pattern: file && period ? logName(file, 'YYYYMMDD') : file,
+        path: pathNow,
+        files: () => logFiles(file, period),
         append,
         flush,
         stat: () => ({ written, dropped, pending: buffer.length }),
     };
 }
 
-const packetLog = makeLog(LOG_FILE, LOG_FLUSH, 'log');
-const gnssLog = makeLog(TRACKER_LOG, TRACKER_LOG_FLUSH, 'tracker log');
+const packetLog = makeLog(LOG_FILE, LOG_FLUSH, 'log', LOG_ROTATE);
+const gnssLog = makeLog(TRACKER_LOG, TRACKER_LOG_FLUSH, 'tracker log', TRACKER_LOG_ROTATE);
 
 function logAppend(rec) {
     packetLog.append(rec);
 }
+
+// The categories other than variant, logged as received: all the gateway publishes on them, not
+// just what this page uses. Written t first, which is how the rebuild passes them unparsed.
+function logOther(topic, body, text) {
+    const category = topicCategory(topic);
+    if (category === 'variant' || !LOG_CATEGORIES.has(category)) return;
+    packetLog.append(body === undefined ? { t: Date.now(), topic, text } : { t: Date.now(), topic, body });
+}
+const isOtherLine = (line) => line.startsWith('{"t":'); // a packet record starts {"id":
 function gnssLogAppend(pos) {
     gnssLog.append(pos);
 }
@@ -954,7 +1065,7 @@ function snapshotLoad() {
 // already tens of megabytes and grows for as long as the site runs, while this box has under
 // half a gigabyte of RAM. A line that will not parse is counted and skipped — that is what a
 // log cut short by a power loss looks like, and it should cost the tail record, not the rebuild.
-function streamJsonLines(file, onRecord, done) {
+function streamJsonLines(file, onRecord, done, skip) {
     if (!file) return done(null, 0, 0);
     const stream = fs.createReadStream(file, { encoding: 'utf8' });
     let failed = false;
@@ -966,7 +1077,7 @@ function streamJsonLines(file, onRecord, done) {
     let n = 0;
     let bad = 0;
     rl.on('line', (line) => {
-        if (!line) return;
+        if (!line || (skip && skip(line))) return;
         let rec;
         try {
             rec = JSON.parse(line);
@@ -982,6 +1093,29 @@ function streamJsonLines(file, onRecord, done) {
     });
 }
 
+// The same over a log's files in order: one file, or a rotated log's whole run of them. A file
+// that fails is reported and skipped, so one unreadable day does not cost the rest.
+function streamJsonLinesAll(files, onRecord, done, skip) {
+    let n = 0;
+    let bad = 0;
+    const errors = [];
+    const next = (i) => {
+        if (i >= files.length) return done(errors.length ? new Error(errors.join('; ')) : null, n, bad);
+        streamJsonLines(
+            files[i],
+            onRecord,
+            (err, n1, bad1) => {
+                if (err) errors.push(files.length > 1 ? `${files[i]}: ${err.message}` : err.message);
+                n += n1;
+                bad += bad1;
+                next(i + 1);
+            },
+            skip
+        );
+    };
+    next(0);
+}
+
 function snapshotMake(done) {
     const t0 = Date.now();
     stats.clear();
@@ -989,8 +1123,8 @@ function snapshotMake(done) {
     gnss.length = 0;
     counter = 0;
 
-    streamJsonLines(
-        LOG_FILE,
+    streamJsonLinesAll(
+        packetLog.files(),
         (rec) => {
             if (!rec || rec.station === undefined) return;
             // The log may predate the filter, or a narrower mqtt-accept, so it applies here too.
@@ -1004,14 +1138,14 @@ function snapshotMake(done) {
             if (history.length > KEEP) history.shift();
         },
         (err, packets, bad) => {
-            if (err) console.error(`snapshot: rebuild from ${LOG_FILE} failed: ${err.message}`);
-            streamJsonLines(
-                TRACKER_LOG,
+            if (err) console.error(`snapshot: rebuild from ${packetLog.pattern} failed: ${err.message}`);
+            streamJsonLinesAll(
+                gnssLog.files(),
                 (pos) => {
                     if (pos && pos.lat != null && pos.lon != null) mergePosition(pos);
                 },
                 (err2, lines, bad2) => {
-                    if (err2) console.error(`snapshot: rebuild from ${TRACKER_LOG} failed: ${err2.message}`);
+                    if (err2) console.error(`snapshot: rebuild from ${gnssLog.pattern} failed: ${err2.message}`);
                     done({
                         packets,
                         bad: (bad || 0) + (bad2 || 0),
@@ -1021,7 +1155,8 @@ function snapshotMake(done) {
                     });
                 }
             );
-        }
+        },
+        isOtherLine // the bulk of the log once stats are in it, and nothing the rebuild uses
     );
 }
 
@@ -1169,6 +1304,7 @@ ${FAVICON}
   :root {
     --bg:#f6f7f9; --fg:#14171a; --dim:#6b7280; --line:#dfe3e8; --card:#fff;
     --good:#0a7d36; --ok:#a86400; --weak:#c02a2a;
+    --undeployed:.55; /* how far a device not yet deployed fades in the tables: 1 = not at all */
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) { --bg:#101215; --fg:#e6e8ea; --dim:#9aa3ad; --line:#262b31; --card:#181b1f;
@@ -1251,6 +1387,8 @@ ${FAVICON}
   td.state { font-size:11.5px; color:var(--dim); white-space:nowrap; }
   /* The station table's reading takes the width the rest can spare: the numbers shrink to fit,
      and a long name is cut short (its tooltip has all of it). Every heading sorts its column. */
+  /* a device whose state is not "deployed" is faded, so the ones out in the field stand out */
+  #sum tr.nd td, #gw tr.nd td { opacity:var(--undeployed); }
   #sum th { white-space:nowrap; cursor:pointer; user-select:none; }
   #sum th .u { text-transform:none; }
   #sum th.nm, #sum td.nm, #sum th.state, #sum td.state, #sum th.rd, #sum td.rd { text-align:left; }
@@ -1628,10 +1766,15 @@ function renderStats(rows) {
 
   for (var n = 0; n < rows.length; n++) {
     var tr = document.createElement('tr');
+    if (!deployed(rows[n])) tr.className = 'nd';
     for (var c = 0; c < COLS.length; c++) tr.appendChild(COLS[c].cell(rows[n]));
     tb.appendChild(tr);
   }
 }
+
+// Deployed is what station-<ID>-state says; anything else -- pending, soak-test, broken, or no state
+// at all -- is drawn faded, by the --undeployed opacity.
+function deployed(x) { return /^deployed$/i.test(x.state || ''); }
 
 // Tracker positions. The button in the title bar carries the count and nothing else until it
 // is pressed: for most of this page's life there is no survey running, and a permanently empty
@@ -1732,7 +1875,7 @@ function renderGateways(rows) {
 
   for (var n = 0; n < rows.length; n++) {
     var r = rows[n], tr = document.createElement('tr'), sub = [], rssi, rx, tx;
-    tr.className = r.role;
+    tr.className = r.role + (deployed(r) ? '' : ' nd');
     if (r.role === 'gateway') {
       var links = r.links || [], rxn = 0, txn = 0, bad = 0;
       for (var k = 0; k < links.length; k++) {
@@ -2173,11 +2316,14 @@ server.listen(PORT, BIND, () => {
     if (LOG_FILE) {
         // Fail loudly at startup rather than once every flush interval for the next two months.
         try {
-            fs.appendFileSync(LOG_FILE, '');
-            console.log(`  log     ${LOG_FILE}  (every packet, flushed every ${LOG_FLUSH}s)`);
+            fs.appendFileSync(packetLog.path(), '');
+            console.log(`  log     ${packetLog.pattern}  (${[...LOG_CATEGORIES].join(', ') || 'nothing'}; flushed every ${LOG_FLUSH}s${packetLog.period ? `, a new file ${packetLog.period}` : ''})`);
         } catch (e) {
-            console.error(`  log     ${LOG_FILE}  NOT WRITABLE: ${e.message}`);
+            console.error(`  log     ${packetLog.path()}  NOT WRITABLE: ${e.message}`);
         }
+        if (packetLog.rotateBad) console.error(`  log     UNKNOWN log-rotate-period '${packetLog.rotateBad}': one file, not rotated (known: ${LOG_ROTATE_PERIODS.join(', ')})`);
+        const strange = [...LOG_CATEGORIES].filter((c) => !GATEWAY_CATEGORIES.includes(c));
+        if (strange.length) console.error(`  log     log-categories: the gateway publishes no '${strange.join("', '")}' (it has ${GATEWAY_CATEGORIES.join(', ')})`);
     } else console.log('  log     (not configured: set log-file to record packets)');
 
     if (TRACKER) {
@@ -2186,11 +2332,12 @@ server.listen(PORT, BIND, () => {
         if (TRACKER_LOG) {
             // Same reasoning as the packet log: fail at startup, not once a minute for a month.
             try {
-                fs.appendFileSync(TRACKER_LOG, '');
-                console.log(`  tracker log ${TRACKER_LOG}  (every position, flushed every ${TRACKER_LOG_FLUSH}s)`);
+                fs.appendFileSync(gnssLog.path(), '');
+                console.log(`  tracker log ${gnssLog.pattern}  (every position, flushed every ${TRACKER_LOG_FLUSH}s${gnssLog.period ? `, a new file ${gnssLog.period}` : ''})`);
             } catch (e) {
-                console.error(`  tracker log ${TRACKER_LOG}  NOT WRITABLE: ${e.message}`);
+                console.error(`  tracker log ${gnssLog.path()}  NOT WRITABLE: ${e.message}`);
             }
+            if (gnssLog.rotateBad) console.error(`  tracker log UNKNOWN tracker-log-rotate-period '${gnssLog.rotateBad}': one file, not rotated (known: ${LOG_ROTATE_PERIODS.join(', ')})`);
         } else console.log('  tracker log (not configured: set tracker-log-file to record positions)');
     } else console.log('  tracker (not configured: set tracker-host to follow a gnss tracker)');
 
